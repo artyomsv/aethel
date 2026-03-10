@@ -1,0 +1,196 @@
+# Architecture Decisions
+
+This document records the key architectural decisions for Aethel and the reasoning behind them.
+
+## ADR-1: Client-Daemon Architecture
+
+**Decision:** Split Aethel into two binaries — `aethel` (TUI client) and `aetheld` (background daemon).
+
+**Context:** A terminal multiplexer needs to outlive any single terminal session. The daemon manages PTY sessions and state, while clients attach/detach freely.
+
+**Consequences:**
+
+- Sessions survive client disconnection — close the terminal, reopen, and reattach
+- Multiple clients can observe the same workspace simultaneously
+- Daemon auto-starts on first `aethel` invocation if not already running
+- Adds IPC complexity vs. a single-process design
+
+## ADR-2: Length-Prefixed JSON over IPC
+
+**Decision:** Use a length-prefixed JSON protocol over Unix domain sockets (Linux/macOS) and Named Pipes (Windows).
+
+**Format:**
+
+```
+[4 bytes: uint32 big-endian length][JSON payload]
+```
+
+**Alternatives considered:**
+
+| Option | Rejected because |
+|---|---|
+| gRPC | Heavy dependency for local-only IPC. Protobuf adds build complexity. |
+| MessagePack | Binary format harder to debug. JSON is human-readable in logs. |
+| Raw newline-delimited JSON | Can't handle payloads containing newlines (e.g., PTY output). |
+
+**Consequences:**
+
+- Simple to implement — ~100 lines for the full protocol
+- Debuggable — JSON messages can be logged and inspected
+- 4-byte length prefix handles arbitrary payload sizes
+- Sufficient throughput for local terminal I/O
+
+## ADR-3: Cross-Platform PTY via Build Tags
+
+**Decision:** Use Go build tags to provide platform-specific PTY implementations behind a common `Session` interface.
+
+**Implementation:**
+
+| Platform | Library | Build tag |
+|---|---|---|
+| Linux, macOS, FreeBSD | `creack/pty/v2` | `//go:build linux \|\| darwin \|\| freebsd` |
+| Windows | `charmbracelet/x/conpty` | `//go:build windows` |
+
+**Interface:**
+
+```go
+type Session interface {
+    Start(shell string, args []string) error
+    Read(p []byte) (int, error)
+    Write(p []byte) (int, error)
+    Resize(cols, rows int) error
+    Close() error
+    Pid() int
+}
+```
+
+**Consequences:**
+
+- Single codebase compiles for all platforms
+- Each platform uses its native PTY mechanism
+- Interface abstraction keeps daemon code platform-agnostic
+- ConPTY API differences (e.g., `Spawn()` vs `exec.Command()`) are isolated
+
+## ADR-4: Bubble Tea v1 for TUI
+
+**Decision:** Use Bubble Tea v1 (`github.com/charmbracelet/bubbletea` v1.3.10) with Lipgloss v1 for the TUI.
+
+**Context:** Bubble Tea v2 was not available in the Go module proxy at the time of development. v1 is stable and well-documented.
+
+**Consequences:**
+
+- Stable, well-tested framework
+- Elm Architecture (Model-Update-View) provides clean state management
+- Lipgloss handles cross-platform terminal styling
+- Migration to v2 is possible later with manageable API changes
+
+## ADR-5: Hybrid Storage — JSON + SQLite
+
+**Decision:** Use JSON for configuration and workspace state, SQLite for volatile cached data.
+
+| Layer | Format | What | Why |
+|---|---|---|---|
+| Configuration | TOML | `config.toml`, plugin definitions | Human-readable, hand-editable, git-friendly |
+| Workspace state | JSON | `workspace.json` | Source of truth for layout. Human-inspectable. Atomic writes via temp+rename. |
+| Volatile data | SQLite | Ghost buffers, token history, session logs | High-write frequency, queryable. Rebuildable cache — can be deleted safely. |
+
+**Alternatives considered:**
+
+| Option | Rejected because |
+|---|---|
+| SQLite for everything | Config files should be hand-editable. TOML/JSON is more accessible. |
+| JSON for everything | Ghost buffers write frequently. JSON append is not crash-safe for high-frequency writes. |
+| BoltDB / bbolt | SQLite has better tooling, broader ecosystem, and handles concurrent reads well. |
+
+## ADR-6: Plugin System via TOML
+
+**Decision:** Pane types are defined as TOML plugin files in `~/.aethel/plugins/`. No compiled plugins or scripting engine.
+
+**Plugin schema:**
+
+```toml
+[plugin]
+name = "ai"
+display_name = "AI Assistant"
+
+[scraper]
+patterns = ['(?P<SessionID>Conversation ID: [a-f0-9-]+)']
+
+[resume]
+command = "claude --resume {{.SessionID}}"
+fallback = "claude"
+
+[display]
+border_rules = [
+  { pattern = "Error", color = "red" },
+  { pattern = "Success", color = "green" },
+]
+```
+
+**Consequences:**
+
+- Users create custom pane types without recompiling
+- Hot-reload — daemon watches plugin directory for changes
+- No arbitrary code execution — plugins are declarative config
+- Scraper patterns use Go regex, resume commands use Go `text/template`
+- Ships with 4 built-in plugins: `ai`, `webhook`, `infrastructure`, `build`
+
+## ADR-7: Workspace State Persistence Strategy
+
+**Decision:** Atomic writes with backup for crash safety.
+
+**Process:**
+
+1. Serialize workspace state to JSON
+2. Write to `workspace.json.tmp`
+3. Rename `workspace.json` to `workspace.json.bak`
+4. Rename `workspace.json.tmp` to `workspace.json`
+
+**Triggers:** Structural changes (tab/pane create/delete), configurable interval (default 30s), clean shutdown.
+
+**Consequences:**
+
+- No partial writes — `os.Rename` is atomic on all target platforms
+- Previous state always available as `.bak` for manual recovery
+- Human-readable format enables debugging with `cat` or `jq`
+
+## ADR-8: Go as the Implementation Language
+
+**Decision:** Go (Golang) for the entire project.
+
+**Rationale:**
+
+- Single static binary per platform — no runtime dependencies
+- First-class concurrency (goroutines for PTY I/O, IPC, scrapers)
+- Excellent cross-compilation (`GOOS`/`GOARCH`)
+- Strong standard library for networking, file I/O, JSON, regex
+- Bubble Tea and the Charm ecosystem are Go-native
+
+**Alternatives considered:**
+
+| Language | Rejected because |
+|---|---|
+| Rust | Steeper learning curve, slower iteration for prototyping |
+| Python | Not suitable for terminal multiplexing performance. Deployment complexity. |
+| TypeScript (Node) | Poor PTY support on Windows. Runtime dependency. |
+
+## Storage Layout
+
+```
+~/.aethel/
+├── config.toml
+├── state/
+│   ├── workspace.json
+│   └── workspace.json.bak
+├── data/
+│   └── aethel.db           # SQLite
+├── plugins/
+│   ├── ai.toml
+│   ├── build.toml
+│   ├── infrastructure.toml
+│   └── webhook.toml
+├── logs/
+│   └── aetheld.log
+└── secrets/
+    └── tokens.enc
+```
