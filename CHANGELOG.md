@@ -19,3 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `aethel daemon start/stop` CLI commands
 - Length-prefixed JSON IPC protocol with typed messages
 - Default shell workspace created on first attach
+- Docker-based development workflow (`dev.sh`) — no local Go or make required
+- Multi-stage Dockerfile producing minimal scratch-based release images
+- `.dockerignore` for optimized Docker build context
