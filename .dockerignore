@@ -1,0 +1,28 @@
+.git
+.idea/
+.vscode/
+.claude/
+
+# Built binaries
+/aethel
+/aetheld
+/aethel.exe
+/aetheld.exe
+/dist/
+/bin/
+
+# Go
+/vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs (not needed for build)
+*.md
+docs/
+LICENSE
+
+# Test output
+*.test
+cover.out

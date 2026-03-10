@@ -28,17 +28,19 @@ Client-daemon model:
 
 ## Building
 
-Go is NOT installed locally. Use Docker:
+Go and make are NOT installed locally. Use `dev.sh` (Docker-based):
 
 ```bash
-docker run --rm -v "E:/Projects/Stukans/Prototypes/calyx:/workspace" -w //workspace golang:1.24-alpine go build ./...
+./dev.sh build        # Build both binaries
+./dev.sh test         # Run tests
+./dev.sh test-race    # Tests with race detector (CGo — handled automatically)
+./dev.sh vet          # Lint
+./dev.sh cross        # Cross-compile all platforms
+./dev.sh image        # Build scratch-based Docker image
+./dev.sh clean        # Remove built binaries
 ```
 
-For tests with race detector (needs CGo):
-```bash
-docker run --rm -v "E:/Projects/Stukans/Prototypes/calyx:/workspace" -w //workspace golang:1.24-alpine \
-  sh -c "apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go test -race ./..."
-```
+Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeated builds.
 
 ## Key Conventions
 

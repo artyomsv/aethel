@@ -2,36 +2,38 @@
 
 ## Prerequisites
 
-- Go 1.24+ (or Docker — see below)
 - Git
+- **One of:**
+  - Docker (recommended — no local Go required)
+  - Go 1.24+
 
 ## Building
 
-### With Go installed
+### With Docker (no local Go or make required)
+
+```bash
+./dev.sh build        # Build both binaries
+./dev.sh test         # Run tests
+./dev.sh test-race    # Tests with race detector
+./dev.sh vet          # Lint
+./dev.sh cross        # Cross-compile all platforms
+./dev.sh image        # Build minimal Docker image
+./dev.sh clean        # Remove built binaries
+```
+
+### With local Go + make
 
 ```bash
 make build
-```
-
-### With Docker (no local Go required)
-
-```bash
-docker run --rm -v "$(pwd):/workspace" -w /workspace golang:1.24-alpine \
-  sh -c "go build -o /dev/null ./cmd/aethel && go build -o /dev/null ./cmd/aetheld"
-```
-
-## Testing
-
-```bash
-# Run all tests
 make test
-
-# With race detector (requires CGo)
 make test-race
-
-# Single package
-go test -v ./internal/config/...
+make vet
+make cross
 ```
+
+> **Note:** The Docker image is for building release binaries. Running the daemon
+> inside a container is not practical — it needs host PTY access for terminal
+> session management.
 
 ## Project Structure
 
@@ -67,7 +69,7 @@ PTY and IPC layers have platform-specific implementations:
 When modifying these, ensure the `Session` interface in `session.go` is satisfied on all platforms. Verify with:
 
 ```bash
-make cross
+./dev.sh cross   # or: make cross (with local Go)
 ```
 
 ## Commit Messages

@@ -71,17 +71,16 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design decisions.
 
 ### Prerequisites
 
-- Go 1.24+
+- Docker **or** Go 1.24+
 
 ### Build
 
 ```bash
-# Build both binaries
-make build
+# With Docker (no local Go required)
+./dev.sh build
 
-# Or build individually
-go build -o aethel ./cmd/aethel
-go build -o aetheld ./cmd/aetheld
+# With local Go
+make build
 ```
 
 ### Run
@@ -146,19 +145,16 @@ internal/
 
 ## Development
 
-```bash
-# Run tests
-make test
+All commands are available via `dev.sh` (Docker, no local Go) or `make` (local Go):
 
-# Run tests with race detector
-make test-race
-
-# Cross-compile for all platforms
-make cross
-
-# Lint
-make vet
-```
+| Task | Docker | Local Go |
+|---|---|---|
+| Build | `./dev.sh build` | `make build` |
+| Test | `./dev.sh test` | `make test` |
+| Test + race detector | `./dev.sh test-race` | `make test-race` |
+| Lint | `./dev.sh vet` | `make vet` |
+| Cross-compile | `./dev.sh cross` | `make cross` |
+| Docker image | `./dev.sh image` | — |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 
