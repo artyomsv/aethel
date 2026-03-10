@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/stukans/aethel/internal/config"
-	"github.com/stukans/aethel/internal/daemon"
+	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/aethel/internal/daemon"
 )
 
 func main() {

@@ -9,9 +9,9 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/stukans/aethel/internal/config"
-	"github.com/stukans/aethel/internal/ipc"
-	apty "github.com/stukans/aethel/internal/pty"
+	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/aethel/internal/ipc"
+	apty "github.com/artyomsv/aethel/internal/pty"
 )
 
 type Daemon struct {

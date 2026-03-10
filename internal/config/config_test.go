@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stukans/aethel/internal/config"
+	"github.com/artyomsv/aethel/internal/config"
 )
 
 func TestLoadDefaults(t *testing.T) {

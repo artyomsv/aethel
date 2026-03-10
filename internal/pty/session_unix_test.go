@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stukans/aethel/internal/pty"
+	"github.com/artyomsv/aethel/internal/pty"
 )
 
 func TestStartAndReadOutput(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stukans/aethel/internal/ipc"
+	"github.com/artyomsv/aethel/internal/ipc"
 )
 
 func TestServerClientRoundTrip(t *testing.T) {

@@ -1,4 +1,4 @@
-module github.com/stukans/aethel
+module github.com/artyomsv/aethel
 
 go 1.24.13
 

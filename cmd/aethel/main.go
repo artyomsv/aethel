@@ -7,9 +7,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/stukans/aethel/internal/config"
-	"github.com/stukans/aethel/internal/ipc"
-	"github.com/stukans/aethel/internal/tui"
+	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/aethel/internal/tui"
 )
 
 func main() {

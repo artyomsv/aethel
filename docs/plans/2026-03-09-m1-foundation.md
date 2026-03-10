@@ -61,7 +61,7 @@ Thumbs.db
 **Step 3: Initialize Go module**
 
 ```bash
-go mod init github.com/stukans/aethel
+go mod init github.com/artyomsv/aethel
 ```
 
 **Step 4: Add core dependencies**
@@ -137,7 +137,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stukans/aethel/internal/config"
+	"github.com/artyomsv/aethel/internal/config"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -541,7 +541,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stukans/aethel/internal/pty"
+	"github.com/artyomsv/aethel/internal/pty"
 )
 
 func TestStartAndReadOutput(t *testing.T) {
@@ -653,7 +653,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/stukans/aethel/internal/ipc"
+	"github.com/artyomsv/aethel/internal/ipc"
 )
 
 func TestWriteReadMessage(t *testing.T) {
@@ -921,7 +921,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stukans/aethel/internal/ipc"
+	"github.com/artyomsv/aethel/internal/ipc"
 )
 
 func TestServerClientRoundTrip(t *testing.T) {
@@ -1206,7 +1206,7 @@ package daemon_test
 import (
 	"testing"
 
-	"github.com/stukans/aethel/internal/daemon"
+	"github.com/artyomsv/aethel/internal/daemon"
 )
 
 func TestSessionManagerCreateTab(t *testing.T) {
@@ -1309,7 +1309,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	apty "github.com/stukans/aethel/internal/pty"
+	apty "github.com/artyomsv/aethel/internal/pty"
 )
 
 type Tab struct {
@@ -1537,9 +1537,9 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/stukans/aethel/internal/config"
-	"github.com/stukans/aethel/internal/ipc"
-	apty "github.com/stukans/aethel/internal/pty"
+	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/aethel/internal/ipc"
+	apty "github.com/artyomsv/aethel/internal/pty"
 )
 
 type Daemon struct {
@@ -1797,9 +1797,9 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/stukans/aethel/internal/config"
-	"github.com/stukans/aethel/internal/ipc"
-	apty "github.com/stukans/aethel/internal/pty"
+	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/aethel/internal/ipc"
+	apty "github.com/artyomsv/aethel/internal/pty"
 )
 ```
 
@@ -1841,8 +1841,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/stukans/aethel/internal/config"
-	"github.com/stukans/aethel/internal/daemon"
+	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/aethel/internal/daemon"
 )
 
 func main() {
@@ -2113,7 +2113,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss/v2"
-	"github.com/stukans/aethel/internal/ipc"
+	"github.com/artyomsv/aethel/internal/ipc"
 )
 
 // Messages from daemon
@@ -2502,9 +2502,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
-	"github.com/stukans/aethel/internal/config"
-	"github.com/stukans/aethel/internal/ipc"
-	"github.com/stukans/aethel/internal/tui"
+	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/aethel/internal/tui"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	apty "github.com/stukans/aethel/internal/pty"
+	apty "github.com/artyomsv/aethel/internal/pty"
 )
 
 type Tab struct {

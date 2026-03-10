@@ -7,7 +7,7 @@ Aethel is a persistent workflow orchestrator / terminal multiplexer for AI-nativ
 ## Tech Stack
 
 - **Language:** Go 1.24
-- **Module path:** `github.com/stukans/aethel`
+- **Module path:** `github.com/artyomsv/aethel`
 - **TUI:** Bubble Tea v1 (`github.com/charmbracelet/bubbletea` v1.3.10)
 - **Styling:** Lipgloss v1 (`github.com/charmbracelet/lipgloss` v1.1.0)
 - **PTY (Unix):** `creack/pty/v2`
