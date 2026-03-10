@@ -1,0 +1,372 @@
+# Aethel — Product Requirements Document
+
+**The Persistent Workflow Orchestrator for AI-Native Development**
+
+| Field | Value |
+|---|---|
+| Author | Artjoms Stukans |
+| Date | 2026-03-09 |
+| Status | Draft |
+| Version | 1.0 |
+
+---
+
+## 1. Problem Statement
+
+Agentic developers run complex multi-tool workflows — AI assistants (Claude Code, Cursor), webhook listeners, build watchers, SSH tunnels — across multiple terminal sessions. Every reboot, crash, or context switch destroys this carefully assembled environment. Re-opening tabs, re-attaching sessions, and re-typing resume commands is a daily tax that breaks flow and wastes time.
+
+**Existing tools fail because:**
+
+- **tmux/screen:** Persist shells but have no concept of "projects" or typed sessions. No automatic resume of AI tools. No session-ID extraction.
+- **Terminal emulators (WezTerm, Windows Terminal):** Great rendering, zero persistence across reboots.
+- **IDE terminals:** Tied to a single editor. Can't orchestrate standalone CLI tools.
+
+**Success criteria:** Time from boot to "fully productive" drops from 10-15 minutes of manual setup to under 30 seconds.
+
+## 2. User Persona: The Agentic Developer
+
+A developer who runs 5-10 terminal sessions per project: 2-3 Claude Code sessions, a webhook listener, a build watcher, maybe an SSH tunnel. They want to type `aethel` after a reboot and have their entire workspace snap back — AI conversations resumed, webhooks re-connected, builds re-watching.
+
+**Primary audience:** Developers who work with AI coding assistants and run multi-tool terminal workflows daily.
+
+**Secondary audience:** Any developer managing persistent terminal environments (DevOps, SREs, backend engineers with long-running processes).
+
+## 3. Tech Stack
+
+| Component | Technology | Rationale |
+|---|---|---|
+| Language | Go (Golang) | High concurrency, easy cross-platform binaries, no runtime dependency |
+| TUI Framework | Bubble Tea | Rich interactive TUI, active ecosystem, Go-native |
+| PTY Management | `creack/pty` (Unix), ConPTY (Windows) | Cross-platform terminal session management |
+| Syntax Highlighting | Chroma | Go-native, extensive language support |
+| IPC | Unix Domain Sockets (Linux/macOS), Named Pipes (Windows) | Fast local communication, OS-native |
+| Config Format | TOML | Human-readable, well-supported in Go |
+| State Storage | JSON (config/state), SQLite (buffers/history) | Readable config + queryable historical data |
+
+## 4. Architecture Overview
+
+### 4.1 Client-Daemon Model
+
+```
+┌─────────────────────────────────────────────┐
+│  aethel (TUI Client)                        │
+│  ┌─────────┬─────────┬─────────┐            │
+│  │ Tab 1   │ Tab 2   │ Tab 3   │            │
+│  ├─────────┴─────────┴─────────┤            │
+│  │  Pane Layout (splits)       │            │
+│  │  ┌──────────┬──────────┐    │            │
+│  │  │ AI Pane  │ Build    │    │            │
+│  │  │          │ Pane     │    │            │
+│  │  ├──────────┴──────────┤    │            │
+│  │  │ Webhook Pane        │    │            │
+│  │  └─────────────────────┘    │            │
+│  └─────────────────────────────┘            │
+│         ▲                                    │
+│         │ IPC (Unix Socket / Named Pipe)     │
+│         ▼                                    │
+│  aetheld (Daemon)                            │
+│  ┌─────────────────────────────┐            │
+│  │ Session Manager             │            │
+│  │  ├─ PTY Pool                │            │
+│  │  ├─ State Persistence       │            │
+│  │  ├─ Resume Engine           │            │
+│  │  ├─ Plugin Registry         │            │
+│  │  └─ Ghost Buffer Cache      │            │
+│  └─────────────────────────────┘            │
+└─────────────────────────────────────────────┘
+```
+
+### 4.2 Component Responsibilities
+
+| Component | Responsibility |
+|---|---|
+| `aetheld` (Daemon) | Manages PTY sessions, persists state, runs scrapers, handles process lifecycle. Starts on boot or on first `aethel` invocation. |
+| `aethel` (Client) | Bubble Tea TUI. Renders panes, handles input, manages layout. Connects to daemon via IPC. Multiple clients can attach simultaneously. |
+| **Session Manager** | Creates/destroys PTY sessions. Assigns pane types. Routes I/O between client and PTYs. |
+| **State Persistence** | Snapshots tabs, panes, layout, and metadata to `~/.aethel/`. Runs on a configurable interval + on every structural change. |
+| **Resume Engine** | Regex scrapers that watch PTY output. Stores extracted tokens. Executes resume templates on re-hydration. |
+| **Plugin Registry** | Loads pane type definitions from `~/.aethel/plugins/`. Each plugin defines: display behavior, scraper patterns, resume templates, status indicators. |
+| **Ghost Buffer** | Caches last N lines of each pane's output to SQLite. Renders immediately on reconnect while shells re-initialize. |
+
+### 4.3 IPC Protocol
+
+Length-prefixed JSON messages over Unix domain sockets (Linux/macOS) or Named Pipes (Windows). Simple, debuggable, sufficient for local IPC.
+
+### 4.4 Storage Layout
+
+```
+~/.aethel/
+├── config.toml              # User configuration
+├── state/
+│   ├── workspace.json       # Tabs, panes, layout, metadata
+│   └── workspace.json.bak   # Previous snapshot (rollback)
+├── data/
+│   └── aethel.db            # SQLite: ghost buffers, token history, session logs
+├── plugins/
+│   ├── ai.toml              # Built-in plugin
+│   ├── build.toml
+│   ├── infrastructure.toml
+│   ├── webhook.toml
+│   └── stripe-webhook.toml  # User-defined plugin example
+├── logs/
+│   └── aetheld.log
+└── secrets/
+    └── tokens.enc           # Encrypted scraped tokens
+```
+
+**JSON** handles: config, workspace state, plugin definitions.
+**SQLite** handles: ghost buffer storage, scraped token history, session logs.
+
+SQLite is treated as a cache — it can be rebuilt from scratch if corrupted. JSON files are the source of truth for configuration and workspace structure.
+
+## 5. Functional Requirements
+
+### FR-1: Session & PTY Management
+
+| ID | Requirement |
+|---|---|
+| FR-1.1 | Daemon creates and manages PTY sessions (Linux/macOS via `creack/pty`, Windows via ConPTY). |
+| FR-1.2 | Multiple clients can attach to the same daemon simultaneously (read-only observers or active controllers). |
+| FR-1.3 | Daemon auto-starts on first `aethel` invocation if not already running. |
+| FR-1.4 | Daemon runs as a background process; survives client disconnection. |
+| FR-1.5 | Graceful shutdown — daemon sends SIGHUP to child processes, waits for clean exit, then persists final state. |
+
+### FR-2: State Persistence
+
+| ID | Requirement |
+|---|---|
+| FR-2.1 | Daemon snapshots full workspace state (tabs, panes, layout, working directories, pane types, metadata) to `~/.aethel/state/`. |
+| FR-2.2 | Snapshots trigger on: structural changes (tab/pane create/delete/move), configurable interval (default 30s), and clean shutdown. |
+| FR-2.3 | On startup, daemon reads last snapshot and re-hydrates the workspace. |
+| FR-2.4 | State format is human-readable JSON for debugging and manual recovery. |
+
+### FR-3: Ghost Buffer
+
+| ID | Requirement |
+|---|---|
+| FR-3.1 | Daemon continuously caches the last 500 lines (configurable) of each pane's output to SQLite. |
+| FR-3.2 | On client attach/re-attach, ghost buffer renders immediately — before the shell has produced any new output. |
+| FR-3.3 | Ghost buffer content is visually distinguished (dimmed or labeled) until live output replaces it. |
+
+### FR-4: Abstract Resume Engine
+
+| ID | Requirement |
+|---|---|
+| FR-4.1 | Each pane type defines zero or more regex scraper patterns that watch PTY output for tokens (e.g., session IDs). |
+| FR-4.2 | Extracted tokens are stored in the pane's metadata within the state snapshot and in SQLite for history. |
+| FR-4.3 | Each pane type defines a resume command template (Go `text/template` syntax) that can reference scraped tokens. |
+| FR-4.4 | On re-hydration, daemon executes the resume command instead of a bare shell. If no resume command is defined, a standard shell opens in the pane's last working directory. |
+
+### FR-5: Plugin System (Pane Types)
+
+| ID | Requirement |
+|---|---|
+| FR-5.1 | Pane types are defined as plugin configs in `~/.aethel/plugins/<name>.toml`. |
+| FR-5.2 | A plugin definition includes: display name, scraper patterns, resume template, status line format, border color rules, and quick actions. |
+| FR-5.3 | Aethel ships with 4 built-in plugins: `ai`, `webhook`, `infrastructure`, `build`. |
+| FR-5.4 | Users can create custom plugins without recompiling Aethel. |
+| FR-5.5 | Plugin hot-reload — changes to plugin files take effect without daemon restart. |
+
+#### Plugin Definition Example: AI Pane
+
+```toml
+# ~/.aethel/plugins/ai.toml
+
+[plugin]
+name = "ai"
+display_name = "AI Assistant"
+description = "Optimized for AI coding assistants with session resumption"
+
+[scraper]
+patterns = [
+  '(?P<SessionID>Conversation ID: [a-f0-9-]+)',
+  '(?P<SessionID>Session: [a-f0-9]+)',
+  '(?P<SessionID>Resuming session [a-f0-9-]+)',
+]
+
+[resume]
+command = "claude --resume {{.SessionID}}"
+fallback = "claude"
+
+[display]
+markdown_rendering = true
+border_rules = [
+  { pattern = "Error|error|FAIL", color = "red" },
+  { pattern = "Success|PASS", color = "green" },
+]
+
+[status_line]
+format = "AI: {{.SessionID | truncate 8}}"
+
+[actions]
+items = [
+  { key = "n", label = "New conversation", command = "claude" },
+  { key = "r", label = "Resume last", command = "claude --resume {{.SessionID}}" },
+]
+```
+
+#### Plugin Definition Example: Custom Stripe Webhook
+
+```toml
+# ~/.aethel/plugins/stripe-webhook.toml
+
+[plugin]
+name = "stripe-webhook"
+display_name = "Stripe Webhooks"
+description = "Monitors Stripe CLI webhook forwarding"
+
+[scraper]
+patterns = [
+  '(?P<WebhookSecret>whsec_[a-zA-Z0-9]+)',
+]
+
+[resume]
+command = "stripe listen --forward-to localhost:8080/webhooks"
+fallback = "stripe listen --forward-to localhost:8080/webhooks"
+
+[display]
+border_rules = [
+  { pattern = "\\[200\\]", color = "green" },
+  { pattern = "\\[4[0-9]{2}\\]|\\[5[0-9]{2}\\]", color = "red" },
+  { pattern = "-->", color = "orange" },
+]
+
+[status_line]
+format = "Stripe: listening"
+
+[actions]
+items = [
+  { key = "t", label = "Trigger test event", command = "stripe trigger payment_intent.succeeded" },
+]
+```
+
+### FR-6: Layout & UI
+
+| ID | Requirement |
+|---|---|
+| FR-6.1 | Tabs with configurable dock position (top, bottom, left, right). |
+| FR-6.2 | Panes support vertical and horizontal splits, infinitely nested. |
+| FR-6.3 | Panes can be manually named or auto-named from the running process. |
+| FR-6.4 | JSON transformer hotkey (`Ctrl+J`) toggles raw/minified/pretty-printed with syntax highlighting (via Chroma). |
+| FR-6.5 | Keyboard-driven navigation with configurable keybindings. |
+
+## 6. Non-Functional Requirements
+
+### NFR-1: Performance
+
+| Metric | Target |
+|---|---|
+| Daemon startup | < 500ms cold start |
+| Client attach | < 200ms to render ghost buffer |
+| Pane switching latency | < 50ms |
+| Memory per PTY session | < 10MB (excluding ghost buffer) |
+| Ghost buffer disk per pane | < 1MB (500 lines) |
+| Max concurrent sessions | 50+ panes without degradation |
+| State snapshot write | < 100ms (non-blocking to I/O) |
+
+### NFR-2: Security
+
+| ID | Requirement |
+|---|---|
+| NFR-2.1 | Daemon IPC socket uses filesystem permissions (owner-only: `0700` for socket directory). Named Pipes on Windows use ACLs restricted to current user. |
+| NFR-2.2 | Ghost buffer files (SQLite DB) are stored with `0600` permissions — pane output may contain secrets. |
+| NFR-2.3 | Plugin definitions are config only — they cannot execute arbitrary code outside of defined command templates. No shell expansion in scraper patterns. |
+| NFR-2.4 | State snapshots must not store scraped tokens in plaintext — use OS keyring integration (or at minimum, file-level encryption) for sensitive tokens. |
+| NFR-2.5 | Daemon logs must redact patterns matching known secret formats (API keys, tokens, passwords). |
+
+### NFR-3: Observability
+
+| ID | Requirement |
+|---|---|
+| NFR-3.1 | Daemon logs to `~/.aethel/logs/aetheld.log` with structured JSON logging. |
+| NFR-3.2 | Log levels: `debug`, `info`, `warn`, `error`. Default: `info`. Configurable via `config.toml`. |
+| NFR-3.3 | Log rotation: max 10MB per file, 3 files retained. |
+| NFR-3.4 | `aethel status` command shows: daemon uptime, active sessions, memory usage, last snapshot time. |
+| NFR-3.5 | `aethel debug <pane-id>` dumps pane metadata, scraper state, and last 50 IPC messages for troubleshooting. |
+
+### NFR-4: Platform Support
+
+| Platform | PTY Method | IPC Method |
+|---|---|---|
+| Linux | `creack/pty` | Unix Domain Socket |
+| macOS | `creack/pty` | Unix Domain Socket |
+| Windows | ConPTY | Named Pipes |
+
+All three platforms supported from day one. Go's cross-compilation makes this feasible with platform-specific build tags for PTY and IPC layers.
+
+## 7. Milestones
+
+### M1: Foundation — Daemon + Shell + TUI
+
+> **Goal:** `aethel` launches a daemon, opens a Bubble Tea TUI with one tab and one pane running a shell. Basic split support.
+
+- `aetheld` daemon with PTY management (cross-platform)
+- `aethel` client with Bubble Tea UI
+- IPC via Unix sockets / Named Pipes
+- Tab creation/switching
+- Vertical/horizontal pane splits
+- Keyboard navigation between panes
+- Basic `config.toml` loading
+
+### M2: Persistence — Reboot-Proof Sessions
+
+> **Goal:** Close `aethel`, reboot, run `aethel` again — tabs, panes, and layout are restored. Ghost buffers show previous output instantly.
+
+- State snapshotting (JSON) on interval + structural changes
+- Workspace re-hydration on startup
+- Ghost buffer system (SQLite-backed)
+- Visual distinction for ghost buffer content (dimmed)
+- `aetheld` auto-start on first client invocation
+- Daemon graceful shutdown with state persist
+
+### M3: Resume Engine — AI Sessions Survive Reboots
+
+> **Goal:** Claude Code session IDs are automatically scraped and sessions resume on re-hydration.
+
+- Regex scraper framework watching PTY output
+- Token extraction and storage (SQLite)
+- Resume command template execution on re-hydration
+- Built-in `ai` plugin with Claude Code patterns
+- Fallback to plain shell when no tokens captured
+
+### M4: Plugin System + Typed Panes
+
+> **Goal:** Users can define custom pane types. Ship with 4 built-in plugins.
+
+- Plugin loader from `~/.aethel/plugins/*.toml`
+- Plugin hot-reload
+- Built-in plugins: `ai`, `webhook`, `infrastructure`, `build`
+- Border color rules based on output patterns
+- Status line rendering per pane type
+- Quick actions menu per pane type
+- Pane auto-naming from process / plugin config
+
+### M5: Polish — Advanced UI + Developer Experience
+
+> **Goal:** Production-quality UX. JSON transformer, tab docking, observability commands.
+
+- JSON transformer (`Ctrl+J`) with Chroma highlighting
+- Tab dock positions (top/bottom/left/right)
+- Configurable keybindings
+- `aethel status` and `aethel debug` commands
+- Structured logging with rotation
+- Secret redaction in logs
+- Encrypted token storage
+
+## 8. Success Metrics
+
+| Metric | Target |
+|---|---|
+| Time to full workspace after reboot | < 30 seconds |
+| AI session resume success rate | > 90% (when tool exposes session IDs) |
+| Plugin creation time (new pane type) | < 5 minutes for a simple plugin |
+| Crash recovery (daemon restart) | Full workspace restored from last snapshot |
+| Cross-platform parity | All FR/NFR items work on Linux, macOS, and Windows |
+
+## 9. Out of Scope (v1)
+
+- Remote/networked session sharing (multi-machine)
+- GUI/electron-based client
+- Built-in file editor or IDE features
+- Package manager / plugin marketplace
+- Cloud sync of workspace state
