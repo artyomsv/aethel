@@ -15,3 +15,15 @@ type Session interface {
 	// Pid returns the process ID of the running command.
 	Pid() int
 }
+
+// NewWithSize creates a new PTY session with the given initial dimensions.
+// Falls back to 80x24 if cols or rows are 0.
+func NewWithSize(cols, rows int) Session {
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	return newWithSize(cols, rows)
+}

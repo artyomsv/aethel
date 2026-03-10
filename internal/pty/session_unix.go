@@ -12,15 +12,22 @@ import (
 type unixSession struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
+	cols int
+	rows int
 }
 
 func New() Session {
-	return &unixSession{}
+	return &unixSession{cols: 80, rows: 24}
+}
+
+func newWithSize(cols, rows int) Session {
+	return &unixSession{cols: cols, rows: rows}
 }
 
 func (s *unixSession) Start(cmd string, args ...string) error {
 	s.cmd = exec.Command(cmd, args...)
-	ptmx, err := cpty.Start(s.cmd)
+	ws := &cpty.Winsize{Cols: uint16(s.cols), Rows: uint16(s.rows)}
+	ptmx, err := cpty.StartWithSize(s.cmd, ws)
 	if err != nil {
 		return err
 	}

@@ -42,6 +42,11 @@ type Message struct {
 
 // Payload types
 
+type AttachPayload struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
 type CreatePanePayload struct {
 	TabID string `json:"tab_id"`
 	CWD   string `json:"cwd"`

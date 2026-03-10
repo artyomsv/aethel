@@ -59,7 +59,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resizeTabs()
-		return m, nil
+		return m, m.resizeAllPanes()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -71,6 +71,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case WorkspaceStateMsg:
 		m.applyWorkspaceState(msg)
 		m.resizeTabs()
+		return m, m.listenForMessages()
+
+	case listenContinueMsg:
 		return m, m.listenForMessages()
 	}
 
@@ -228,17 +231,23 @@ func (m Model) renderStatusBar() string {
 
 func (m Model) attachToDaemon() tea.Cmd {
 	return func() tea.Msg {
-		msg, _ := ipc.NewMessage(ipc.MsgAttach, nil)
+		msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
+			Cols: m.width,
+			Rows: m.height,
+		})
 		m.client.Send(msg)
 		return nil
 	}
 }
 
+// listenContinueMsg signals the TUI to keep listening for daemon messages.
+type listenContinueMsg struct{}
+
 func (m Model) listenForMessages() tea.Cmd {
 	return func() tea.Msg {
 		msg, err := m.client.Receive()
 		if err != nil {
-			return nil
+			return tea.Quit()
 		}
 
 		switch msg.Type {
@@ -251,9 +260,11 @@ func (m Model) listenForMessages() tea.Cmd {
 			var raw map[string]any
 			msg.DecodePayload(&raw)
 			return parseWorkspaceState(raw)
-		}
 
-		return nil
+		default:
+			// Unknown message type — keep listening
+			return listenContinueMsg{}
+		}
 	}
 }
 
@@ -357,23 +368,9 @@ func (m Model) forwardInput(keyMsg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 
-		var data []byte
-		switch keyMsg.String() {
-		case "enter":
-			data = []byte("\r")
-		case "backspace":
-			data = []byte{0x7f}
-		case "space":
-			data = []byte(" ")
-		case "escape":
-			data = []byte{0x1b}
-		default:
-			s := keyMsg.String()
-			if len(s) == 1 {
-				data = []byte(s)
-			} else {
-				return nil
-			}
+		data := keyToBytes(keyMsg)
+		if data == nil {
+			return nil
 		}
 
 		msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
@@ -381,6 +378,106 @@ func (m Model) forwardInput(keyMsg tea.KeyMsg) tea.Cmd {
 			Data:   data,
 		})
 		m.client.Send(msg)
+		return nil
+	}
+}
+
+func keyToBytes(keyMsg tea.KeyMsg) []byte {
+	s := keyMsg.String()
+
+	switch s {
+	case "enter":
+		return []byte("\r")
+	case "backspace":
+		return []byte{0x7f}
+	case "space":
+		return []byte(" ")
+	case "escape":
+		return []byte{0x1b}
+	case "up":
+		return []byte("\x1b[A")
+	case "down":
+		return []byte("\x1b[B")
+	case "right":
+		return []byte("\x1b[C")
+	case "left":
+		return []byte("\x1b[D")
+	case "delete":
+		return []byte("\x1b[3~")
+	case "home":
+		return []byte("\x1b[H")
+	case "end":
+		return []byte("\x1b[F")
+	case "pgup":
+		return []byte("\x1b[5~")
+	case "pgdown":
+		return []byte("\x1b[6~")
+	case "insert":
+		return []byte("\x1b[2~")
+	case "f1":
+		return []byte("\x1bOP")
+	case "f2":
+		return []byte("\x1bOQ")
+	case "f3":
+		return []byte("\x1bOR")
+	case "f4":
+		return []byte("\x1bOS")
+	case "f5":
+		return []byte("\x1b[15~")
+	case "f6":
+		return []byte("\x1b[17~")
+	case "f7":
+		return []byte("\x1b[18~")
+	case "f8":
+		return []byte("\x1b[19~")
+	case "f9":
+		return []byte("\x1b[20~")
+	case "f10":
+		return []byte("\x1b[21~")
+	case "f11":
+		return []byte("\x1b[23~")
+	case "f12":
+		return []byte("\x1b[24~")
+	}
+
+	// Ctrl+letter → raw control character (0x01-0x1a)
+	if len(s) == 6 && s[:5] == "ctrl+" {
+		ch := s[5]
+		if ch >= 'a' && ch <= 'z' {
+			return []byte{ch - 'a' + 1}
+		}
+	}
+
+	// Single printable character
+	if len(s) == 1 {
+		return []byte(s)
+	}
+
+	return nil
+}
+
+func (m Model) resizeAllPanes() tea.Cmd {
+	return func() tea.Msg {
+		tab := m.activeTabModel()
+		if tab == nil {
+			return nil
+		}
+		for _, pane := range tab.Panes {
+			cols := pane.Width - 2  // subtract border
+			rows := pane.Height - 2
+			if cols < 1 {
+				cols = 1
+			}
+			if rows < 1 {
+				rows = 1
+			}
+			msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
+				PaneID: pane.ID,
+				Cols:   uint16(cols),
+				Rows:   uint16(rows),
+			})
+			m.client.Send(msg)
+		}
 		return nil
 	}
 }

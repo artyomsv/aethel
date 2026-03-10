@@ -13,14 +13,20 @@ type winSession struct {
 	cpty   *conpty.ConPty
 	pid    int
 	handle uintptr
+	cols   int
+	rows   int
 }
 
 func New() Session {
-	return &winSession{}
+	return &winSession{cols: 80, rows: 24}
+}
+
+func newWithSize(cols, rows int) Session {
+	return &winSession{cols: cols, rows: rows}
 }
 
 func (s *winSession) Start(cmd string, args ...string) error {
-	cp, err := conpty.New(80, 24, 0)
+	cp, err := conpty.New(s.cols, s.rows, 0)
 	if err != nil {
 		return err
 	}

@@ -68,7 +68,7 @@ func (d *Daemon) Stop() {
 func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	switch msg.Type {
 	case ipc.MsgAttach:
-		d.handleAttach(conn)
+		d.handleAttach(conn, msg)
 	case ipc.MsgCreateTab:
 		d.handleCreateTab(conn, msg)
 	case ipc.MsgDestroyTab:
@@ -89,7 +89,18 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	}
 }
 
-func (d *Daemon) handleAttach(conn *ipc.Conn) {
+func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
+	var attach ipc.AttachPayload
+	msg.DecodePayload(&attach)
+
+	cols, rows := attach.Cols, attach.Rows
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+
 	// Create default workspace if empty
 	if len(d.session.Tabs()) == 0 {
 		tab := d.session.CreateTab("Shell")
@@ -97,10 +108,12 @@ func (d *Daemon) handleAttach(conn *ipc.Conn) {
 		pane, _ := d.session.CreatePane(tab.ID, cwd)
 
 		shell := defaultShell()
-		ptySession := apty.New()
+		ptySession := apty.NewWithSize(cols, rows)
 		if err := ptySession.Start(shell); err == nil {
 			pane.PTY = ptySession
 			go d.streamPTYOutput(pane.ID, ptySession)
+		} else {
+			log.Printf("failed to start PTY: %v", err)
 		}
 	}
 
