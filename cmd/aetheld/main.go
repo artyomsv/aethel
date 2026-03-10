@@ -23,10 +23,12 @@ func main() {
 	}
 
 	d := daemon.New(cfg)
+	fmt.Println("aetheld — starting daemon...")
 	if err := d.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
 		os.Exit(1)
 	}
 
+	fmt.Printf("aetheld ready (pid %d). Press Ctrl+C to stop.\n", os.Getpid())
 	d.Wait()
 }

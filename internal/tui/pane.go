@@ -1,15 +1,13 @@
 package tui
 
 import (
-	"strings"
-
-	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/vt"
 )
 
 type PaneModel struct {
 	ID     string
 	Name   string
-	Output strings.Builder
+	vt     *vt.SafeEmulator
 	Width  int
 	Height int
 	Active bool
@@ -19,11 +17,18 @@ func NewPaneModel(id string) *PaneModel {
 	return &PaneModel{
 		ID:   id,
 		Name: id,
+		vt:   vt.NewSafeEmulator(80, 24),
 	}
 }
 
 func (p *PaneModel) AppendOutput(data []byte) {
-	p.Output.Write(data)
+	p.vt.Write(data)
+}
+
+func (p *PaneModel) ResizeVT(cols, rows int) {
+	if cols > 0 && rows > 0 && (cols != p.vt.Width() || rows != p.vt.Height()) {
+		p.vt.Resize(cols, rows)
+	}
 }
 
 func (p *PaneModel) View() string {
@@ -32,7 +37,6 @@ func (p *PaneModel) View() string {
 		style = activePaneBorder
 	}
 
-	// Calculate inner dimensions (subtract border)
 	innerW := p.Width - 2
 	innerH := p.Height - 2
 	if innerW < 1 {
@@ -42,34 +46,10 @@ func (p *PaneModel) View() string {
 		innerH = 1
 	}
 
-	content := p.visibleContent(innerW, innerH)
+	content := p.vt.Render()
 
 	return style.
 		Width(innerW).
 		Height(innerH).
 		Render(content)
-}
-
-func (p *PaneModel) visibleContent(width, height int) string {
-	raw := p.Output.String()
-	lines := strings.Split(raw, "\n")
-
-	// Show only the last `height` lines
-	if len(lines) > height {
-		lines = lines[len(lines)-height:]
-	}
-
-	// Truncate long lines
-	for i, line := range lines {
-		if len(line) > width {
-			lines[i] = line[:width]
-		}
-	}
-
-	// Pad to fill height
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-
-	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }

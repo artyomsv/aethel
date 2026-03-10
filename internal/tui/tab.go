@@ -75,6 +75,7 @@ func (t *TabModel) Resize(w, h int) {
 			if i == len(t.Panes)-1 {
 				pane.Width = w - paneW*(len(t.Panes)-1)
 			}
+			pane.ResizeVT(pane.Width-2, pane.Height-2)
 		}
 	case SplitVertical:
 		paneH := h / len(t.Panes)
@@ -84,6 +85,7 @@ func (t *TabModel) Resize(w, h int) {
 			if i == len(t.Panes)-1 {
 				pane.Height = h - paneH*(len(t.Panes)-1)
 			}
+			pane.ResizeVT(pane.Width-2, pane.Height-2)
 		}
 	}
 }
