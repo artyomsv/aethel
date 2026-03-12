@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — test the workflow without side effects'
+        type: boolean
+        default: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dry run notice
+        if: inputs.dry_run == true
+        run: echo "::notice::DRY RUN — this is a manual test of the CI workflow"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go build ./cmd/aethel && go build ./cmd/aetheld

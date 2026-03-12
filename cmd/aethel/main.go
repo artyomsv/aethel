@@ -15,6 +15,8 @@ import (
 	"github.com/artyomsv/aethel/internal/tui"
 )
 
+var version = "dev"
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -22,7 +24,7 @@ func main() {
 			handleDaemon()
 			return
 		case "version":
-			fmt.Println("aethel v0.2.0")
+			fmt.Println("aethel v" + version)
 			return
 		}
 	}

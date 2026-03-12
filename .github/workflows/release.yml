@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — compute version & build binaries but skip commit, tag, and release'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  DRY_RUN: ${{ inputs.dry_run || false }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Skip release commits to prevent infinite loop
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Determine version bump
+        id: bump
+        run: |
+          CURRENT=$(cat VERSION)
+          LAST_TAG="v${CURRENT}"
+          echo "current=${CURRENT}" >> $GITHUB_OUTPUT
+
+          # Check if tag exists; if not, use all history
+          if git rev-parse "$LAST_TAG" >/dev/null 2>&1; then
+            COMMITS=$(git log "${LAST_TAG}..HEAD" --oneline)
+          else
+            COMMITS=$(git log --oneline)
+          fi
+
+          echo "--- Commits since ${LAST_TAG} ---"
+          echo "$COMMITS"
+          echo "---"
+
+          if [ -z "$COMMITS" ]; then
+            echo "::notice::No commits since last tag — skipping release"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Determine bump type from conventional commits
+          if echo "$COMMITS" | grep -qE '(feat!|fix!|refactor!|BREAKING CHANGE)'; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qE 'feat(\(|:)'; then
+            BUMP="minor"
+          elif echo "$COMMITS" | grep -qE '(fix|perf)(\(|:)'; then
+            BUMP="patch"
+          else
+            echo "::notice::No version-bumping commits found (only chore/docs/test/ci) — skipping release"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Calculate new version
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case $BUMP in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+
+          echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "bump=${BUMP}" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "::notice::Version bump: ${CURRENT} → ${NEW_VERSION} (${BUMP})"
+
+      - name: Update version files
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          VERSION=${{ steps.bump.outputs.version }}
+          echo "$VERSION" > VERSION
+
+          # Update CHANGELOG: insert versioned header after [Unreleased]
+          DATE=$(date +%Y-%m-%d)
+          sed -i "s/## \[Unreleased\]/## [Unreleased]\n\n## [${VERSION}] - ${DATE}/" CHANGELOG.md
+
+          echo "::notice::Updated VERSION to ${VERSION} and CHANGELOG.md"
+
+      - name: Run tests
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build binaries
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          VERSION=${{ steps.bump.outputs.version }}
+          LDFLAGS="-X main.version=${VERSION}"
+          mkdir -p dist
+
+          for PAIR in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            OS="${PAIR%%/*}"
+            ARCH="${PAIR##*/}"
+            echo "Building ${OS}/${ARCH}..."
+            GOOS=$OS GOARCH=$ARCH go build -ldflags "$LDFLAGS" -o dist/aethel ./cmd/aethel
+            GOOS=$OS GOARCH=$ARCH go build -ldflags "$LDFLAGS" -o dist/aetheld ./cmd/aetheld
+            tar -czf "dist/aethel-${OS}-${ARCH}.tar.gz" -C dist aethel aetheld
+            rm dist/aethel dist/aetheld
+          done
+
+          echo "::notice::Built archives:"
+          ls -lh dist/*.tar.gz
+
+      - name: Extract changelog
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          VERSION=${{ steps.bump.outputs.version }}
+          # Extract content between ## [VERSION] and the next ## [
+          BODY=$(sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG.md)
+          echo "$BODY" > dist/release-notes.md
+          echo "::notice::Release notes:"
+          cat dist/release-notes.md
+
+      - name: Dry run summary
+        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN == 'true'
+        run: |
+          echo "::warning::DRY RUN — skipping commit, tag, and release creation"
+          echo "Would have released: v${{ steps.bump.outputs.version }}"
+          echo "Bump type: ${{ steps.bump.outputs.bump }}"
+          echo "Archives built:"
+          ls -lh dist/*.tar.gz
+
+      - name: Commit version bump
+        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        run: |
+          VERSION=${{ steps.bump.outputs.version }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION CHANGELOG.md
+          git commit -m "chore(release): v${VERSION}"
+          git tag "v${VERSION}"
+          git push origin master --tags
+
+      - name: Create GitHub Release
+        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=${{ steps.bump.outputs.version }}
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --notes-file dist/release-notes.md \
+            dist/aethel-linux-amd64.tar.gz \
+            dist/aethel-linux-arm64.tar.gz \
+            dist/aethel-darwin-amd64.tar.gz \
+            dist/aethel-darwin-arm64.tar.gz
