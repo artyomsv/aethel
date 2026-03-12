@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-12
+
 ### Added
 
 - Client-daemon architecture with IPC over Unix sockets (Named Pipes on Windows)
@@ -22,3 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker-based development workflow (`dev.sh`) — no local Go or make required
 - Multi-stage Dockerfile producing minimal scratch-based release images
 - `.dockerignore` for optimized Docker build context
+- Binary split pane layout with mixed horizontal/vertical splits (tmux-style)
+- Layout persistence — pane tree serialized to JSON, restored on reconnect
+- Output history replay — ring buffer captures PTY output, replayed to reconnecting clients
+- VT100 terminal emulation via `charmbracelet/x/vt` for proper ANSI rendering
+- Live CWD tracking — pane border updates via OSC 7 escape sequences
+- Automatic shell integration — OSC 7 hooks injected into bash, zsh, PowerShell at spawn time
+- Tab renaming (F2) and pane renaming (Alt+F2)
+- Tab color cycling (Alt+C) with 8 color options
+- Mouse support — click to switch tabs/panes, scroll wheel for terminal history
+- Clipboard paste (Ctrl+V) with cross-platform support (Win32 API, pbpaste, xclip)
+- Terminal scrollback with page scroll (Alt+PgUp/PgDown) and scrollbar indicator
+- Resize debouncing for smooth terminal resizing
+- Configurable keybindings via `[keybindings]` in config.toml
+- Configurable mouse scroll lines and page scroll lines via `[ui]` in config.toml
+- Structured logging for both client and daemon (`~/.aethel/*.log`)

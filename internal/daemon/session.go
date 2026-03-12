@@ -1,24 +1,30 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 
 	"github.com/google/uuid"
 	apty "github.com/artyomsv/aethel/internal/pty"
+	"github.com/artyomsv/aethel/internal/ringbuf"
 )
 
 type Tab struct {
-	ID    string
-	Name  string
-	Panes []string // Pane IDs in order
+	ID     string
+	Name   string
+	Color  string
+	Panes  []string        // Pane IDs in order
+	Layout json.RawMessage // Opaque layout tree from TUI
 }
 
 type Pane struct {
-	ID    string
-	TabID string
-	CWD   string
-	PTY   apty.Session
+	ID        string
+	TabID     string
+	CWD       string
+	Name      string // User-set name (empty = use CWD)
+	PTY       apty.Session
+	OutputBuf *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
 }
 
 type SessionManager struct {
@@ -26,13 +32,15 @@ type SessionManager struct {
 	tabOrder  []string
 	panes     map[string]*Pane
 	activeTab string
+	bufSize   int // ring buffer capacity per pane (bytes)
 	mu        sync.RWMutex
 }
 
-func NewSessionManager() *SessionManager {
+func NewSessionManager(bufSize int) *SessionManager {
 	return &SessionManager{
-		tabs:  make(map[string]*Tab),
-		panes: make(map[string]*Pane),
+		tabs:    make(map[string]*Tab),
+		panes:   make(map[string]*Pane),
+		bufSize: bufSize,
 	}
 }
 
@@ -98,9 +106,10 @@ func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {
 
 	id := "pane-" + uuid.New().String()[:8]
 	pane := &Pane{
-		ID:    id,
-		TabID: tabID,
-		CWD:   cwd,
+		ID:        id,
+		TabID:     tabID,
+		CWD:       cwd,
+		OutputBuf: ringbuf.NewRingBuffer(sm.bufSize),
 	}
 
 	sm.panes[id] = pane

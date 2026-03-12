@@ -1,22 +1,12 @@
 package tui
 
-import (
-	"github.com/charmbracelet/lipgloss"
-)
-
-type SplitDir int
-
-const (
-	SplitHorizontal SplitDir = iota // panes side-by-side
-	SplitVertical                   // panes stacked
-)
-
+// TabModel represents a single tab containing a tree of panes.
 type TabModel struct {
 	ID         string
 	Name       string
-	Panes      []*PaneModel
-	ActivePane int
-	Split      SplitDir
+	Color      string
+	Root       *LayoutNode // binary split tree (nil = empty tab)
+	ActivePane string      // pane ID of the active pane
 	Width      int
 	Height     int
 }
@@ -28,82 +18,109 @@ func NewTabModel(id, name string) *TabModel {
 	}
 }
 
-func (t *TabModel) AddPane(pane *PaneModel) {
-	t.Panes = append(t.Panes, pane)
-}
-
+// ActivePaneModel returns the currently active pane, or nil.
 func (t *TabModel) ActivePaneModel() *PaneModel {
-	if len(t.Panes) == 0 {
+	if t.Root == nil {
 		return nil
 	}
-	if t.ActivePane >= len(t.Panes) {
-		t.ActivePane = 0
+	leaves := t.Root.Leaves()
+	if len(leaves) == 0 {
+		return nil
 	}
-	return t.Panes[t.ActivePane]
+	for _, p := range leaves {
+		if p.ID == t.ActivePane {
+			return p
+		}
+	}
+	// Fallback: if ActivePane is stale, use first leaf.
+	t.ActivePane = leaves[0].ID
+	leaves[0].Active = true
+	return leaves[0]
 }
 
+// NextPane advances focus to the next pane (in-order traversal order).
 func (t *TabModel) NextPane() {
-	if len(t.Panes) > 0 {
-		t.Panes[t.ActivePane].Active = false
-		t.ActivePane = (t.ActivePane + 1) % len(t.Panes)
-		t.Panes[t.ActivePane].Active = true
+	leaves := t.Root.Leaves()
+	if len(leaves) == 0 {
+		return
 	}
+	idx := t.activeIndex(leaves)
+	leaves[idx].Active = false
+	next := (idx + 1) % len(leaves)
+	leaves[next].Active = true
+	t.ActivePane = leaves[next].ID
 }
 
+// PrevPane moves focus to the previous pane.
 func (t *TabModel) PrevPane() {
-	if len(t.Panes) > 0 {
-		t.Panes[t.ActivePane].Active = false
-		t.ActivePane = (t.ActivePane - 1 + len(t.Panes)) % len(t.Panes)
-		t.Panes[t.ActivePane].Active = true
+	leaves := t.Root.Leaves()
+	if len(leaves) == 0 {
+		return
 	}
+	idx := t.activeIndex(leaves)
+	leaves[idx].Active = false
+	prev := (idx - 1 + len(leaves)) % len(leaves)
+	leaves[prev].Active = true
+	t.ActivePane = leaves[prev].ID
 }
 
+// activeIndex finds the index of the active pane in leaves. Defaults to 0.
+func (t *TabModel) activeIndex(leaves []*PaneModel) int {
+	for i, p := range leaves {
+		if p.ID == t.ActivePane {
+			return i
+		}
+	}
+	return 0
+}
+
+// Resize recomputes dimensions for the entire layout tree.
 func (t *TabModel) Resize(w, h int) {
 	t.Width = w
 	t.Height = h
-
-	if len(t.Panes) == 0 {
-		return
-	}
-
-	switch t.Split {
-	case SplitHorizontal:
-		paneW := w / len(t.Panes)
-		for i, pane := range t.Panes {
-			pane.Width = paneW
-			pane.Height = h
-			if i == len(t.Panes)-1 {
-				pane.Width = w - paneW*(len(t.Panes)-1)
-			}
-			pane.ResizeVT(pane.Width-2, pane.Height-2)
-		}
-	case SplitVertical:
-		paneH := h / len(t.Panes)
-		for i, pane := range t.Panes {
-			pane.Width = w
-			pane.Height = paneH
-			if i == len(t.Panes)-1 {
-				pane.Height = h - paneH*(len(t.Panes)-1)
-			}
-			pane.ResizeVT(pane.Width-2, pane.Height-2)
-		}
+	if t.Root != nil {
+		resizeNode(t.Root, w, h)
 	}
 }
 
+// View renders the entire pane layout.
 func (t *TabModel) View() string {
-	if len(t.Panes) == 0 {
+	if t.Root == nil {
 		return ""
 	}
+	return renderNode(t.Root)
+}
 
-	views := make([]string, len(t.Panes))
-	for i, pane := range t.Panes {
-		views[i] = pane.View()
+// SplitAtPane splits the pane with the given ID, inserting a placeholder
+// for the new pane. Returns the placeholder node (caller fills Pane later).
+func (t *TabModel) SplitAtPane(paneID string, dir SplitDir) *LayoutNode {
+	if t.Root == nil {
+		return nil
 	}
+	return t.Root.SplitLeaf(paneID, dir)
+}
 
-	switch t.Split {
-	case SplitVertical:
-		return lipgloss.JoinVertical(lipgloss.Left, views...)
-	default:
-		return lipgloss.JoinHorizontal(lipgloss.Top, views...)
+// RemovePane removes the pane with the given ID, promoting its sibling.
+// If the removed pane was active, focus moves to the first leaf.
+func (t *TabModel) RemovePane(paneID string) {
+	if t.Root == nil {
+		return
+	}
+	// If the root is a single leaf with this ID, clear the tree.
+	if t.Root.IsLeaf() && t.Root.Pane.ID == paneID {
+		t.Root = nil
+		t.ActivePane = ""
+		return
+	}
+	if !t.Root.RemoveLeaf(paneID) {
+		return
+	}
+	// If we removed the active pane, pick the first leaf.
+	if t.ActivePane == paneID {
+		leaves := t.Root.Leaves()
+		if len(leaves) > 0 {
+			t.ActivePane = leaves[0].ID
+			leaves[0].Active = true
+		}
 	}
 }

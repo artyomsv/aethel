@@ -30,11 +30,30 @@ Agentic developers run 5-10 terminal sessions per project: AI assistants, webhoo
 
 Aethel continuously snapshots your workspace — tabs, panes, layouts, working directories, and metadata. On restart, everything is restored. Ghost buffers render the last 500 lines instantly while shells re-initialize.
 
-### AI Session Resume
+- **Output replay** — a ring buffer per pane captures PTY output. Reconnecting clients instantly see previous terminal content.
+- **Layout persistence** — the pane split tree is serialized to JSON and stored in the daemon. On reconnect, the exact split configuration is restored.
+
+### tmux-Style Pane Splits
+
+Binary split tree enables arbitrarily nested horizontal and vertical splits. Each split has its own direction and ratio. Mouse clicks resolve to the correct pane via spatial hit-testing.
+
+### Live CWD Tracking
+
+Pane borders display the shell's current working directory in real-time. Aethel auto-injects OSC 7 hooks into bash, zsh, and PowerShell at spawn time — no manual shell configuration required. Fish emits OSC 7 natively.
+
+### Mouse & Keyboard
+
+Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. All keybindings are configurable via `config.toml`.
+
+### Tab Customization
+
+Rename tabs (F2) and panes (Alt+F2). Cycle through 8 tab colors (Alt+C) for visual distinction. Clipboard paste (Ctrl+V) with cross-platform support.
+
+### AI Session Resume (Planned)
 
 A regex-based scraper watches terminal output for session IDs. When you restart, Aethel executes `claude --resume <session-id>` automatically — no manual copy-paste.
 
-### Typed Panes via Plugins
+### Typed Panes via Plugins (Planned)
 
 Panes aren't just shells. Each pane type is a TOML plugin that defines:
 
@@ -100,11 +119,17 @@ aethel
 |---|---|
 | `Ctrl+T` | New tab |
 | `Ctrl+W` | Close active pane |
-| `Ctrl+Shift+H` | Split horizontal |
-| `Ctrl+Shift+V` | Split vertical |
+| `Alt+H` | Split horizontal |
+| `Alt+V` | Split vertical |
 | `Tab` / `Shift+Tab` | Navigate panes |
-| `Alt+1-9` | Switch tabs |
+| `F2` | Rename active tab |
+| `Alt+F2` | Rename active pane |
+| `Alt+C` | Cycle tab color |
+| `Alt+PgUp` / `Alt+PgDn` | Scroll page up/down |
+| `Ctrl+V` | Paste from clipboard |
 | `Ctrl+Q` | Quit |
+
+All keybindings are configurable in `~/.aethel/config.toml` under `[keybindings]`.
 
 ## Configuration
 
@@ -122,12 +147,23 @@ dimmed = true
 [ui]
 tab_dock = "top"
 theme = "default"
+mouse_scroll_lines = 3
+page_scroll_lines = 0    # 0 = half-page (dynamic)
 
 [keybindings]
-split_horizontal = "ctrl+shift+h"
-split_vertical = "ctrl+shift+v"
+quit = "ctrl+q"
 new_tab = "ctrl+t"
 close_pane = "ctrl+w"
+split_horizontal = "alt+h"
+split_vertical = "alt+v"
+next_pane = "tab"
+prev_pane = "shift+tab"
+rename_tab = "f2"
+rename_pane = "alt+f2"
+cycle_tab_color = "alt+c"
+scroll_page_up = "alt+pgup"
+scroll_page_down = "alt+pgdown"
+paste = "ctrl+v"
 ```
 
 ## Project Structure
@@ -137,11 +173,14 @@ cmd/
 ├── aethel/          # TUI client
 └── aetheld/         # Background daemon
 internal/
+├── clipboard/       # Cross-platform clipboard read (Win32 API, pbpaste, xclip)
 ├── config/          # TOML configuration
 ├── daemon/          # Session management, message routing
 ├── ipc/             # Length-prefixed JSON protocol, client/server
 ├── pty/             # Cross-platform PTY (Unix + Windows)
-└── tui/             # Bubble Tea model, tabs, panes, styles
+├── ringbuf/         # Circular byte buffer for PTY output history
+├── shellinit/       # Automatic shell integration (OSC 7 injection)
+└── tui/             # Bubble Tea model, tabs, panes, layout tree, styles
 ```
 
 ## Development
@@ -164,7 +203,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 | Milestone | Status | Description |
 |---|---|---|
 | **M1: Foundation** | Done | Daemon, TUI, IPC, PTY, tabs, splits |
-| **M2: Persistence** | Planned | State snapshots, ghost buffers, reboot-proof sessions |
+| **M2: Persistence** | In Progress | Output replay, layout persistence, shell integration, mouse, scrollback, tab colors, renaming |
 | **M3: Resume Engine** | Planned | Regex scrapers, token extraction, AI session resume |
 | **M4: Plugin System** | Planned | TOML plugins, typed panes, hot-reload |
 | **M5: Polish** | Planned | JSON transformer, observability, encrypted tokens |

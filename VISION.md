@@ -20,7 +20,8 @@ Aethel is a cross-platform terminal manager designed to eliminate "context loss.
 ### A. Total State Persistence (Reboot-Proof)
 
 - **Continuous Snapshotting:** Aethel saves a `state.json` mapping of every Tab and Pane (Working Directory, Layout, Type, and Metadata).
-- **Ghost Buffer:** Upon OS restart, Aethel immediately renders the last 500 lines of cached text for every pane, providing instant visual context while the underlying shells re-initialize.
+- **Ghost Buffer:** Upon OS restart, Aethel immediately renders the last 500 lines of cached text for every pane, providing instant visual context while the underlying shells re-initialize. **Status: Implemented** — ring buffer captures PTY output per pane; daemon replays to reconnecting clients.
+- **Layout Persistence:** Pane layout (binary split tree) is serialized to JSON and stored in the daemon. On reconnect, the TUI restores the exact split configuration. **Status: Implemented.**
 - **Process Re-hydration:** On startup, Aethel doesn't just open a shell; it executes the Abstract Resume Command for that specific pane.
 
 ### B. Abstract Resume Engine
@@ -45,8 +46,14 @@ Panes are assigned a Type with specialized behaviors:
 - **Dynamic Positioning:** Tabs can be docked to Top, Bottom, Left, or Right.
 - **Visual Logic:**
   - **JSON Transformer:** A hotkey (`Ctrl+J`) to toggle between Raw, Minified, and Pretty-Printed JSON with syntax highlighting.
-  - **Pane Naming:** Every pane can be manually named or dynamically named based on the running process.
-  - **Split-Views:** Support for infinite nesting of vertical and horizontal splits within a single tab.
+  - **Pane Naming:** Every pane can be manually named (Alt+F2) or dynamically named based on the running process. **Status: Implemented.**
+  - **Split-Views:** Support for infinite nesting of vertical and horizontal splits within a single tab. **Status: Implemented** — binary split tree (`LayoutNode`) with per-node split direction and ratio.
+  - **Mouse Support:** Click to switch tabs and panes, scroll wheel for terminal history. **Status: Implemented.**
+  - **Tab Colors:** Visual tab distinction with 8 color options, cycled via Alt+C. **Status: Implemented.**
+
+### E. Automatic Shell Integration
+
+- **OSC 7 CWD Tracking:** Aethel auto-injects shell hooks (bash, zsh, PowerShell) at spawn time to emit OSC 7 escape sequences. The pane border displays the live working directory — no manual shell configuration required. Fish emits OSC 7 natively. **Status: Implemented.**
 
 ## 4. Technical Requirements
 

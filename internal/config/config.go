@@ -38,17 +38,26 @@ type SecurityConfig struct {
 }
 
 type UIConfig struct {
-	TabDock string `toml:"tab_dock"`
-	Theme   string `toml:"theme"`
+	TabDock          string `toml:"tab_dock"`
+	Theme            string `toml:"theme"`
+	MouseScrollLines int    `toml:"mouse_scroll_lines"`
+	PageScrollLines  int    `toml:"page_scroll_lines"`
 }
 
 type KeybindingsConfig struct {
+	Quit            string `toml:"quit"`
+	NewTab          string `toml:"new_tab"`
+	ClosePane       string `toml:"close_pane"`
 	SplitHorizontal string `toml:"split_horizontal"`
 	SplitVertical   string `toml:"split_vertical"`
 	NextPane        string `toml:"next_pane"`
 	PrevPane        string `toml:"prev_pane"`
-	NewTab          string `toml:"new_tab"`
-	ClosePane       string `toml:"close_pane"`
+	RenameTab       string `toml:"rename_tab"`
+	RenamePane      string `toml:"rename_pane"`
+	CycleTabColor   string `toml:"cycle_tab_color"`
+	ScrollPageUp    string `toml:"scroll_page_up"`
+	ScrollPageDown  string `toml:"scroll_page_down"`
+	Paste           string `toml:"paste"`
 	JSONTransform   string `toml:"json_transform"`
 	QuickActions    string `toml:"quick_actions"`
 }
@@ -73,16 +82,25 @@ func Default() Config {
 			RedactSecrets: true,
 		},
 		UI: UIConfig{
-			TabDock: "top",
-			Theme:   "default",
+			TabDock:          "top",
+			Theme:            "default",
+			MouseScrollLines: 3,
+			PageScrollLines:  0, // 0 = half-page (dynamic)
 		},
 		Keybindings: KeybindingsConfig{
-			SplitHorizontal: "ctrl+shift+h",
-			SplitVertical:   "ctrl+shift+v",
-			NextPane:        "ctrl+tab",
-			PrevPane:        "ctrl+shift+tab",
+			Quit:            "ctrl+q",
 			NewTab:          "ctrl+t",
 			ClosePane:       "ctrl+w",
+			SplitHorizontal: "alt+h",
+			SplitVertical:   "alt+v",
+			NextPane:        "tab",
+			PrevPane:        "shift+tab",
+			RenameTab:       "f2",
+			RenamePane:      "alt+f2",
+			CycleTabColor:   "alt+c",
+			ScrollPageUp:    "alt+pgup",
+			ScrollPageDown:  "alt+pgdown",
+			Paste:           "ctrl+v",
 			JSONTransform:   "ctrl+j",
 			QuickActions:    "ctrl+a",
 		},

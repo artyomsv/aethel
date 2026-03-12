@@ -4,6 +4,9 @@ package pty
 type Session interface {
 	// Start launches the given command in a new PTY.
 	Start(cmd string, args ...string) error
+	// SetEnv sets additional environment variables to merge with os.Environ()
+	// when starting the process. Must be called before Start.
+	SetEnv(env []string)
 	// Read reads output from the PTY.
 	Read(buf []byte) (int, error)
 	// Write sends input to the PTY.

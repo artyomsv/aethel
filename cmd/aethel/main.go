@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,7 +22,7 @@ func main() {
 			handleDaemon()
 			return
 		case "version":
-			fmt.Println("aethel v0.1.0")
+			fmt.Println("aethel v0.2.0")
 			return
 		}
 	}
@@ -87,6 +90,27 @@ func stopDaemon() {
 }
 
 func launchTUI() {
+	// Set up logging early
+	logDir := config.AethelDir()
+	if logDir != "" {
+		os.MkdirAll(logDir, 0700)
+	}
+	logPath := filepath.Join(logDir, "aethel.log")
+	logFile, err := tea.LogToFile(logPath, "aethel")
+	if err == nil && logFile != nil {
+		defer logFile.Close()
+	}
+
+	// Panic recovery — write to log before crashing
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("PANIC: %v\n%s", r, debug.Stack())
+			log.Print(msg)
+			fmt.Fprintf(os.Stderr, "%s\n", msg)
+			os.Exit(1)
+		}
+	}()
+
 	sockPath := config.SocketPath()
 
 	cfg := config.Default()
@@ -95,10 +119,12 @@ func launchTUI() {
 			cfg = loaded
 		}
 	}
+	log.Printf("config loaded, AutoStart=%v", cfg.Daemon.AutoStart)
 
 	// Try connecting; auto-start if needed
 	client, err := ipc.NewClient(sockPath)
 	if err != nil && cfg.Daemon.AutoStart {
+		log.Printf("daemon not reachable, auto-starting...")
 		startDaemon()
 		for i := 0; i < 20; i++ {
 			time.Sleep(100 * time.Millisecond)
@@ -109,17 +135,21 @@ func launchTUI() {
 		}
 	}
 	if err != nil {
+		log.Printf("cannot connect to daemon: %v", err)
 		fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'aethel daemon start' first.\n", err)
 		os.Exit(1)
 	}
 	defer client.Close()
+	log.Print("connected to daemon")
 
-	model := tui.NewModel(client)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	model := tui.NewModel(client, cfg)
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
+		log.Printf("TUI error: %v", err)
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	log.Print("TUI exited normally")
 }
 
 func fileExists(path string) bool {

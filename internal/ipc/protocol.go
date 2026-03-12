@@ -16,14 +16,17 @@ const (
 	MsgHeartbeat = "heartbeat"
 
 	// Session control (Client -> Daemon)
-	MsgCreatePane  = "create_pane"
-	MsgDestroyPane = "destroy_pane"
-	MsgResizePane  = "resize_pane"
+	MsgCreatePane   = "create_pane"
+	MsgDestroyPane  = "destroy_pane"
+	MsgResizePane   = "resize_pane"
+	MsgUpdatePane   = "update_pane"
+	MsgUpdateLayout = "update_layout"
 
 	// Tab control (Client -> Daemon)
 	MsgCreateTab  = "create_tab"
 	MsgDestroyTab = "destroy_tab"
 	MsgSwitchTab  = "switch_tab"
+	MsgUpdateTab  = "update_tab"
 
 	// I/O (bidirectional)
 	MsgPaneInput  = "pane_input"
@@ -82,6 +85,23 @@ type DestroyTabPayload struct {
 
 type SwitchTabPayload struct {
 	TabID string `json:"tab_id"`
+}
+
+type UpdateTabPayload struct {
+	TabID string `json:"tab_id"`
+	Name  string `json:"name,omitempty"`
+	Color string `json:"color,omitempty"`
+}
+
+type UpdatePanePayload struct {
+	PaneID string `json:"pane_id"`
+	Name   string `json:"name,omitempty"`
+	CWD    string `json:"cwd,omitempty"`
+}
+
+type UpdateLayoutPayload struct {
+	TabID  string          `json:"tab_id"`
+	Layout json.RawMessage `json:"layout"`
 }
 
 // NewMessage creates a Message with a typed payload.

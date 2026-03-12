@@ -14,6 +14,7 @@ type unixSession struct {
 	cmd  *exec.Cmd
 	cols int
 	rows int
+	env  []string
 }
 
 func New() Session {
@@ -24,8 +25,15 @@ func newWithSize(cols, rows int) Session {
 	return &unixSession{cols: cols, rows: rows}
 }
 
+func (s *unixSession) SetEnv(env []string) {
+	s.env = env
+}
+
 func (s *unixSession) Start(cmd string, args ...string) error {
 	s.cmd = exec.Command(cmd, args...)
+	if len(s.env) > 0 {
+		s.cmd.Env = append(os.Environ(), s.env...)
+	}
 	ws := &cpty.Winsize{Cols: uint16(s.cols), Rows: uint16(s.rows)}
 	ptmx, err := cpty.StartWithSize(s.cmd, ws)
 	if err != nil {

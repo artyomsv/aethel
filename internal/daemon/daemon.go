@@ -12,6 +12,7 @@ import (
 	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/ipc"
 	apty "github.com/artyomsv/aethel/internal/pty"
+	"github.com/artyomsv/aethel/internal/shellinit"
 )
 
 type Daemon struct {
@@ -21,9 +22,14 @@ type Daemon struct {
 }
 
 func New(cfg config.Config) *Daemon {
+	// Buffer size: MaxLines * 512 bytes per line (generous for ANSI-rich output)
+	bufSize := cfg.GhostBuffer.MaxLines * 512
+	if bufSize <= 0 {
+		bufSize = 500 * 512 // 256KB default
+	}
 	return &Daemon{
 		cfg:     cfg,
-		session: NewSessionManager(),
+		session: NewSessionManager(bufSize),
 	}
 }
 
@@ -31,6 +37,10 @@ func (d *Daemon) Start() error {
 	aethelDir := config.AethelDir()
 	if err := os.MkdirAll(aethelDir, 0700); err != nil {
 		return fmt.Errorf("create aethel dir: %w", err)
+	}
+
+	if err := shellinit.EnsureInitDir(aethelDir); err != nil {
+		log.Printf("warning: failed to write shell init scripts: %v", err)
 	}
 
 	sockPath := config.SocketPath()
@@ -75,10 +85,16 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleDestroyTab(msg)
 	case ipc.MsgSwitchTab:
 		d.handleSwitchTab(msg)
+	case ipc.MsgUpdateTab:
+		d.handleUpdateTab(msg)
 	case ipc.MsgCreatePane:
 		d.handleCreatePane(msg)
 	case ipc.MsgDestroyPane:
 		d.handleDestroyPane(msg)
+	case ipc.MsgUpdatePane:
+		d.handleUpdatePane(msg)
+	case ipc.MsgUpdateLayout:
+		d.handleUpdateLayout(msg)
 	case ipc.MsgPaneInput:
 		d.handlePaneInput(msg)
 	case ipc.MsgResizePane:
@@ -107,12 +123,8 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		cwd, _ := os.Getwd()
 		pane, _ := d.session.CreatePane(tab.ID, cwd)
 
-		shell := defaultShell()
 		ptySession := apty.NewWithSize(cols, rows)
-		if err := ptySession.Start(shell); err == nil {
-			pane.PTY = ptySession
-			go d.streamPTYOutput(pane.ID, ptySession)
-		} else {
+		if err := d.spawnShell(pane, ptySession); err != nil {
 			log.Printf("failed to start PTY: %v", err)
 		}
 	}
@@ -120,6 +132,24 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	state := d.buildWorkspaceState()
 	resp, _ := ipc.NewMessage(ipc.MsgWorkspaceState, state)
 	conn.Send(resp)
+
+	// Replay buffered output so reconnecting clients see previous terminal content
+	for _, tab := range d.session.Tabs() {
+		for _, pane := range d.session.Panes(tab.ID) {
+			if pane.OutputBuf == nil {
+				continue
+			}
+			history := pane.OutputBuf.Bytes()
+			if len(history) == 0 {
+				continue
+			}
+			histMsg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
+				PaneID: pane.ID,
+				Data:   history,
+			})
+			conn.Send(histMsg)
+		}
+	}
 }
 
 func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
@@ -127,26 +157,52 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	msg.DecodePayload(&payload)
 
 	tab := d.session.CreateTab(payload.Name)
+	d.session.SwitchTab(tab.ID)
 
-	update := map[string]any{"action": "tab_created", "tab_id": tab.ID, "name": tab.Name}
-	resp, _ := ipc.NewMessage(ipc.MsgStateUpdate, update)
-	d.server.Broadcast(resp)
+	// Every tab needs a default pane with a shell
+	cwd, _ := os.Getwd()
+	pane, _ := d.session.CreatePane(tab.ID, cwd)
+
+	ptySession := apty.New()
+	if err := d.spawnShell(pane, ptySession); err != nil {
+		log.Printf("failed to start PTY for new tab: %v", err)
+	}
+
+	d.broadcastState()
 }
 
 func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	var payload ipc.DestroyTabPayload
 	msg.DecodePayload(&payload)
 	d.session.DestroyTab(payload.TabID)
-
-	update := map[string]any{"action": "tab_destroyed", "tab_id": payload.TabID}
-	resp, _ := ipc.NewMessage(ipc.MsgStateUpdate, update)
-	d.server.Broadcast(resp)
+	d.broadcastState()
 }
 
 func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
 	var payload ipc.SwitchTabPayload
 	msg.DecodePayload(&payload)
 	d.session.SwitchTab(payload.TabID)
+}
+
+func (d *Daemon) handleUpdateTab(msg *ipc.Message) {
+	var payload ipc.UpdateTabPayload
+	msg.DecodePayload(&payload)
+
+	tab := d.session.Tab(payload.TabID)
+	if tab == nil {
+		return
+	}
+	if payload.Name != "" {
+		tab.Name = payload.Name
+	}
+	if payload.Color != "" {
+		tab.Color = payload.Color
+	} else if payload.Name == "" {
+		// Only color field sent as empty → clear color
+		tab.Color = ""
+	}
+
+	d.broadcastState()
 }
 
 func (d *Daemon) handleCreatePane(msg *ipc.Message) {
@@ -164,29 +220,19 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 		return
 	}
 
-	shell := defaultShell()
 	ptySession := apty.New()
-	if err := ptySession.Start(shell); err != nil {
+	if err := d.spawnShell(pane, ptySession); err != nil {
 		log.Printf("start PTY error: %v", err)
 		return
 	}
-	pane.PTY = ptySession
-
-	go d.streamPTYOutput(pane.ID, ptySession)
-
-	update := map[string]any{"action": "pane_created", "pane_id": pane.ID, "tab_id": payload.TabID}
-	resp, _ := ipc.NewMessage(ipc.MsgStateUpdate, update)
-	d.server.Broadcast(resp)
+	d.broadcastState()
 }
 
 func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	var payload ipc.DestroyPanePayload
 	msg.DecodePayload(&payload)
 	d.session.DestroyPane(payload.PaneID)
-
-	update := map[string]any{"action": "pane_destroyed", "pane_id": payload.PaneID}
-	resp, _ := ipc.NewMessage(ipc.MsgStateUpdate, update)
-	d.server.Broadcast(resp)
+	d.broadcastState()
 }
 
 func (d *Daemon) handlePaneInput(msg *ipc.Message) {
@@ -211,6 +257,36 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	pane.PTY.Resize(payload.Rows, payload.Cols)
 }
 
+func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
+	var payload ipc.UpdatePanePayload
+	msg.DecodePayload(&payload)
+
+	pane := d.session.Pane(payload.PaneID)
+	if pane == nil {
+		return
+	}
+	if payload.Name != "" {
+		pane.Name = payload.Name
+	}
+	if payload.CWD != "" {
+		pane.CWD = payload.CWD
+	}
+	d.broadcastState()
+}
+
+func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
+	var payload ipc.UpdateLayoutPayload
+	msg.DecodePayload(&payload)
+
+	tab := d.session.Tab(payload.TabID)
+	if tab == nil {
+		return
+	}
+	tab.Layout = payload.Layout
+	// No broadcastState() — avoids feedback loop.
+	// Layout is included in next natural state broadcast.
+}
+
 func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 	buf := make([]byte, 4096)
 	for {
@@ -218,6 +294,12 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])
+
+			// Buffer for replay on reconnect
+			if pane := d.session.Pane(paneID); pane != nil && pane.OutputBuf != nil {
+				pane.OutputBuf.Write(data)
+			}
+
 			msg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
 				PaneID: paneID,
 				Data:   data,
@@ -230,6 +312,12 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 	}
 }
 
+func (d *Daemon) broadcastState() {
+	state := d.buildWorkspaceState()
+	resp, _ := ipc.NewMessage(ipc.MsgWorkspaceState, state)
+	d.server.Broadcast(resp)
+}
+
 func (d *Daemon) buildWorkspaceState() map[string]any {
 	tabs := d.session.Tabs()
 	tabList := make([]map[string]any, 0, len(tabs))
@@ -238,18 +326,27 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 	for _, tab := range tabs {
 		paneIDs := make([]string, len(tab.Panes))
 		copy(paneIDs, tab.Panes)
-		tabList = append(tabList, map[string]any{
+		tabData := map[string]any{
 			"id":    tab.ID,
 			"name":  tab.Name,
+			"color": tab.Color,
 			"panes": paneIDs,
-		})
+		}
+		if len(tab.Layout) > 0 {
+			tabData["layout"] = tab.Layout
+		}
+		tabList = append(tabList, tabData)
 
 		for _, pane := range d.session.Panes(tab.ID) {
-			paneList = append(paneList, map[string]any{
+			paneData := map[string]any{
 				"id":     pane.ID,
 				"tab_id": pane.TabID,
 				"cwd":    pane.CWD,
-			})
+			}
+			if pane.Name != "" {
+				paneData["name"] = pane.Name
+			}
+			paneList = append(paneList, paneData)
 		}
 	}
 
@@ -258,6 +355,24 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 		"tabs":       tabList,
 		"panes":      paneList,
 	}
+}
+
+func (d *Daemon) spawnShell(pane *Pane, ptySession apty.Session) error {
+	shell := defaultShell()
+	cfg := shellinit.Configure(shell, config.AethelDir())
+	if cfg != nil {
+		ptySession.SetEnv(cfg.Env)
+		if err := ptySession.Start(cfg.Cmd, cfg.Args...); err != nil {
+			return err
+		}
+	} else {
+		if err := ptySession.Start(shell); err != nil {
+			return err
+		}
+	}
+	pane.PTY = ptySession
+	go d.streamPTYOutput(pane.ID, ptySession)
+	return nil
 }
 
 func defaultShell() string {

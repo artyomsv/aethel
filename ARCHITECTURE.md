@@ -55,14 +55,17 @@ This document records the key architectural decisions for Aethel and the reasoni
 
 ```go
 type Session interface {
-    Start(shell string, args []string) error
-    Read(p []byte) (int, error)
-    Write(p []byte) (int, error)
-    Resize(cols, rows int) error
+    Start(cmd string, args ...string) error
+    SetEnv(env []string)
+    Read(buf []byte) (int, error)
+    Write(data []byte) (int, error)
+    Resize(rows, cols uint16) error
     Close() error
     Pid() int
 }
 ```
+
+`SetEnv` was added to support shell integration — the daemon passes environment variables (e.g., `ZDOTDIR` for zsh) to the child shell process before starting it.
 
 **Consequences:**
 
@@ -174,23 +177,102 @@ border_rules = [
 | Python | Not suitable for terminal multiplexing performance. Deployment complexity. |
 | TypeScript (Node) | Poor PTY support on Windows. Runtime dependency. |
 
+## ADR-9: Binary Split Layout Tree
+
+**Decision:** Represent pane layout as a binary tree (`LayoutNode`) instead of a flat array.
+
+**Context:** Flat pane arrays can only express uniform grids. Real terminal workflows need tmux-style mixed splits — e.g., a large editor pane on the left, two stacked terminals on the right.
+
+**Implementation:**
+
+```
+Internal Node (Split)          Leaf Node (Pane)
+├── SplitDir: H or V           └── *PaneModel
+├── Ratio: float (left share)
+├── Left: *LayoutNode
+└── Right: *LayoutNode
+```
+
+- `SplitLeaf(paneID, dir)` splits a leaf into two children
+- `RemoveLeaf(paneID)` promotes the sibling
+- `FindPaneAt(x, y, ...)` enables mouse-click pane selection
+- `SerializeLayout()` / `DeserializeLayout()` persist the tree as JSON in the daemon's `Tab.Layout` field
+
+**Consequences:**
+
+- Supports arbitrarily nested mixed H/V splits
+- Mouse clicks resolve to the correct pane via spatial hit-testing
+- Layout survives client disconnect — daemon stores serialized JSON, TUI rebuilds tree on reconnect
+- Minimum pane dimensions (10 cols, 4 rows) enforced during recursive resize
+
+## ADR-10: Shell Integration via Init Script Injection
+
+**Decision:** Automatically inject OSC 7 working-directory hooks when spawning shells.
+
+**Context:** Terminal emulators track the shell's CWD via OSC 7 escape sequences (`\e]7;file://host/path\e\\`), but most shells don't emit them by default. Requiring manual shell configuration is a poor UX.
+
+**Approach (per shell):**
+
+| Shell | Injection method |
+|---|---|
+| bash | `--rcfile ~/.aethel/shellinit/bash-init.sh` |
+| zsh | `ZDOTDIR=~/.aethel/shellinit/zsh` (custom `.zshenv` + `.zshrc`) |
+| PowerShell | `-NoProfile -File ~/.aethel/shellinit/pwsh-init.ps1` |
+| fish | No injection needed — emits OSC 7 natively |
+
+Each init script sources the user's original shell config first, then appends the OSC 7 hook. Scripts are embedded in the binary via `//go:embed` and written to `~/.aethel/shellinit/` at daemon startup.
+
+**Consequences:**
+
+- Zero-config CWD tracking — pane borders show the live working directory automatically
+- User's shell customizations (PS1, aliases, functions) are fully preserved
+- PTY `SetEnv()` interface method enables passing environment variables to child processes
+- Fish users get CWD tracking with no changes at all
+
+## ADR-11: Ring Buffer for Output History
+
+**Decision:** Use a fixed-capacity circular byte buffer per pane to capture PTY output for replay on client reconnect.
+
+**Context:** When a TUI client disconnects and reconnects, it needs to see previous terminal content. Storing all output is infeasible for long-running sessions. A ring buffer automatically evicts old data while keeping the most recent output.
+
+**Implementation:**
+
+- `internal/ringbuf.RingBuffer` — thread-safe circular buffer
+- Capacity: `ghost_buffer.max_lines * 512` bytes (default ~256KB per pane)
+- Write path: `daemon.streamPTYOutput()` writes to both the ring buffer and the broadcast channel
+- Replay path: `handleAttach()` iterates all panes and sends buffered output to the reconnecting client
+
+**Consequences:**
+
+- Reconnecting clients instantly see recent terminal content
+- Memory usage is bounded and predictable
+- Old output is silently evicted — no manual cleanup needed
+- Basis for future ghost buffer rendering (dimmed historical content)
+
 ## Storage Layout
 
 ```
 ~/.aethel/
 ├── config.toml
+├── aethel.log               # TUI client log
+├── aetheld.log              # Daemon log
+├── aetheld.sock             # IPC socket (Unix) / Named Pipe (Windows)
+├── shellinit/               # Auto-generated shell integration scripts
+│   ├── bash-init.sh
+│   ├── pwsh-init.ps1
+│   └── zsh/
+│       ├── .zshenv
+│       └── .zshrc
 ├── state/
 │   ├── workspace.json
 │   └── workspace.json.bak
 ├── data/
-│   └── aethel.db           # SQLite
-├── plugins/
+│   └── aethel.db           # SQLite (planned)
+├── plugins/                 # (planned)
 │   ├── ai.toml
 │   ├── build.toml
 │   ├── infrastructure.toml
 │   └── webhook.toml
-├── logs/
-│   └── aetheld.log
-└── secrets/
+└── secrets/                 # (planned)
     └── tokens.enc
 ```

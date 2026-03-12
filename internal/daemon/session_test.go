@@ -7,7 +7,7 @@ import (
 )
 
 func TestSessionManagerCreateTab(t *testing.T) {
-	sm := daemon.NewSessionManager()
+	sm := daemon.NewSessionManager(1024)
 	tab := sm.CreateTab("test-tab")
 
 	if tab.ID == "" {
@@ -24,7 +24,7 @@ func TestSessionManagerCreateTab(t *testing.T) {
 }
 
 func TestSessionManagerCreatePane(t *testing.T) {
-	sm := daemon.NewSessionManager()
+	sm := daemon.NewSessionManager(1024)
 	tab := sm.CreateTab("test-tab")
 	pane, err := sm.CreatePane(tab.ID, "")
 	if err != nil {
@@ -42,7 +42,7 @@ func TestSessionManagerCreatePane(t *testing.T) {
 }
 
 func TestSessionManagerDestroyPane(t *testing.T) {
-	sm := daemon.NewSessionManager()
+	sm := daemon.NewSessionManager(1024)
 	tab := sm.CreateTab("test-tab")
 	pane, _ := sm.CreatePane(tab.ID, "")
 
@@ -57,7 +57,7 @@ func TestSessionManagerDestroyPane(t *testing.T) {
 }
 
 func TestSessionManagerDestroyTab(t *testing.T) {
-	sm := daemon.NewSessionManager()
+	sm := daemon.NewSessionManager(1024)
 	tab := sm.CreateTab("test-tab")
 	sm.CreatePane(tab.ID, "")
 
@@ -72,7 +72,7 @@ func TestSessionManagerDestroyTab(t *testing.T) {
 }
 
 func TestSessionManagerActiveTab(t *testing.T) {
-	sm := daemon.NewSessionManager()
+	sm := daemon.NewSessionManager(1024)
 	tab1 := sm.CreateTab("tab-1")
 	tab2 := sm.CreateTab("tab-2")
 
@@ -87,7 +87,7 @@ func TestSessionManagerActiveTab(t *testing.T) {
 }
 
 func TestSessionManagerCreatePaneInvalidTab(t *testing.T) {
-	sm := daemon.NewSessionManager()
+	sm := daemon.NewSessionManager(1024)
 	_, err := sm.CreatePane("nonexistent", "")
 	if err == nil {
 		t.Error("expected error for nonexistent tab")
@@ -95,7 +95,7 @@ func TestSessionManagerCreatePaneInvalidTab(t *testing.T) {
 }
 
 func TestSessionManagerDestroyTabUpdatesActiveTab(t *testing.T) {
-	sm := daemon.NewSessionManager()
+	sm := daemon.NewSessionManager(1024)
 	tab1 := sm.CreateTab("tab-1")
 	tab2 := sm.CreateTab("tab-2")
 

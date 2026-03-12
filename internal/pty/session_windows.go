@@ -4,6 +4,7 @@ package pty
 
 import (
 	"io"
+	"os"
 	"syscall"
 
 	"github.com/charmbracelet/x/conpty"
@@ -15,6 +16,7 @@ type winSession struct {
 	handle uintptr
 	cols   int
 	rows   int
+	env    []string
 }
 
 func New() Session {
@@ -25,6 +27,10 @@ func newWithSize(cols, rows int) Session {
 	return &winSession{cols: cols, rows: rows}
 }
 
+func (s *winSession) SetEnv(env []string) {
+	s.env = env
+}
+
 func (s *winSession) Start(cmd string, args ...string) error {
 	cp, err := conpty.New(s.cols, s.rows, 0)
 	if err != nil {
@@ -33,7 +39,11 @@ func (s *winSession) Start(cmd string, args ...string) error {
 	s.cpty = cp
 
 	fullArgs := append([]string{cmd}, args...)
-	pid, handle, err := cp.Spawn(cmd, fullArgs, &syscall.ProcAttr{})
+	attr := &syscall.ProcAttr{}
+	if len(s.env) > 0 {
+		attr.Env = append(os.Environ(), s.env...)
+	}
+	pid, handle, err := cp.Spawn(cmd, fullArgs, attr)
 	if err != nil {
 		cp.Close()
 		return err
