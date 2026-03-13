@@ -3,6 +3,7 @@ package persist
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 )
 
@@ -21,10 +22,14 @@ func Save(path string, state map[string]any) error {
 		return fmt.Errorf("write temp file: %w", err)
 	}
 
-	// Rotate: current → .bak (ignore error if current doesn't exist)
+	// Rotate: current → .bak (best-effort — log but don't fail)
 	if _, err := os.Stat(path); err == nil {
-		os.Remove(bakPath)
-		os.Rename(path, bakPath)
+		if err := os.Remove(bakPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("warning: remove old backup: %v", err)
+		}
+		if err := os.Rename(path, bakPath); err != nil {
+			log.Printf("warning: rotate workspace to backup: %v", err)
+		}
 	}
 
 	// Promote: .tmp → current

@@ -123,21 +123,37 @@ func (d *Daemon) Stop() {
 func (d *Daemon) snapshot() {
 	d.snapshotMu.Lock()
 	defer d.snapshotMu.Unlock()
+	d.snapshotLocked()
+}
 
+// snapshotDebounced triggers a snapshot unless one happened within the last second.
+// The debounce check and snapshot execute under the same lock hold to prevent
+// TOCTOU races where two goroutines both pass the time check.
+func (d *Daemon) snapshotDebounced() {
+	d.snapshotMu.Lock()
+	defer d.snapshotMu.Unlock()
+	if time.Since(d.lastSnapshot) < time.Second {
+		return
+	}
+	d.snapshotLocked()
+}
+
+// snapshotLocked performs the actual snapshot work. Caller must hold snapshotMu.
+func (d *Daemon) snapshotLocked() {
 	state := d.buildWorkspaceState()
-	wsPath := config.WorkspacePath()
 
-	if err := persist.Save(wsPath, state); err != nil {
+	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
 	}
 
-	// Flush ghost buffers
+	// Flush ghost buffers using consistent snapshot
+	_, tabs, panesByTab := d.session.SnapshotState()
 	bufDir := config.BufferDir()
 	buffers := make(map[string][]byte)
 	var activePaneIDs []string
 
-	for _, tab := range d.session.Tabs() {
-		for _, pane := range d.session.Panes(tab.ID) {
+	for _, tab := range tabs {
+		for _, pane := range panesByTab[tab.ID] {
 			activePaneIDs = append(activePaneIDs, pane.ID)
 			if pane.OutputBuf != nil {
 				if data := pane.OutputBuf.Bytes(); len(data) > 0 {
@@ -155,18 +171,6 @@ func (d *Daemon) snapshot() {
 	}
 
 	d.lastSnapshot = time.Now()
-	log.Printf("snapshot saved (%d tabs, %d panes)", len(d.session.Tabs()), len(activePaneIDs))
-}
-
-// snapshotDebounced triggers a snapshot unless one happened within the last second.
-func (d *Daemon) snapshotDebounced() {
-	d.snapshotMu.Lock()
-	if time.Since(d.lastSnapshot) < time.Second {
-		d.snapshotMu.Unlock()
-		return
-	}
-	d.snapshotMu.Unlock()
-	d.snapshot()
 }
 
 // restoreWorkspace loads workspace state from disk.
@@ -199,6 +203,9 @@ func (d *Daemon) restoreWorkspace() error {
 		}
 	}
 
+	bufDir := config.BufferDir()
+	restoredPanes := 0
+
 	// Restore tabs and panes
 	for _, t := range tabs {
 		tabMap, ok := t.(map[string]any)
@@ -208,7 +215,8 @@ func (d *Daemon) restoreWorkspace() error {
 		tabID, _ := tabMap["id"].(string)
 		tabName, _ := tabMap["name"].(string)
 		tabColor, _ := tabMap["color"].(string)
-		if tabID == "" {
+		if !isValidHexID(tabID, "tab-") {
+			log.Printf("restore: skipping invalid tab ID: %q", tabID)
 			continue
 		}
 
@@ -226,17 +234,22 @@ func (d *Daemon) restoreWorkspace() error {
 			}
 		}
 
-		// Restore pane IDs
+		// Restore panes for this tab
+		var tabPanes []*Pane
 		if paneIDs, ok := tabMap["panes"].([]any); ok {
 			for _, pid := range paneIDs {
 				paneID, _ := pid.(string)
-				if paneID == "" {
+				if !isValidHexID(paneID, "pane-") {
+					log.Printf("restore: skipping invalid pane ID: %q", paneID)
 					continue
 				}
 				tab.Panes = append(tab.Panes, paneID)
 
-				// Create pane object
+				// Create pane object (nil-safe lookup)
 				paneData := panesByID[paneID]
+				if paneData == nil {
+					paneData = map[string]any{}
+				}
 				cwd, _ := paneData["cwd"].(string)
 				name, _ := paneData["name"].(string)
 
@@ -249,21 +262,17 @@ func (d *Daemon) restoreWorkspace() error {
 				}
 
 				// Load ghost buffer from disk
-				bufDir := config.BufferDir()
 				if bufData, err := persist.LoadBuffer(bufDir, paneID); err == nil && len(bufData) > 0 {
 					pane.OutputBuf.Write(bufData)
 				}
 
-				d.session.mu.Lock()
-				d.session.panes[paneID] = pane
-				d.session.mu.Unlock()
+				tabPanes = append(tabPanes, pane)
 			}
 		}
 
-		d.session.mu.Lock()
-		d.session.tabs[tabID] = tab
-		d.session.tabOrder = append(d.session.tabOrder, tabID)
-		d.session.mu.Unlock()
+		// Insert tab and all its panes under a single lock hold
+		d.session.RestoreTab(tab, tabPanes)
+		restoredPanes += len(tabPanes)
 	}
 
 	if activeTab != "" {
@@ -271,8 +280,27 @@ func (d *Daemon) restoreWorkspace() error {
 	}
 
 	d.restored = true
-	log.Printf("restored %d tabs, %d panes from disk", len(tabs), len(panes))
+	log.Printf("restored %d tabs, %d panes from disk", len(tabs), restoredPanes)
 	return nil
+}
+
+// isValidHexID checks that an ID matches the format prefix + 8 hex chars (e.g. "pane-a1b2c3d4").
+func isValidHexID(id, prefix string) bool {
+	if len(id) != len(prefix)+8 {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if id[i] != prefix[i] {
+			return false
+		}
+	}
+	for i := len(prefix); i < len(id); i++ {
+		c := id[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // respawnShells starts a shell process in each pane that was restored from disk.
@@ -285,7 +313,12 @@ func (d *Daemon) respawnShells() {
 
 			ptySession := apty.New()
 			if pane.CWD != "" {
-				ptySession.SetCWD(pane.CWD)
+				if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
+					log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
+					pane.CWD = ""
+				} else {
+					ptySession.SetCWD(pane.CWD)
+				}
 			}
 
 			if err := d.spawnShell(pane, ptySession); err != nil {
@@ -544,7 +577,7 @@ func (d *Daemon) broadcastState() {
 }
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
-	tabs := d.session.Tabs()
+	activeTab, tabs, panesByTab := d.session.SnapshotState()
 	tabList := make([]map[string]any, 0, len(tabs))
 	paneList := make([]map[string]any, 0)
 
@@ -562,7 +595,7 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 		}
 		tabList = append(tabList, tabData)
 
-		for _, pane := range d.session.Panes(tab.ID) {
+		for _, pane := range panesByTab[tab.ID] {
 			paneData := map[string]any{
 				"id":     pane.ID,
 				"tab_id": pane.TabID,
@@ -576,7 +609,7 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 	}
 
 	return map[string]any{
-		"active_tab": d.session.ActiveTabID(),
+		"active_tab": activeTab,
 		"tabs":       tabList,
 		"panes":      paneList,
 	}

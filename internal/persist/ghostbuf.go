@@ -1,11 +1,18 @@
 package persist
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// sanitizeID strips directory components to prevent path traversal.
+func sanitizeID(id string) string {
+	return filepath.Base(id)
+}
 
 // SaveBuffer writes a pane's output buffer to a file atomically.
 func SaveBuffer(dir, paneID string, data []byte) error {
@@ -13,6 +20,7 @@ func SaveBuffer(dir, paneID string, data []byte) error {
 		return nil
 	}
 
+	paneID = sanitizeID(paneID)
 	path := filepath.Join(dir, paneID+".bin")
 	tmpPath := path + ".tmp"
 
@@ -20,7 +28,9 @@ func SaveBuffer(dir, paneID string, data []byte) error {
 		return fmt.Errorf("write buffer %s: %w", paneID, err)
 	}
 
-	os.Remove(path)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("warning: remove old buffer %s: %v", paneID, err)
+	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename buffer %s: %w", paneID, err)
 	}
@@ -30,6 +40,7 @@ func SaveBuffer(dir, paneID string, data []byte) error {
 // LoadBuffer reads a pane's saved output buffer from disk.
 // Returns nil, nil if the file doesn't exist.
 func LoadBuffer(dir, paneID string) ([]byte, error) {
+	paneID = sanitizeID(paneID)
 	path := filepath.Join(dir, paneID+".bin")
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -38,18 +49,20 @@ func LoadBuffer(dir, paneID string) ([]byte, error) {
 	return data, err
 }
 
-// SaveAllBuffers writes all pane buffers to disk.
+// SaveAllBuffers writes all pane buffers to disk (best-effort).
+// Returns the first error encountered but continues saving remaining buffers.
 func SaveAllBuffers(dir string, buffers map[string][]byte) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create buffer dir: %w", err)
 	}
 
+	var errs []error
 	for paneID, data := range buffers {
 		if err := SaveBuffer(dir, paneID, data); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // CleanBuffers removes buffer files for panes that no longer exist.
@@ -73,7 +86,9 @@ func CleanBuffers(dir string, activePaneIDs []string) error {
 		}
 		paneID := strings.TrimSuffix(e.Name(), ".bin")
 		if !active[paneID] {
-			os.Remove(filepath.Join(dir, e.Name()))
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+				log.Printf("warning: clean orphan buffer %s: %v", paneID, err)
+			}
 		}
 	}
 	return nil

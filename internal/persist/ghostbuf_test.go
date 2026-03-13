@@ -90,6 +90,37 @@ func TestCleanBuffers(t *testing.T) {
 	}
 }
 
+func TestSaveBufferSanitizesPathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	bufDir := filepath.Join(dir, "buffers")
+	os.MkdirAll(bufDir, 0700)
+
+	// A malicious pane ID with path traversal should be sanitized
+	data := []byte("should stay in bufDir")
+	if err := persist.SaveBuffer(bufDir, "../../etc/evil", data); err != nil {
+		t.Fatalf("SaveBuffer with traversal: %v", err)
+	}
+
+	// File should be written inside bufDir as "evil.bin" (filepath.Base strips traversal)
+	if _, err := os.Stat(filepath.Join(bufDir, "evil.bin")); err != nil {
+		t.Errorf("expected sanitized file in bufDir: %v", err)
+	}
+
+	// No file should exist outside bufDir
+	if _, err := os.Stat(filepath.Join(dir, "evil.bin")); !os.IsNotExist(err) {
+		t.Error("file should not be written outside bufDir")
+	}
+
+	// LoadBuffer should also sanitize
+	loaded, err := persist.LoadBuffer(bufDir, "../../etc/evil")
+	if err != nil {
+		t.Fatalf("LoadBuffer with traversal: %v", err)
+	}
+	if string(loaded) != string(data) {
+		t.Errorf("loaded = %q, want %q", loaded, data)
+	}
+}
+
 func TestSaveBufferSkipsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	if err := persist.SaveBuffer(dir, "pane-empty", nil); err != nil {
