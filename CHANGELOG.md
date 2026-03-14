@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-03-14
+
 ### Added
 
 - Multi-instance support via `AETHEL_HOME` env var — run production and dev instances simultaneously
