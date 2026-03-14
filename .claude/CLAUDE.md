@@ -87,7 +87,7 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 ## Milestones
 
 - **M1 (Done):** Foundation — daemon, TUI, IPC, PTY, tabs, splits, shell integration, mouse, scrollback, daemon lifecycle
-- **M2 (In Progress):** Persistence — workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions
+- **M2 (Done):** Persistence — workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions
 - **M3:** Resume engine — regex scrapers, AI session resume
 - **M4:** Plugin system — TOML plugins, typed panes
 - **M5:** Polish — JSON transformer, observability, encrypted tokens
