@@ -6,10 +6,10 @@ Aethel is a persistent workflow orchestrator / terminal multiplexer for AI-nativ
 
 ## Tech Stack
 
-- **Language:** Go 1.24
+- **Language:** Go 1.25
 - **Module path:** `github.com/artyomsv/aethel`
-- **TUI:** Bubble Tea v1 (`github.com/charmbracelet/bubbletea` v1.3.10)
-- **Styling:** Lipgloss v1 (`github.com/charmbracelet/lipgloss` v1.1.0)
+- **TUI:** Bubble Tea v2 (`charm.land/bubbletea/v2` v2.0.2)
+- **Styling:** Lipgloss v2 (`charm.land/lipgloss/v2` v2.0.2)
 - **PTY (Unix):** `creack/pty/v2`
 - **PTY (Windows):** `charmbracelet/x/conpty` v0.2.0
 - **Config:** TOML via `BurntSushi/toml`
@@ -49,7 +49,7 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 
 - Platform-specific code uses `//go:build` tags (not `// +build`)
 - ConPTY API: `conpty.New(width, height, flags)` — 3 args, uses `Spawn()`, reads/writes directly on ConPty object
-- Bubble Tea v2 / Lipgloss v2 are NOT available — use v1 import paths
+- Bubble Tea v2 / Lipgloss v2 — import paths: `charm.land/bubbletea/v2`, `charm.land/lipgloss/v2`. View() returns `tea.View` struct (not string). KeyMsg is `tea.KeyPressMsg`. MouseMsg split into `tea.MouseClickMsg`, `tea.MouseWheelMsg`, `tea.MouseMotionMsg`, `tea.MouseReleaseMsg`. Clipboard via `tea.SetClipboard()`/`tea.ReadClipboard()` (OSC 52). Mouse modifiers: `msg.Mod.Contains(tea.ModCtrl)`. Quit: `tea.Quit` (function value, not call)
 - IPC protocol: 4-byte big-endian length prefix + JSON payload
 - `.gitignore` uses root-anchored patterns (`/aethel`, `/aetheld`) to avoid matching `cmd/` directories
 - Pane layout uses a binary split tree (`LayoutNode` in `internal/tui/layout.go`) — each internal node has its own `SplitDir`, enabling mixed H/V splits (tmux-style). The tree is serialized to JSON and persisted in the daemon's `Tab.Layout` field for reconnect restoration
@@ -116,4 +116,4 @@ AETHEL_HOME=/custom/path ./aethel  # Arbitrary data directory
 - **M5:** Polish — JSON transformer, observability, encrypted tokens
 - **M6:** Pane Focus — full-window focus mode for single pane
 - **M7:** Pane Notes — side-by-side note-taking linked to panes
-- **M8:** Bubble Tea v2 migration
+- **M8 (Done):** Bubble Tea v2 + Lipgloss v2 migration — declarative View, typed mouse events, built-in clipboard (OSC 52), removed internal/clipboard package

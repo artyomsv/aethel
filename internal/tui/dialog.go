@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
 
 	"github.com/artyomsv/aethel/internal/config"
@@ -147,7 +147,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 
 // --- Input handling ---
 
-func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.dialog {
 	case dialogAbout:
 		return m.handleAboutKey(msg)
@@ -171,7 +171,7 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleAboutKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogNone
@@ -199,7 +199,7 @@ func (m Model) handleAboutKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	fields := settingsFields()
 	key := msg.String()
 
@@ -248,7 +248,7 @@ func (m Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleShortcutsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleShortcutsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogAbout
@@ -257,7 +257,7 @@ func (m Model) handleShortcutsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "n":
 		// Return to appropriate dialog based on confirm kind
@@ -349,7 +349,7 @@ func (m Model) renderDialog() string {
 		}
 	}
 
-	box := dialogBorder.Width(width).Render(content)
+	box := dialogBorder.Width(width + 2).Render(content) // +2: v2 borders consume from width budget
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -401,7 +401,7 @@ func (m Model) renderSettingsDialog() string {
 		val := f.get(&m)
 		var valRendered string
 		if m.dialogEdit && i == m.dialogCursor {
-			valRendered = dialogEditStyle.Render(m.dialogInput + "▎")
+			valRendered = dialogEditStyle.Render(m.dialogInput + "│")
 		} else {
 			valRendered = dialogValStyle.Render(val)
 		}
@@ -515,7 +515,7 @@ func (m *Model) createPaneCategories() []struct {
 	return result
 }
 
-func (m Model) handleCreatePaneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleCreatePaneKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	switch key {
@@ -866,7 +866,7 @@ func (m Model) renderCreatePaneDialog() string {
 
 // --- Instance form dialog ---
 
-func (m Model) handleInstanceFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleInstanceFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	p := m.pluginRegistry.Get(m.selectedPlugin)
 	if p == nil {
 		m.dialog = dialogNone
@@ -1026,7 +1026,7 @@ func (m Model) renderInstanceFormDialog() string {
 		val := m.instanceFormValues[i]
 		var valRendered string
 		if m.dialogEdit && i == m.instanceFormCursor {
-			valRendered = dialogEditStyle.Render(m.dialogInput + "▎")
+			valRendered = dialogEditStyle.Render(m.dialogInput + "│")
 		} else if val != "" {
 			valRendered = dialogValStyle.Render(val)
 		} else {
@@ -1059,7 +1059,7 @@ func (m Model) renderInstanceFormDialog() string {
 
 // --- Plugins management dialog ---
 
-func (m Model) handlePluginsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	allPlugins := m.sortedPlugins()
 	totalItems := len(allPlugins) + 2 // plugins + Reload + Reset
 
@@ -1188,7 +1188,7 @@ func (m Model) renderPluginsDialog() string {
 
 // --- TOML editor dialog ---
 
-func (m Model) handleTOMLEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.tomlEditor == nil {
 		m.dialog = dialogPlugins
 		return m, nil
@@ -1224,7 +1224,7 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // --- Plugin error dialog ---
 
-func (m Model) handlePluginErrorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handlePluginErrorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "enter":
 		m.dialog = dialogNone

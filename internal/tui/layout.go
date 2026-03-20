@@ -3,7 +3,7 @@ package tui
 import (
 	"encoding/json"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // SplitDir determines how child nodes are arranged.

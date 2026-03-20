@@ -8,9 +8,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/artyomsv/aethel/internal/clipboard"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/ipc"
 	"github.com/artyomsv/aethel/internal/plugin"
@@ -157,7 +156,7 @@ func (m Model) WindowSize() (width, height int) {
 
 func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")
-	return tea.Batch(tea.HideCursor, m.listenForMessages())
+	return m.listenForMessages()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -195,14 +194,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeTabs()
 		return m, m.resizeAllPanes()
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
-	case tea.MouseMsg:
-		if msg.Ctrl {
+	case tea.MouseClickMsg:
+		if msg.Mod.Contains(tea.ModCtrl) {
 			return m, nil
 		}
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+		if msg.Button == tea.MouseLeft {
 			if msg.Y == 0 {
 				// Tab bar click
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
@@ -223,25 +222,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			return m, nil
 		}
+		return m, nil
+
+	case tea.MouseWheelMsg:
 		lines := m.cfg.UI.MouseScrollLines
 		if lines < 1 {
 			lines = 3
 		}
-		if msg.Button == tea.MouseButtonWheelUp {
-			if tab := m.activeTabModel(); tab != nil {
-				if pane := tab.ActivePaneModel(); pane != nil {
+		if tab := m.activeTabModel(); tab != nil {
+			if pane := tab.ActivePaneModel(); pane != nil {
+				if msg.Button == tea.MouseWheelUp {
 					pane.ScrollUp(lines)
-				}
-			}
-		} else if msg.Button == tea.MouseButtonWheelDown {
-			if tab := m.activeTabModel(); tab != nil {
-				if pane := tab.ActivePaneModel(); pane != nil {
+				} else if msg.Button == tea.MouseWheelDown {
 					pane.ScrollDown(lines)
 				}
 			}
 		}
+		return m, nil
+
+	case tea.ClipboardMsg:
+		m.sendClipboardToPane(msg.Content)
+		return m, nil
+
+	case tea.PasteMsg:
+		m.sendClipboardToPane(msg.Content)
 		return m, nil
 
 	case PaneOutputMsg:
@@ -301,46 +306,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
+	var content string
+
 	if m.width == 0 || m.height == 0 {
-		return "Connecting to aetheld..."
-	}
-
-	if m.width < minTermWidth || m.height < minTermHeight {
-		msg := fmt.Sprintf("Terminal too small (%dx%d)\nMinimum: %dx%d",
+		content = "Connecting to aetheld..."
+	} else if m.width < minTermWidth || m.height < minTermHeight {
+		content = fmt.Sprintf("Terminal too small (%dx%d)\nMinimum: %dx%d",
 			m.width, m.height, minTermWidth, minTermHeight)
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, msg)
+		content = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+	} else if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
+		// TOML editor takes over the full screen (bypasses dialog rendering)
+		content = m.renderTOMLEditorFullScreen()
+	} else if m.dialog != dialogNone {
+		content = m.renderDialog()
+	} else {
+		var sections []string
+
+		// Tab bar (1 line)
+		sections = append(sections, m.renderTabBar())
+
+		// Active tab content
+		tabH := m.height - chromeHeight
+		if m.activeTab < len(m.tabs) {
+			tab := m.tabs[m.activeTab]
+			tab.Resize(m.width, tabH)
+			sections = append(sections, tab.View())
+		}
+
+		// Status bar
+		sections = append(sections, m.renderStatusBar())
+
+		content = lipgloss.JoinVertical(lipgloss.Left, sections...)
 	}
 
-	var sections []string
-
-	// Tab bar (1 line)
-	sections = append(sections, m.renderTabBar())
-
-	// Active tab content
-	tabH := m.height - chromeHeight
-	if m.activeTab < len(m.tabs) {
-		tab := m.tabs[m.activeTab]
-		tab.Resize(m.width, tabH)
-		sections = append(sections, tab.View())
-	}
-
-	// Status bar
-	sections = append(sections, m.renderStatusBar())
-
-	// TOML editor takes over the full screen (bypasses dialog rendering)
-	if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
-		return m.renderTOMLEditorFullScreen()
-	}
-
-	if m.dialog != dialogNone {
-		return m.renderDialog()
-	}
-
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
 }
 
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	kb := m.cfg.Keybindings
 
@@ -456,7 +462,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key == kb.Paste:
-		return m, m.pasteClipboard()
+		return m, tea.ReadClipboard
 
 	case key == "ctrl+n":
 		m.dialog = dialogCreatePane
@@ -492,7 +498,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m Model) handleRenameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	switch key {
@@ -527,7 +533,7 @@ func (m Model) handleRenameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m Model) handlePaneRenameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handlePaneRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	switch key {
@@ -1203,7 +1209,7 @@ func (m Model) listenForMessages() tea.Cmd {
 		msg, err := m.client.Receive()
 		if err != nil {
 			log.Printf("listen error: %v", err)
-			return tea.Quit()
+			return tea.QuitMsg{}
 		}
 
 		switch msg.Type {
@@ -1370,7 +1376,7 @@ func (m Model) cycleTabColor() tea.Cmd {
 	return m.updateTab(tab.ID, tab.Name, tab.Color)
 }
 
-func (m Model) forwardInput(keyMsg tea.KeyMsg) tea.Cmd {
+func (m Model) forwardInput(keyMsg tea.KeyPressMsg) tea.Cmd {
 	return func() tea.Msg {
 		tab := m.activeTabModel()
 		if tab == nil {
@@ -1395,41 +1401,33 @@ func (m Model) forwardInput(keyMsg tea.KeyMsg) tea.Cmd {
 	}
 }
 
-func (m Model) pasteClipboard() tea.Cmd {
-	return func() tea.Msg {
-		text, err := clipboard.Read()
-		if err != nil {
-			log.Printf("clipboard read: %v", err)
-			return nil
-		}
-		if text == "" {
-			return nil
-		}
-
-		tab := m.activeTabModel()
-		if tab == nil {
-			return nil
-		}
-		pane := tab.ActivePaneModel()
-		if pane == nil {
-			return nil
-		}
-
-		msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
-			PaneID: pane.ID,
-			Data:   []byte(text),
-		})
-		m.client.Send(msg)
-		return nil
+func (m Model) sendClipboardToPane(text string) {
+	if text == "" {
+		return
 	}
+	tab := m.activeTabModel()
+	if tab == nil {
+		return
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return
+	}
+	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
+		PaneID: pane.ID,
+		Data:   []byte(text),
+	})
+	m.client.Send(msg)
 }
 
-func keyToBytes(keyMsg tea.KeyMsg) []byte {
+func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 	s := keyMsg.String()
 
 	switch s {
 	case "enter":
 		return []byte("\r")
+	case "tab":
+		return []byte("\t")
 	case "backspace":
 		return []byte{0x7f}
 	case "space":
@@ -1490,9 +1488,9 @@ func keyToBytes(keyMsg tea.KeyMsg) []byte {
 		}
 	}
 
-	// Printable rune(s) — handles single ASCII, multi-byte UTF-8, and multi-rune IME input.
-	if keyMsg.Type == tea.KeyRunes && len(keyMsg.Runes) > 0 {
-		return []byte(string(keyMsg.Runes))
+	// Printable text — handles single ASCII, multi-byte UTF-8, and multi-rune IME input.
+	if keyMsg.Text != "" {
+		return []byte(keyMsg.Text)
 	}
 
 	return nil

@@ -1,13 +1,14 @@
 package tui
 
 import (
+	"image/color"
 	"net/url"
 	"strings"
 	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 
@@ -141,12 +142,14 @@ func (p *PaneModel) View() string {
 	content := p.renderContent()
 
 	// Render content with left, right, bottom borders (no top).
+	// Lipgloss v2: Width/Height include borders in the budget (v1 was additive).
+	// +2 width for left+right borders, +1 height for bottom border (top removed).
 	bodyStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderTop(false).
 		BorderForeground(borderColor).
-		Width(innerW).
-		Height(innerH)
+		Width(innerW + 2).
+		Height(innerH + 1)
 
 	body := bodyStyle.Render(content)
 
@@ -156,7 +159,7 @@ func (p *PaneModel) View() string {
 	return topLine + "\n" + body
 }
 
-func buildTopBorder(width int, cwd, name string, color lipgloss.TerminalColor, ghost, resuming, preparing bool, spinnerFrame int) string {
+func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing bool, spinnerFrame int) string {
 	if ghost {
 		if name == "" {
 			name = "restored"
