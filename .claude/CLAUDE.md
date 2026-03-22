@@ -119,6 +119,6 @@ AETHEL_HOME=/custom/path ./aethel  # Arbitrary data directory
 - **M3 (Done):** Resume engine — preassign_id strategy for Claude Code, session_scrape for tools with output tokens, rerun for SSH/Stripe
 - **M4 (Done):** Plugin system — typed panes, TOML plugins, plugin registry, error handlers, pane creation dialog (Ctrl+N), 4 built-in plugins: terminal + claude-code (production), ssh + stripe (POC)
 - **M5:** Polish — JSON transformer, observability, encrypted tokens
-- **M6:** Pane Focus — full-window focus mode for single pane
+- **M6 (Done):** Pane Focus — F11 toggles active pane full-screen (`TabModel.focusMode`). Layout tree stays intact; `Resize()`/`View()` skip non-active panes. Pane nav disabled in focus. Split/close auto-exit focus. `[focus]` in status bar. Not persisted
 - **M7:** Pane Notes — side-by-side note-taking linked to panes
 - **M8 (Done):** Bubble Tea v2 + Lipgloss v2 migration — declarative View, typed mouse events, platform-native clipboard (Win32/pbcopy/xclip), text selection (keyboard + mouse), bracketed paste

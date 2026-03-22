@@ -520,9 +520,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 
 	case key == kb.SplitHorizontal:
+		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+			tab.focusMode = false
+		}
 		return m, m.splitPane(SplitHorizontal)
 
 	case key == kb.SplitVertical:
+		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+			tab.focusMode = false
+		}
 		return m, m.splitPane(SplitVertical)
 
 	case key == kb.RenameTab:
@@ -569,19 +575,26 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key == kb.NextPane:
-		if tab := m.activeTabModel(); tab != nil {
+		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.NextPane()
 		}
 		return m, nil
 
 	case key == kb.PrevPane:
-		if tab := m.activeTabModel(); tab != nil {
+		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.PrevPane()
 		}
 		return m, nil
 
 	case key == kb.Paste:
 		return m, m.pasteClipboard()
+
+	case key == kb.FocusPane:
+		if tab := m.activeTabModel(); tab != nil && tab.Root != nil {
+			tab.ToggleFocus()
+			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+		}
+		return m, nil
 
 	case key == "ctrl+n":
 		m.dialog = dialogCreatePane
@@ -793,6 +806,11 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 					tab.RemovePane(id)
 				}
 			}
+		}
+
+		// Exit focus mode if the tree was reduced to a single pane or empty.
+		if tab.FocusMode() && (tab.Root == nil || tab.Root.IsLeaf()) {
+			tab.focusMode = false
 		}
 
 		// Add panes the daemon has but the tree doesn't.
@@ -1281,6 +1299,9 @@ func (m Model) renderStatusBar() string {
 				}
 			}
 			left = fmt.Sprintf("%s  %s", displayPath, paneInfo)
+			if tab.FocusMode() {
+				left = "[focus] " + left
+			}
 			if pane.scrollBack > 0 {
 				left += fmt.Sprintf("  ↑%d", pane.scrollBack)
 			}

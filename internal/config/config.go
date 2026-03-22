@@ -64,6 +64,7 @@ type KeybindingsConfig struct {
 	Paste           string `toml:"paste"`
 	JSONTransform   string `toml:"json_transform"`
 	QuickActions    string `toml:"quick_actions"`
+	FocusPane       string `toml:"focus_pane"`
 }
 
 func Default() Config {
@@ -109,6 +110,7 @@ func Default() Config {
 			Paste:           "ctrl+v",
 			JSONTransform:   "ctrl+j",
 			QuickActions:    "ctrl+a",
+			FocusPane:       "f11",
 		},
 	}
 }

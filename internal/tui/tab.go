@@ -9,6 +9,7 @@ type TabModel struct {
 	ActivePane string      // pane ID of the active pane
 	Width      int
 	Height     int
+	focusMode  bool // true = active pane fills entire tab (F11)
 }
 
 func NewTabModel(id, name string) *TabModel {
@@ -78,6 +79,22 @@ func (t *TabModel) activeIndex(leaves []*PaneModel) int {
 func (t *TabModel) Resize(w, h int) {
 	t.Width = w
 	t.Height = h
+	if t.focusMode {
+		if pane := t.ActivePaneModel(); pane != nil {
+			pane.Width = w
+			pane.Height = h
+			cols := w - 2
+			rows := h - 2
+			if cols < 1 {
+				cols = 1
+			}
+			if rows < 1 {
+				rows = 1
+			}
+			pane.ResizeVT(cols, rows)
+		}
+		return
+	}
 	if t.Root != nil {
 		resizeNode(t.Root, w, h)
 	}
@@ -88,7 +105,22 @@ func (t *TabModel) View() string {
 	if t.Root == nil {
 		return ""
 	}
+	if t.focusMode {
+		if pane := t.ActivePaneModel(); pane != nil {
+			return pane.View()
+		}
+	}
 	return renderNode(t.Root)
+}
+
+// ToggleFocus toggles pane focus mode on/off.
+func (t *TabModel) ToggleFocus() {
+	t.focusMode = !t.focusMode
+}
+
+// FocusMode returns whether focus mode is active.
+func (t *TabModel) FocusMode() bool {
+	return t.focusMode
 }
 
 // SplitAtPane splits the pane with the given ID, inserting a placeholder

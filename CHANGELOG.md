@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Pane focus mode (M6)** — F11 toggles active pane to full-screen; other panes keep running in background; `[focus]` status bar indicator; splits/close auto-exit focus
+- `focus_pane` keybinding config field (default `f11`)
+
 ## [0.8.0] - 2026-03-22
 
 ### Added

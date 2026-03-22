@@ -160,6 +160,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kb.ScrollPageUp, "Scroll page up"},
 		{kb.ScrollPageDown, "Scroll page down"},
 		{kb.Paste, "Paste clipboard"},
+		{kb.FocusPane, "Toggle focus mode"},
 		{"Ctrl+N", "New typed pane"},
 		{"Alt+1..9", "Switch to tab N"},
 		{"F1", "Help / About"},

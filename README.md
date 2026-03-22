@@ -220,7 +220,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 | **M3: Resume Engine** | Done | Regex scrapers, token extraction, AI session resume via pre-assigned UUIDs |
 | **M4: Plugin System** | Done | TOML plugins, typed panes, pane creation dialog, error handlers, window size persistence |
 | **M5: Polish** | Planned | JSON transformer, observability, encrypted tokens, OS service integration |
-| **M6: Pane Focus** | Planned | Full-window focus mode for single pane |
+| **M6: Pane Focus** | Done | F11 toggles active pane full-screen, other panes keep running |
 | **M7: Pane Notes** | Planned | Side-by-side note-taking linked to panes |
 | **M8: Bubble Tea v2** | Done | Bubble Tea v2/Lipgloss v2 migration, text selection, clipboard, editor enhancements |
 
