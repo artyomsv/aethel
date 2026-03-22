@@ -57,6 +57,7 @@ var (
 				Width(24)
 )
 
+
 // settingsField describes one editable config field.
 type settingsField struct {
 	label string
@@ -142,6 +143,14 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{"Ctrl+N", "New typed pane"},
 		{"Alt+1..9", "Switch to tab N"},
 		{"F1", "Help / About"},
+		{"Shift+Arrows", "Select text"},
+		{"Ctrl+Shift+←→", "Select word"},
+		{"Ctrl+Alt+Shift+←→", "Select 3 words"},
+		{"Ctrl+←→", "Jump word"},
+		{"Ctrl+Alt+←→", "Jump 3 words"},
+		{"Enter", "Copy selection"},
+		{"Right-click", "Copy selection"},
+		{"Esc", "Clear selection"},
 	}
 }
 
@@ -204,18 +213,20 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	if m.dialogEdit {
-		switch key {
-		case "esc":
+		switch {
+		case key == "esc":
 			m.dialogEdit = false
 			m.dialogInput = ""
-		case "enter":
+		case key == "enter":
 			fields[m.dialogCursor].set(&m, m.dialogInput)
 			m.dialogEdit = false
 			m.dialogInput = ""
-		case "backspace":
+		case key == "backspace":
 			if len(m.dialogInput) > 0 {
 				m.dialogInput = m.dialogInput[:len(m.dialogInput)-1]
 			}
+		case key == m.cfg.Keybindings.Paste:
+			return m, m.pasteToDialog()
 		default:
 			if len(key) == 1 {
 				m.dialogInput += key
@@ -316,6 +327,16 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // --- Rendering ---
 
 func (m Model) renderDialog() string {
+	// Determine dialog width: plugin-specific for instance screens only
+	width := dialogWidth
+	if m.dialog == dialogTOMLEditor {
+		width = 74
+	} else if m.selectedPlugin != "" && (m.dialog == dialogInstanceForm || (m.dialog == dialogCreatePane && m.createPaneStep == 2)) {
+		if p := m.pluginRegistry.Get(m.selectedPlugin); p != nil && p.Display.DialogWidth > 0 {
+			width = p.Display.DialogWidth
+		}
+	}
+
 	var content string
 
 	switch m.dialog {
@@ -339,17 +360,7 @@ func (m Model) renderDialog() string {
 		// Rendered in View() as full-screen, not here
 	}
 
-	// Use wider dialog for TOML editor, plugin-specific width, or default
-	width := dialogWidth
-	if m.dialog == dialogTOMLEditor {
-		width = 74
-	} else if m.selectedPlugin != "" {
-		if p := m.pluginRegistry.Get(m.selectedPlugin); p != nil && p.Display.DialogWidth > 0 {
-			width = p.Display.DialogWidth
-		}
-	}
-
-	box := dialogBorder.Width(width + 2).Render(content) // +2: v2 borders consume from width budget
+	box := dialogBorder.Width(width).Render(content)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -620,11 +631,15 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 			// If no saved instances, jump directly to the form
 			if len(m.instanceStore[m.selectedPlugin]) == 0 {
 				m.openInstanceForm(p)
-				return m, nil
+				return m, tea.ClearScreen // width changes — force full redraw
 			}
 			m.createPaneStep = 2
 		} else {
 			m.createPaneStep = 3 // skip instance list
+		}
+		// Plugin may have custom dialog_width — force redraw to avoid stale border cells
+		if p != nil && p.Display.DialogWidth > 0 {
+			return m, tea.ClearScreen
 		}
 		return m, nil
 	}
@@ -638,7 +653,7 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 			if p != nil {
 				m.openInstanceForm(p)
 			}
-			return m, nil
+			return m, tea.ClearScreen // width changes — force full redraw
 		}
 		// Select existing instance
 		idx := m.dialogCursor - 1
@@ -877,21 +892,21 @@ func (m Model) handleInstanceFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	if m.dialogEdit {
-		switch key {
-		case "esc":
+		switch {
+		case key == "esc":
 			m.dialogEdit = false
 			m.dialogInput = ""
-		case "enter":
+		case key == "enter":
 			if m.instanceFormCursor < len(fields) {
 				m.instanceFormValues[m.instanceFormCursor] = m.dialogInput
 			}
 			m.dialogEdit = false
 			m.dialogInput = ""
-		case "backspace":
+		case key == "backspace":
 			if len(m.dialogInput) > 0 {
 				m.dialogInput = m.dialogInput[:len(m.dialogInput)-1]
 			}
-		case "tab":
+		case key == "tab":
 			// Commit and advance
 			if m.instanceFormCursor < len(fields) {
 				m.instanceFormValues[m.instanceFormCursor] = m.dialogInput
@@ -901,6 +916,8 @@ func (m Model) handleInstanceFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.instanceFormCursor < totalItems-1 {
 				m.instanceFormCursor++
 			}
+		case key == m.cfg.Keybindings.Paste:
+			return m, m.pasteToDialog()
 		default:
 			if len(key) == 1 {
 				m.dialogInput += key

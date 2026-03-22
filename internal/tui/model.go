@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/artyomsv/aethel/internal/clipboard"
 	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/ipc"
 	"github.com/artyomsv/aethel/internal/plugin"
@@ -70,6 +71,9 @@ type spinnerTickMsg struct {
 	paneID string
 	frame  int
 }
+
+// dialogPasteMsg delivers clipboard content to the active dialog input field.
+type dialogPasteMsg string
 
 var tabColors = []string{
 	"",    // default (no custom color)
@@ -136,6 +140,10 @@ type Model struct {
 	selectedInstanceArgs []string               // args from selected instance (for IPC)
 	selectedInstanceName string                 // name from selected instance (for IPC)
 	tomlEditor           *TextEditor            // active TOML editor (nil when not editing)
+	selection            *Selection             // active text selection (nil when none)
+	mouseDown            bool                   // true while left mouse button is held
+	mouseStartX          int                    // screen X of mouse press
+	mouseStartY          int                    // screen Y of mouse press
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
@@ -201,19 +209,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Mod.Contains(tea.ModCtrl) {
 			return m, nil
 		}
+		// Right-click: copy selection to clipboard
+		if msg.Button == tea.MouseRight && m.selection != nil {
+			tab := m.activeTabModel()
+			if tab != nil {
+				if pane := tab.ActivePaneModel(); pane != nil {
+					text := extractText(pane, m.selection)
+					m.selection = nil
+					if text != "" {
+						return m, func() tea.Msg {
+							clipboard.Write(text)
+							return nil
+						}
+					}
+					return m, nil
+				}
+			}
+			m.selection = nil
+			return m, nil
+		}
 		if msg.Button == tea.MouseLeft {
 			if msg.Y == 0 {
 				// Tab bar click
+				m.mouseDown = false
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
 					cmd := m.switchTab(idx)
 					return m, cmd
 				}
 			} else if msg.Y < m.height-1 {
-				// Pane area click — offset Y by 1 (tab bar)
+				// Pane area — start tracking for drag selection
+				m.mouseDown = true
+				m.mouseStartX = msg.X
+				m.mouseStartY = msg.Y
+				m.selection = nil // clear previous selection
+			}
+		}
+		return m, nil
+
+	case tea.MouseMotionMsg:
+		if m.mouseDown {
+			tab := m.activeTabModel()
+			if tab != nil && tab.Root != nil {
+				tabH := m.height - chromeHeight
+				m.updateMouseSelection(tab, msg.X, msg.Y, tabH)
+			}
+		}
+		return m, nil
+
+	case tea.MouseReleaseMsg:
+		if m.mouseDown {
+			m.mouseDown = false
+			if m.selection == nil {
+				// No drag — treat as click for pane focus
 				tab := m.activeTabModel()
 				if tab != nil && tab.Root != nil {
 					tabH := m.height - chromeHeight
-					if pane := tab.Root.FindPaneAt(msg.X, msg.Y, 0, 1, m.width, tabH); pane != nil {
+					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, 0, 1, m.width, tabH); pane != nil {
 						if old := tab.ActivePaneModel(); old != nil {
 							old.Active = false
 						}
@@ -241,12 +292,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.ClipboardMsg:
-		m.sendClipboardToPane(msg.Content)
+	case tea.PasteMsg:
+		if m.dialog != dialogNone && m.dialogEdit {
+			m.dialogInput += sanitizeDialogInput(msg.Content)
+		} else {
+			m.sendClipboardToPane(msg.Content)
+		}
 		return m, nil
 
-	case tea.PasteMsg:
-		m.sendClipboardToPane(msg.Content)
+	case dialogPasteMsg:
+		m.dialogInput += sanitizeDialogInput(string(msg))
 		return m, nil
 
 	case PaneOutputMsg:
@@ -283,7 +338,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dialog = dialogPluginError
 		m.pluginErrorTitle = msg.Title
 		m.pluginErrorMessage = msg.Message
-		return m, m.listenForMessages()
+		return m, tea.Batch(tea.ClearScreen, m.listenForMessages())
 
 	case WorkspaceStateMsg:
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
@@ -331,6 +386,12 @@ func (m Model) View() tea.View {
 		if m.activeTab < len(m.tabs) {
 			tab := m.tabs[m.activeTab]
 			tab.Resize(m.width, tabH)
+			// Pass selection to panes for rendering
+			if tab.Root != nil {
+				for _, pane := range tab.Root.Leaves() {
+					pane.activeSel = m.selection
+				}
+			}
 			sections = append(sections, tab.View())
 		}
 
@@ -340,6 +401,8 @@ func (m Model) View() tea.View {
 		content = lipgloss.JoinVertical(lipgloss.Left, sections...)
 	}
 
+	// Hide the terminal cursor — we render our own via insertCursor()
+	content += "\x1b[?25l"
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
@@ -361,6 +424,35 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.renamingPane {
 		return m.handlePaneRenameKey(msg)
+	}
+
+	// Selection: Enter copies (tmux convention), Esc clears, Cmd+C for macOS
+	if m.selection != nil && key == "esc" {
+		m.selection = nil
+		return m, nil
+	}
+	if m.selection != nil && (key == "enter" || key == "super+c") {
+		tab := m.activeTabModel()
+		if tab != nil {
+			if pane := tab.ActivePaneModel(); pane != nil {
+				text := extractText(pane, m.selection)
+				m.selection = nil
+				if text != "" {
+					return m, func() tea.Msg {
+						clipboard.Write(text)
+						return nil
+					}
+				}
+				return m, nil
+			}
+		}
+		m.selection = nil
+		return m, nil
+	}
+
+	// Selection: Shift+Arrow / Ctrl+Shift+Arrow
+	if strings.HasPrefix(key, "shift+") || strings.HasPrefix(key, "ctrl+shift+") || strings.HasPrefix(key, "ctrl+alt+shift+") {
+		return m.handleSelectionKey(key)
 	}
 
 	switch {
@@ -389,7 +481,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		return m, nil
+		return m, tea.ClearScreen
 
 	case key == kb.CloseTab:
 		if tab := m.activeTabModel(); tab != nil {
@@ -398,7 +490,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.confirmID = tab.ID
 			m.confirmName = tab.Name
 		}
-		return m, nil
+		return m, tea.ClearScreen
 
 	case key == kb.SplitHorizontal:
 		return m, m.splitPane(SplitHorizontal)
@@ -462,19 +554,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key == kb.Paste:
-		return m, tea.ReadClipboard
+		return m, m.pasteClipboard()
 
 	case key == "ctrl+n":
 		m.dialog = dialogCreatePane
 		m.dialogCursor = 0
 		m.createPaneStep = 0
 		m.selectedCategory = 0
-		return m, nil
+		return m, tea.ClearScreen
 
 	case key == "f1":
 		m.dialog = dialogAbout
 		m.dialogCursor = 0
-		return m, nil
+		return m, tea.ClearScreen
 
 	case key == "alt+1" || key == "alt+2" || key == "alt+3" ||
 		key == "alt+4" || key == "alt+5" || key == "alt+6" ||
@@ -484,17 +576,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	default:
-		// Ignore bare alt key (terminals may emit it as a stray rune)
-		if key == "alt" {
+		// Only process keys that produce PTY bytes.
+		// Bare modifiers (shift, ctrl, alt, super) produce nil — ignore them.
+		data := keyToBytes(msg)
+		if data == nil {
 			return m, nil
 		}
-		// Reset scroll on any regular input
+		m.selection = nil
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				pane.ResetScroll()
 			}
 		}
-		return m, m.forwardInput(msg)
+		return m, m.forwardInputBytes(data)
 	}
 }
 
@@ -589,7 +683,10 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 				// Terminal panes keep their history — the ghost buffer IS
 				// the terminal state and should be preserved.
 				if leaf.Pane.ghost {
-					if leaf.Pane.Type != "terminal" && leaf.Pane.Type != "" {
+					// Only reset VT for TUI app panes (claude-code) where ghost
+					// ANSI sequences pollute cursor state. Terminal-like panes
+					// (terminal, ssh, etc.) preserve their ghost buffer as-is.
+					if leaf.Pane.Type == "claude-code" {
 						log.Printf("pane %s: ghost->live transition, resetting VT (type=%s)", msg.PaneID, leaf.Pane.Type)
 						leaf.Pane.ResetVT()
 					} else {
@@ -1376,7 +1473,7 @@ func (m Model) cycleTabColor() tea.Cmd {
 	return m.updateTab(tab.ID, tab.Name, tab.Color)
 }
 
-func (m Model) forwardInput(keyMsg tea.KeyPressMsg) tea.Cmd {
+func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 	return func() tea.Msg {
 		tab := m.activeTabModel()
 		if tab == nil {
@@ -1384,11 +1481,6 @@ func (m Model) forwardInput(keyMsg tea.KeyPressMsg) tea.Cmd {
 		}
 		pane := tab.ActivePaneModel()
 		if pane == nil {
-			return nil
-		}
-
-		data := keyToBytes(keyMsg)
-		if data == nil {
 			return nil
 		}
 
@@ -1401,6 +1493,226 @@ func (m Model) forwardInput(keyMsg tea.KeyPressMsg) tea.Cmd {
 	}
 }
 
+func (m Model) pasteClipboard() tea.Cmd {
+	return func() tea.Msg {
+		text, err := clipboard.Read()
+		if err != nil {
+			log.Printf("clipboard read: %v", err)
+			return nil
+		}
+		if text == "" {
+			return nil
+		}
+		tab := m.activeTabModel()
+		if tab == nil {
+			return nil
+		}
+		pane := tab.ActivePaneModel()
+		if pane == nil {
+			return nil
+		}
+		// Wrap in bracketed paste sequences so the shell treats newlines
+		// as literal text, not as Enter presses.
+		var data []byte
+		data = append(data, "\x1b[200~"...)
+		data = append(data, []byte(text)...)
+		data = append(data, "\x1b[201~"...)
+		msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
+			PaneID: pane.ID,
+			Data:   data,
+		})
+		m.client.Send(msg)
+		return nil
+	}
+}
+
+func (m Model) pasteToDialog() tea.Cmd {
+	return func() tea.Msg {
+		text, err := clipboard.Read()
+		if err != nil {
+			log.Printf("clipboard read for dialog: %v", err)
+			return nil
+		}
+		if text == "" {
+			return nil
+		}
+		return dialogPasteMsg(text)
+	}
+}
+
+func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {
+	if tab.Root == nil {
+		return
+	}
+	// Resolve start position to pane
+	startRect := tab.Root.FindPaneRectAt(m.mouseStartX, m.mouseStartY, 0, 1, m.width, tabH)
+	if startRect == nil {
+		return
+	}
+	pane := startRect.Pane
+	sbLen := pane.vt.ScrollbackLen()
+
+	// Convert start screen coords to pane-local
+	startCol := m.mouseStartX - startRect.OX - 1
+	startRow := m.mouseStartY - startRect.OY - 1
+	startLine := sbLen - pane.scrollBack + startRow
+
+	// Convert current screen coords to pane-local (clamp to same pane)
+	curCol := curX - startRect.OX - 1
+	curRow := curY - startRect.OY - 1
+	curLine := sbLen - pane.scrollBack + curRow
+
+	// Clamp
+	w := pane.vt.Width()
+	h := pane.vt.Height()
+	if startCol < 0 { startCol = 0 }
+	if startCol >= w { startCol = w - 1 }
+	if curCol < 0 { curCol = 0 }
+	if curCol >= w { curCol = w - 1 }
+	if startLine < 0 { startLine = 0 }
+	if curLine < 0 { curLine = 0 }
+	maxLine := sbLen + h - 1
+	if startLine > maxLine { startLine = maxLine }
+	if curLine > maxLine { curLine = maxLine }
+
+	m.selection = &Selection{
+		PaneID: pane.ID,
+		Anchor: SelectionAnchor{Col: startCol, Line: startLine},
+		Cursor: SelectionAnchor{Col: curCol, Line: curLine},
+	}
+}
+
+func (m Model) handleSelectionKey(key string) (tea.Model, tea.Cmd) {
+	tab := m.activeTabModel()
+	if tab == nil {
+		return m, nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return m, nil
+	}
+
+	sbLen := pane.vt.ScrollbackLen()
+
+	// Initialize selection at VT cursor position if not started
+	if m.selection == nil {
+		pos := pane.vt.CursorPosition()
+		absLine := sbLen + pos.Y
+		m.selection = &Selection{
+			PaneID: pane.ID,
+			Anchor: SelectionAnchor{Col: pos.X, Line: absLine},
+			Cursor: SelectionAnchor{Col: pos.X, Line: absLine},
+		}
+	}
+
+	cur := m.selection.Cursor
+	maxLine := lastContentLine(pane)
+	switch key {
+	case "shift+right":
+		cur.Col++
+	case "shift+left":
+		cur.Col--
+	case "shift+down":
+		cur.Line++
+	case "shift+up":
+		cur.Line--
+	case "ctrl+shift+right":
+		cur = selWordJump(pane, cur, 1, 1, maxLine)
+	case "ctrl+shift+left":
+		cur = selWordJump(pane, cur, -1, 1, maxLine)
+	case "ctrl+alt+shift+right":
+		cur = selWordJump(pane, cur, 1, 3, maxLine)
+	case "ctrl+alt+shift+left":
+		cur = selWordJump(pane, cur, -1, 3, maxLine)
+	default:
+		// Unknown shift combo — clear selection, don't forward
+		m.selection = nil
+		return m, nil
+	}
+
+	// Clamp vertical
+	if cur.Line < 0 {
+		cur.Line = 0
+	}
+	if cur.Line > maxLine {
+		cur.Line = maxLine
+	}
+
+	// Wrap horizontal: if past end of line, move to start of next line;
+	// if before start, move to end of previous line.
+	endCol := lineContentEnd(pane, cur.Line)
+	if cur.Col < 0 {
+		// Wrap to previous line
+		if cur.Line > 0 {
+			cur.Line--
+			prevEnd := lineContentEnd(pane, cur.Line)
+			if prevEnd >= 0 {
+				cur.Col = prevEnd
+			} else {
+				cur.Col = 0
+			}
+		} else {
+			cur.Col = 0
+		}
+	} else if endCol >= 0 && cur.Col > endCol {
+		// Wrap to next line
+		if cur.Line < maxLine {
+			cur.Line++
+			cur.Col = 0
+		} else {
+			cur.Col = endCol
+		}
+	} else if endCol < 0 {
+		// Empty line — try wrapping
+		if cur.Col > 0 && cur.Line < maxLine {
+			cur.Line++
+			cur.Col = 0
+		} else {
+			cur.Col = 0
+		}
+	}
+
+	// Calculate delta from previous cursor to new cursor
+	prevCur := m.selection.Cursor
+	m.selection.Cursor = cur
+
+	// Move shell cursor horizontally when staying on the same line.
+	// Cross-line selection is visual only — sending Up/Down to PTY
+	// would trigger command history navigation.
+	if cur.Line == prevCur.Line {
+		colDelta := cur.Col - prevCur.Col
+		if colDelta != 0 {
+			var moveBytes []byte
+			for i := 0; i < colDelta; i++ {
+				moveBytes = append(moveBytes, "\x1b[C"...)
+			}
+			for i := 0; i > colDelta; i-- {
+				moveBytes = append(moveBytes, "\x1b[D"...)
+			}
+			return m, m.forwardInputBytes(moveBytes)
+		}
+	}
+	return m, nil
+}
+
+// sanitizeDialogInput strips control characters from text before inserting
+// into dialog input fields. Prevents ANSI escapes, null bytes, and newlines
+// from reaching form values that may be used as command arguments.
+func sanitizeDialogInput(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\t' || r >= ' ' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// sendClipboardToPane sends text to the active pane as PTY input.
+// NOTE: This does NOT wrap in bracketed paste sequences because it handles
+// tea.PasteMsg events, which originate from the terminal's own bracketed paste
+// — the terminal has already signaled paste mode to the shell.
 func (m Model) sendClipboardToPane(text string) {
 	if text == "" {
 		return
@@ -1442,6 +1754,15 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 		return []byte("\x1b[C")
 	case "left":
 		return []byte("\x1b[D")
+	case "ctrl+right":
+		return []byte("\x1b[1;5C") // word jump right
+	case "ctrl+left":
+		return []byte("\x1b[1;5D") // word jump left
+	case "ctrl+alt+right":
+		// 3-word jump: send word-jump 3 times
+		return []byte("\x1b[1;5C\x1b[1;5C\x1b[1;5C")
+	case "ctrl+alt+left":
+		return []byte("\x1b[1;5D\x1b[1;5D\x1b[1;5D")
 	case "delete":
 		return []byte("\x1b[3~")
 	case "home":
