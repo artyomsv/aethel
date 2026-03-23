@@ -86,12 +86,12 @@ Key changes:
 ---
 
 ### M6: Pane Focus Mode
-> Full-window focus for single pane (F11 toggle).
+> Full-window focus for single pane (Ctrl+E toggle).
 
-F11 toggles the active pane to fill the entire tab content area. Other panes keep running in the background, receiving PTY output. The layout tree stays intact — focus mode is a pure rendering toggle on `TabModel.focusMode`.
+Ctrl+E toggles the active pane to fill the entire tab content area. Other panes keep running in the background, receiving PTY output. The layout tree stays intact — focus mode is a pure rendering toggle on `TabModel.focusMode`.
 
 Key behaviors:
-- **F11** toggles focus on/off (configurable via `focus_pane` keybinding)
+- **Ctrl+E** toggles focus on/off (configurable via `focus_pane` keybinding)
 - Active pane resized to full tab dimensions; VT emulator + daemon PTY updated
 - `[focus]` indicator in status bar
 - Pane navigation (Tab/Shift+Tab) disabled in focus mode

@@ -23,6 +23,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Keybindings.NewTab != "ctrl+t" {
 		t.Errorf("expected new_tab=ctrl+t, got %s", cfg.Keybindings.NewTab)
 	}
+	if cfg.Keybindings.FocusPane != "ctrl+e" {
+		t.Errorf("expected focus_pane=ctrl+e, got %s", cfg.Keybindings.FocusPane)
+	}
 }
 
 func TestLoadFromFile(t *testing.T) {

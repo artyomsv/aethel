@@ -16,15 +16,15 @@ foreach ($name in @("aetheld", "aethel")) {
     }
 }
 
-# 2. Reset state (unless -SkipReset)
-if (-not $SkipReset) {
-    $aethelDir = Join-Path $env:USERPROFILE ".aethel"
-    Remove-Item -Path (Join-Path $aethelDir "workspace.json") -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path (Join-Path $aethelDir "workspace.json.bak") -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path (Join-Path $aethelDir "buffers") -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path (Join-Path $aethelDir "aetheld.pid") -Force -ErrorAction SilentlyContinue
-    Write-Host "State reset"
-}
+## 2. Reset state (unless -SkipReset)
+#if (-not $SkipReset) {
+#    $aethelDir = Join-Path $env:USERPROFILE ".aethel"
+#    Remove-Item -Path (Join-Path $aethelDir "workspace.json") -Force -ErrorAction SilentlyContinue
+#    Remove-Item -Path (Join-Path $aethelDir "workspace.json.bak") -Force -ErrorAction SilentlyContinue
+#    Remove-Item -Path (Join-Path $aethelDir "buffers") -Recurse -Force -ErrorAction SilentlyContinue
+#    Remove-Item -Path (Join-Path $aethelDir "aetheld.pid") -Force -ErrorAction SilentlyContinue
+#    Write-Host "State reset"
+#}
 
 # 3. Delete old executables
 Remove-Item -Path (Join-Path $ProjectDir "aethel.exe") -Force -ErrorAction SilentlyContinue

@@ -110,7 +110,7 @@ func Default() Config {
 			Paste:           "ctrl+v",
 			JSONTransform:   "ctrl+j",
 			QuickActions:    "ctrl+a",
-			FocusPane:       "f11",
+			FocusPane:       "ctrl+e",
 		},
 	}
 }

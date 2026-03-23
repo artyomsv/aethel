@@ -9,7 +9,7 @@ type TabModel struct {
 	ActivePane string      // pane ID of the active pane
 	Width      int
 	Height     int
-	focusMode  bool // true = active pane fills entire tab (F11)
+	focusMode  bool // true = active pane fills entire tab
 }
 
 func NewTabModel(id, name string) *TabModel {
@@ -114,8 +114,17 @@ func (t *TabModel) View() string {
 }
 
 // ToggleFocus toggles pane focus mode on/off.
+// No-op on single-pane tabs (already fills the tab).
 func (t *TabModel) ToggleFocus() {
+	if t.Root != nil && t.Root.IsLeaf() {
+		return
+	}
 	t.focusMode = !t.focusMode
+}
+
+// ExitFocus exits focus mode if active.
+func (t *TabModel) ExitFocus() {
+	t.focusMode = false
 }
 
 // FocusMode returns whether focus mode is active.
