@@ -277,7 +277,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selection == nil {
 				// No drag — treat as click for pane focus
 				tab := m.activeTabModel()
-				if tab != nil && tab.Root != nil {
+				if tab != nil && tab.Root != nil && !tab.FocusMode() {
 					tabH := m.height - chromeHeight
 					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, 0, 1, m.width, tabH); pane != nil {
 						if old := tab.ActivePaneModel(); old != nil {
@@ -413,10 +413,11 @@ func (m Model) View() tea.View {
 		if m.activeTab < len(m.tabs) {
 			tab := m.tabs[m.activeTab]
 			tab.Resize(m.width, tabH)
-			// Pass selection to panes for rendering
+			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
 				for _, pane := range tab.Root.Leaves() {
 					pane.activeSel = m.selection
+					pane.focusMode = tab.FocusMode() && pane.ID == tab.ActivePane
 				}
 			}
 			sections = append(sections, tab.View())
@@ -520,9 +521,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 
 	case key == kb.SplitHorizontal:
+		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+			tab.ExitFocus()
+		}
 		return m, m.splitPane(SplitHorizontal)
 
 	case key == kb.SplitVertical:
+		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+			tab.ExitFocus()
+		}
 		return m, m.splitPane(SplitVertical)
 
 	case key == kb.RenameTab:
@@ -569,19 +576,27 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key == kb.NextPane:
-		if tab := m.activeTabModel(); tab != nil {
+		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.NextPane()
 		}
 		return m, nil
 
 	case key == kb.PrevPane:
-		if tab := m.activeTabModel(); tab != nil {
+		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.PrevPane()
 		}
 		return m, nil
 
 	case key == kb.Paste:
 		return m, m.pasteClipboard()
+
+	case key == kb.FocusPane:
+		if tab := m.activeTabModel(); tab != nil && tab.Root != nil {
+			tab.ToggleFocus()
+			m.resizeTabs()
+			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+		}
+		return m, nil
 
 	case key == "ctrl+n":
 		m.dialog = dialogCreatePane
@@ -793,6 +808,11 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 					tab.RemovePane(id)
 				}
 			}
+		}
+
+		// Exit focus mode if the tree was reduced to a single pane or empty.
+		if tab.FocusMode() && (tab.Root == nil || tab.Root.IsLeaf()) {
+			tab.ExitFocus()
 		}
 
 		// Add panes the daemon has but the tree doesn't.
@@ -1281,6 +1301,9 @@ func (m Model) renderStatusBar() string {
 				}
 			}
 			left = fmt.Sprintf("%s  %s", displayPath, paneInfo)
+			if tab.FocusMode() {
+				left = "[focus] " + left
+			}
 			if pane.scrollBack > 0 {
 				left += fmt.Sprintf("  ↑%d", pane.scrollBack)
 			}

@@ -85,19 +85,22 @@ Key changes:
 
 ---
 
-## Planned
-
 ### M6: Pane Focus Mode
+> Full-window focus for single pane (Ctrl+E toggle).
 
-Switch the active pane to full-window mode, hiding all other panes. Gives the user maximum screen space for focused work in a single pane.
+Ctrl+E toggles the active pane to fill the entire tab content area. Other panes keep running in the background, receiving PTY output. The layout tree stays intact — focus mode is a pure rendering toggle on `TabModel.focusMode`.
 
-**Behavior:**
-- Keybinding (e.g., `Alt+F` or `F11`) toggles focus mode on/off
-- In focus mode: active pane fills the entire tab content area (no splits visible)
-- Other panes remain alive in the background — they continue running, receiving PTY output
-- Status bar shows a focus indicator (e.g., `[focus]`)
-- Exiting focus mode restores the previous split layout exactly
-- Focus state is NOT persisted — exiting Aethel always returns to normal layout
+Key behaviors:
+- **Ctrl+E** toggles focus on/off (configurable via `focus_pane` keybinding)
+- Active pane resized to full tab dimensions; VT emulator + daemon PTY updated
+- `[focus]` indicator in status bar
+- Pane navigation (Tab/Shift+Tab) disabled in focus mode
+- Split (Alt+H/V) and close (Ctrl+W) auto-exit focus mode
+- Focus state is NOT persisted — restarting Aethel returns to normal layout
+
+---
+
+## Planned
 
 ### M7: Pane Notes
 

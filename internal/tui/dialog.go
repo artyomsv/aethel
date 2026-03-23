@@ -23,14 +23,44 @@ const dialogWidth = 50
 const disclaimerWidth = 60
 
 // disclaimerTips are shown randomly in the startup disclaimer dialog.
-var disclaimerTips = []struct{ title, body string }{
-	{"Quick Navigation", "Ctrl+Arrow jumps words, Ctrl+Alt+Arrow jumps 3 words.\nCtrl+Up/Down jumps paragraphs in the editor."},
-	{"Split Panes", "Alt+H splits horizontal, Alt+V splits vertical.\nTab/Shift+Tab cycles between panes."},
-	{"Typed Panes", "Ctrl+N creates panes with specific tools (SSH, Claude Code).\nPlugins are configurable via F1 > Plugins."},
-	{"Session Persistence", "Your workspace survives reboots -- tabs, panes, and scroll\nhistory are automatically saved and restored."},
-	{"Pane Management", "F2 renames tabs, Alt+F2 renames panes.\nCtrl+W closes pane, Alt+W closes tab."},
-	{"Text Selection", "Shift+Arrows selects text, Enter copies to clipboard.\nCtrl+V pastes. Works in terminal panes and editors."},
-	{"Customization", "Edit ~/.aethel/config.toml to change keybindings,\nscroll speed, and other preferences. Press F1 for help."},
+// Each body line is rendered as a bullet point.
+var disclaimerTips = []struct {
+	title string
+	items []string
+}{
+	{"Quick Navigation", []string{
+		"Ctrl+Arrow jumps words",
+		"Ctrl+Alt+Arrow jumps 3 words",
+		"Ctrl+Up/Down jumps paragraphs",
+	}},
+	{"Split Panes", []string{
+		"Alt+H splits horizontal",
+		"Alt+V splits vertical",
+		"Tab/Shift+Tab cycles between panes",
+	}},
+	{"Typed Panes", []string{
+		"Ctrl+N creates typed panes (SSH, Claude)",
+		"Plugins configurable via F1 > Plugins",
+	}},
+	{"Session Persistence", []string{
+		"Workspace survives reboots",
+		"Tabs, panes, and history auto-restored",
+	}},
+	{"Pane Management", []string{
+		"F2 renames tabs, Alt+F2 renames panes",
+		"Ctrl+W closes pane, Alt+W closes tab",
+		"Ctrl+E toggles focus mode",
+	}},
+	{"Text Selection", []string{
+		"Shift+Arrows selects text",
+		"Enter copies selection to clipboard",
+		"Ctrl+V pastes from clipboard",
+	}},
+	{"Customization", []string{
+		"Edit ~/.aethel/config.toml for settings",
+		"All keybindings are configurable",
+		"Press F1 for help and shortcuts",
+	}},
 }
 
 var (
@@ -160,6 +190,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kb.ScrollPageUp, "Scroll page up"},
 		{kb.ScrollPageDown, "Scroll page down"},
 		{kb.Paste, "Paste clipboard"},
+		{kb.FocusPane, "Toggle focus mode"},
 		{"Ctrl+N", "New typed pane"},
 		{"Alt+1..9", "Switch to tab N"},
 		{"F1", "Help / About"},
@@ -481,8 +512,8 @@ func (m Model) renderDisclaimerDialog() string {
 	tip := disclaimerTips[m.disclaimerTipIdx]
 	b.WriteString(dialogSelected.Render("  Tip: " + tip.title))
 	b.WriteByte('\n')
-	for _, line := range strings.Split(tip.body, "\n") {
-		b.WriteString(dialogNormal.Render("  " + line))
+	for _, item := range tip.items {
+		b.WriteString(dialogNormal.Render("    - " + item))
 		b.WriteByte('\n')
 	}
 	b.WriteByte('\n')

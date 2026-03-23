@@ -36,6 +36,7 @@ type PaneModel struct {
 	resumeStart   time.Time           // when resuming/preparing started (minimum display duration)
 	spinnerFrame  int                 // current frame index in spinnerFrames
 	activeSel     *Selection          // set by Model before View() for selection rendering
+	focusMode     bool                // set by Model before View() when in focus mode
 }
 
 func NewPaneModel(id string, bufSize int) *PaneModel {
@@ -155,12 +156,12 @@ func (p *PaneModel) View() string {
 	body := bodyStyle.Render(content)
 
 	// Manual top border: CWD on the left, pane name on the right.
-	topLine := buildTopBorder(p.Width, p.CWD, p.Name, borderColor, p.ghost, p.resuming, p.preparing, p.spinnerFrame)
+	topLine := buildTopBorder(p.Width, p.CWD, p.Name, borderColor, p.ghost, p.resuming, p.preparing, p.focusMode, p.spinnerFrame)
 
 	return topLine + "\n" + body
 }
 
-func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing bool, spinnerFrame int) string {
+func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int) string {
 	if ghost {
 		if name == "" {
 			name = "restored"
@@ -217,6 +218,27 @@ func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resum
 	dashes := innerW - leftLen - rightLen
 	if dashes < 0 {
 		dashes = 0
+	}
+
+	// Focus mode: center "* FOCUS *" relative to the full border width
+	if focus {
+		focusLabel := "* FOCUS *"
+		focusLen := len([]rune(focusLabel))
+		if dashes >= focusLen+2 {
+			// Center position relative to full innerW, then subtract left/right label offsets
+			centerPos := (innerW - focusLen) / 2
+			leftDash := centerPos - leftLen
+			if leftDash < 1 {
+				leftDash = 1
+			}
+			rightDash := dashes - focusLen - leftDash
+			if rightDash < 0 {
+				rightDash = 0
+			}
+			return style.Render(b.TopLeft + leftLabel +
+				strings.Repeat(b.Top, leftDash) + focusLabel + strings.Repeat(b.Top, rightDash) +
+				rightLabel + b.TopRight)
+		}
 	}
 
 	return style.Render(b.TopLeft + leftLabel + strings.Repeat(b.Top, dashes) + rightLabel + b.TopRight)
