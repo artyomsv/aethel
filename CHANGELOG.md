@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-03-23
+
 ### Added
 
 - **Pane focus mode (M6)** — Ctrl+E toggles active pane to full-screen; other panes keep running in background; `* FOCUS *` border label; `[focus]` status bar indicator; splits/close auto-exit focus
