@@ -44,13 +44,16 @@ builds:
 
 archives:
   - id: default
-    builds:
+    ids:
       - aethel
       - aetheld
     name_template: "aethel_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
 
 checksum:
   name_template: checksums.txt
