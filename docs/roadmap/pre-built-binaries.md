@@ -5,69 +5,78 @@
 | Priority | 1 |
 | Effort | Small |
 | Impact | Critical |
-| Status | In Progress |
+| Status | Done |
 | Depends on | — |
 
 ## Problem
 
 The current install path requires Docker or Go 1.25 — a significant adoption barrier. Most developer tools can be installed in under 10 seconds. Every extra step between "I want to try this" and "it's running" loses potential users. Zero friction = higher conversion from README visitor to actual user.
 
-## Proposed Solution
+## Implemented Solution
 
-Use **goreleaser** to produce pre-built binaries for every major platform, published as GitHub Releases. Provide multiple install paths so users can pick what's familiar:
+GoReleaser cross-compiles pre-built binaries for 5 platform pairs, published as GitHub Releases with SHA256 checksums.
 
-| Method | Platform | Command |
-|--------|----------|---------|
-| Install script | Linux / macOS | `curl -sSfL https://get.aethel.dev \| sh` |
-| Homebrew | macOS / Linux | `brew install artyomsv/tap/aethel` |
-| Winget | Windows | `winget install aethel` |
-| Scoop | Windows | `scoop install aethel` |
-| Go install | Any | `go install github.com/artyomsv/aethel/cmd/aethel@latest` |
-| GitHub Release | Any | Download from Releases page |
+| Method | Platform | Command | Status |
+|--------|----------|---------|--------|
+| Install script | Linux / macOS | `curl -sSfL .../scripts/install.sh \| sh` | Done |
+| Go install | Any | `go install github.com/artyomsv/aethel/cmd/aethel@latest` | Done |
+| GitHub Release | Any | Download from Releases page | Done |
+| Homebrew | macOS / Linux | `brew install artyomsv/tap/aethel` | Deferred (needs external repo) |
+| Winget | Windows | `winget install aethel` | Deferred (needs Microsoft Store) |
+| Scoop | Windows | `scoop install aethel` | Deferred (needs external repo) |
 
-## User Experience
+## Technical Implementation
 
-```bash
-# macOS / Linux
-curl -sSfL https://get.aethel.dev | sh
-aethel
+### 1. GoReleaser Config (`.goreleaser.yml`)
 
-# Windows
-winget install aethel
-aethel
+Build matrix:
+- `linux/amd64`, `linux/arm64`
+- `darwin/amd64` (Intel), `darwin/arm64` (Apple Silicon)
+- `windows/amd64`
+- Two binaries per platform: `aethel` (TUI) and `aetheld` (daemon)
+- `.tar.gz` for Unix, `.zip` for Windows
+- SHA256 checksums in `checksums.txt`
+- Version injected via `-ldflags "-s -w -X main.version={{.Version}}"`
 
-# Go users
-go install github.com/artyomsv/aethel/cmd/aethel@latest
-```
+### 2. GitHub Actions (`release.yml`)
 
-First-run experience should feel instant. The binary self-bootstraps: creates `~/.aethel/`, writes default plugins, starts daemon on first launch.
+Single workflow with two jobs:
+- **`release` job** — triggers on push to master, analyzes conventional commits, bumps version, updates `VERSION` + `CHANGELOG.md`, commits, tags, pushes
+- **`goreleaser` job** — runs after release job, checks out tagged commit, runs GoReleaser, publishes GitHub Release with archives and checksums
 
-## Technical Approach
+Note: both jobs are in one workflow because tags pushed with `GITHUB_TOKEN` don't trigger other workflows.
 
-1. **goreleaser config** (`.goreleaser.yml`) — build matrix for:
-   - `linux/amd64`, `linux/arm64`
-   - `darwin/amd64` (Intel), `darwin/arm64` (Apple Silicon)
-   - `windows/amd64`
-   - Two binaries per platform: `aethel` (TUI) and `aetheld` (daemon)
+### 3. Install Script (`scripts/install.sh`)
 
-2. **GitHub Actions CI** — trigger on tag push (`v*`), run goreleaser, publish release
+POSIX shell script:
+- Detects OS (`uname -s`) and architecture (`uname -m`)
+- Fetches latest version from GitHub API (supports `GITHUB_TOKEN` for rate limiting)
+- Downloads archive + checksums, verifies SHA256
+- Installs to `~/.local/bin/` (configurable via `AETHEL_INSTALL_DIR`)
+- Supports pinned versions via `AETHEL_VERSION` env var
 
-3. **Install script** (`get.aethel.dev`) — detect OS/arch, download correct binary, place in PATH
+### 4. Version Injection
 
-4. **Homebrew tap** — `artyomsv/homebrew-tap` repo with formula
+Both `aethel` and `aetheld` have `var version = "dev"` overridden at build time. Consistent `-ldflags` injection across all build paths: GoReleaser, `dev.sh`, `dev.ps1`, `rebuild.ps1`, `Makefile`.
 
-5. **Scoop/Winget manifests** — JSON manifests pointing to GitHub Releases
+### 5. CI Security
+
+- All GitHub Actions pinned to immutable commit SHAs
+- Per-job `permissions: contents: write` (least-privilege)
+- Version format validated before use in shell commands
 
 ## Success Criteria
 
-- [ ] `curl -sSfL https://get.aethel.dev | sh && aethel` works on fresh Linux/macOS
-- [ ] `winget install aethel && aethel` works on Windows
-- [ ] `brew install artyomsv/tap/aethel` works
-- [ ] GitHub Release page shows all platform binaries
-- [ ] README "Quick Start" section updated with one-line install
+- [x] GitHub Release page shows all 5 platform binaries with checksums
+- [x] README "Quick Start" section updated with one-line install
+- [x] Install script detects OS/arch, downloads, verifies checksum, installs
+- [x] `aethel version` and `aetheld version` report correct version
+- [ ] `brew install artyomsv/tap/aethel` works (deferred — needs Homebrew tap repo)
+- [ ] `winget install aethel` works on Windows (deferred — needs Microsoft Store)
 
-## Open Questions
+## Deferred Work
 
-- Domain for install script: `get.aethel.dev` vs GitHub Pages?
-- Should the install script also install shell completions?
-- Include `aetheld` in same package or auto-extract from `aethel` binary?
+- **Homebrew tap** — needs `artyomsv/homebrew-tap` repo with formula
+- **Scoop bucket** — needs `artyomsv/scoop-bucket` repo
+- **Winget manifest** — needs Microsoft Store submission
+- **Custom domain** — `get.aethel.dev` redirect to raw install script

@@ -72,6 +72,18 @@ Key changes:
 - **Config persistence** — `config.Save()` for atomic config write-back
 - **Go 1.25** — required by Lipgloss v2
 
+### Pre-Built Binaries & One-Line Install — [PRD](docs/roadmap/pre-built-binaries.md)
+> GoReleaser cross-compilation, GitHub Releases, install script.
+
+GoReleaser produces archives for 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64) with SHA256 checksums. Single `release.yml` workflow with two jobs: version bump + tag, then GoReleaser build + publish. Install script (`scripts/install.sh`) for Linux/macOS with checksum verification. Homebrew tap, Scoop, Winget deferred (need external repos).
+
+Key capabilities:
+- **GoReleaser config** — `.goreleaser.yml` (v2), two builds (aethel + aetheld), `.tar.gz`/`.zip` archives
+- **Automated releases** — conventional commit analysis → version bump → tag → build → publish
+- **Install script** — POSIX shell, OS/arch detection, SHA256 verification, `AETHEL_VERSION` pinning
+- **Version injection** — consistent `-ldflags` across GoReleaser, dev.sh, dev.ps1, rebuild.ps1, Makefile
+- **CI security** — actions pinned to SHA, per-job permissions, version format validation
+
 ---
 
 ## In Progress
@@ -143,12 +155,6 @@ Processes emit events when they finish or need attention. A non-modal sidebar sh
 
 ## Planned — Growth & Adoption
 
-### Pre-Built Binaries & One-Line Install — [PRD](docs/roadmap/pre-built-binaries.md)
-
-> `curl -sSfL .../install.sh | sh` — zero friction install.
-
-GoReleaser cross-compiles 5 platform pairs (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64) with SHA256 checksums. Single `release.yml` workflow: version bump + tag job, then GoReleaser build + publish job. Install script for Linux/macOS. **Homebrew tap, Scoop, Winget deferred** (need external repos).
-
 ### The "Holy Shit" Demo — [PRD](docs/roadmap/demo-gif.md)
 
 > 30-second GIF: 5 panes → reboot → `aethel` → everything snaps back.
@@ -195,7 +201,7 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 
 | Priority | Feature | Effort | Impact | Category |
 |----------|---------|--------|--------|----------|
-| 1 | Pre-built binaries + one-line install (in progress) | Small | Critical | Growth |
+| ~~1~~ | ~~Pre-built binaries + one-line install~~ | ~~Small~~ | ~~Critical~~ | ~~Done~~ |
 | 2 | "Holy Shit" demo GIF/video | Small | Critical | Growth |
 | 3 | Project workspace files (`.aethel.toml`) | Medium | Very High | Core |
 | 4 | Command palette (`Ctrl+Shift+P`) | Medium | High | Core |
