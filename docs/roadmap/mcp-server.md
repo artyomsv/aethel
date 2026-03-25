@@ -5,7 +5,7 @@
 | Priority | 5 |
 | Effort | Medium |
 | Impact | Very High (differentiation) |
-| Status | Proposed |
+| Status | Done |
 | Depends on | — |
 
 ## Problem
@@ -14,7 +14,7 @@
 
 **No other terminal multiplexer offers this.** Aethel becomes the **bridge between AI and the dev environment** — not just a container for AI sessions but an active collaborator.
 
-## Proposed Solution
+## Implemented Solution
 
 Expose Aethel as a [Model Context Protocol](https://modelcontextprotocol.io/) server so AI assistants can interact with the terminal environment:
 
@@ -26,15 +26,30 @@ AI: "Check the test output in the build pane and fix the failing test"
 → MCP call: aethel.send_to_pane(pane="build", input="npm test")
 ```
 
-### MCP Tools
+### MCP Tools (13 total)
+
+**Phase A — Core Interaction:**
 
 | Tool | Description |
 |------|-------------|
 | `list_panes` | Enumerate all panes with types, names, CWDs |
-| `read_pane_output` | Read the last N lines from any pane's ring buffer |
-| `send_to_pane` | Send keystrokes/commands to a pane |
-| `get_pane_status` | Process running, exit code, error state |
-| `create_pane` | Spin up a new pane with a plugin type |
+| `read_pane_output` | Read last N lines from ring buffer (ANSI-stripped) |
+| `send_to_pane` | Send text/commands to a pane (appends newline by default) |
+| `get_pane_status` | Process running/exited, exit code, type, CWD |
+| `create_pane` | Create new pane with plugin type |
+
+**Phase B — Navigation & Lifecycle:**
+
+| Tool | Description |
+|------|-------------|
+| `send_keys` | Named key sequences (arrows, F-keys, ctrl+a-z) with pacing |
+| `restart_pane` | Kill + respawn with same plugin/CWD/args |
+| `screenshot_pane` | VT-emulated text screenshot of actual screen state |
+| `switch_tab` | Switch active tab |
+| `list_tabs` | List tabs with pane counts |
+| `destroy_pane` | Remove pane (auto-creates replacement if last) |
+| `set_active_pane` | Focus pane in TUI (cross-tab) |
+| `close_tui` | Exit TUI, daemon persists |
 
 ## Architecture: `aethel mcp` Subcommand (Not a Separate Process)
 
@@ -70,19 +85,30 @@ All data lives in the daemon — ring buffers, session state, PTY handles, plugi
 | Deployment | Already in the `aethel` binary — zero extra install steps |
 | Existing state | Ring buffers already have `Bytes()` for output replay — MCP just reads them |
 
-## Technical Approach
+## Technical Implementation
 
-### 1. New Daemon Messages (small additions)
+### 1. IPC Protocol Extension
 
-| Message | Purpose |
-|---------|---------|
-| `MsgReadPaneOutput` | Request last N lines from a pane's ring buffer (data already exists from ghost buffer support) |
-| `MsgListPanesDetailed` | Return pane names, types, CWDs, process status |
-| `MsgPaneExitStatus` | Field on the existing pane struct |
+Added `ID` field to `ipc.Message` (omitempty, backward compatible) for request-response correlation.
 
-The core daemon logic stays untouched. The MCP subcommand is ~300-500 lines — a thin translation layer.
+4 new request-response message pairs:
 
-### 2. AI Tool Configuration
+| Request | Response | Purpose |
+|---------|----------|---------|
+| `list_panes_req` | `list_panes_resp` | Enumerate panes with metadata |
+| `read_pane_output_req` | `read_pane_output_resp` | Read ANSI-stripped text from ring buffer |
+| `pane_status_req` | `pane_status_resp` | Process running/exited state, exit code |
+| `create_pane_req` | `create_pane_resp` | Create pane, return new ID |
+
+### 2. Process Exit Tracking
+
+Added `WaitExit() int` to `pty.Session` interface. `Pane.ExitCode` and `Pane.ExitedAt` captured at end of `streamPTYOutput()`. Unix: `cmd.Wait()` + `ProcessState.ExitCode()`. Windows: `WaitForSingleObject` + `GetExitCodeProcess`.
+
+### 3. MCP SDK
+
+Official `github.com/modelcontextprotocol/go-sdk` (v1.4+). Typed tool handlers with struct-based input schemas (`jsonschema` tags). `StdioTransport` for JSON-RPC 2.0 over stdin/stdout.
+
+### 4. AI Tool Configuration
 
 ```json
 // claude_desktop_config.json or VS Code MCP settings
@@ -98,29 +124,75 @@ The core daemon logic stays untouched. The MCP subcommand is ~300-500 lines — 
 
 The daemon doesn't even need to know MCP exists — it just sees another client connecting to the socket.
 
-### 3. Files
+### 5. Phase B: Navigation & Lifecycle Tools (8 additional tools)
+
+| Tool | Description |
+|------|-------------|
+| `send_keys` | Named key sequences (arrows, F-keys, ctrl+a-z) with 50ms pacing between escape sequences |
+| `restart_pane` | Kill PTY + respawn with same plugin/CWD/args; uses pane's last known dimensions |
+| `screenshot_pane` | VT-emulated text screenshot via `charmbracelet/x/vt`; shows actual screen state |
+| `switch_tab` | Switch active tab by ID |
+| `list_tabs` | List all tabs with pane counts and active status |
+| `destroy_pane` | Remove pane; auto-creates replacement if last in tab |
+| `set_active_pane` | TUI cooperation: broadcasts to TUI to switch focus (cross-tab) |
+| `close_tui` | TUI cooperation: broadcasts quit signal; daemon stays running |
+
+### 6. MCP Interaction Logging & Redaction
+
+Per-pane log files in `~/.aethel/mcp-logs/`. Two-layer redaction:
+- **Layer 1 (AI markers):** `<<REDACT>>value<</REDACT>>` — stripped before PTY, counted in log
+- **Layer 2 (regex fallback):** Common patterns (OpenAI keys, GitHub PATs, JWTs, passwords, BIP-32 keys) caught automatically
+
+MCP server `Instructions` field guides AI on tool usage and redaction marker protocol.
+
+### 7. Visual Feedback
+
+Orange pane border highlight (ANSI color 208) when MCP interacts with a pane. Duration configurable via `[mcp] highlight_duration` (default 10s, max 60s). Timer resets on rapid interactions.
+
+### 8. Files
 
 | File | Change |
 |------|--------|
-| `cmd/aethel/mcp.go` | New — MCP server main loop, JSON-RPC handling |
-| `cmd/aethel/mcp_tools.go` | New — tool implementations (list, read, send, status, create) |
-| `internal/ipc/messages.go` | Add 2-3 new message types |
-| `internal/daemon/handler.go` | Handle new message types |
-| `cmd/aethel/main.go` | Add `mcp` subcommand routing |
+| `cmd/aethel/mcp.go` | New — MCP bridge: daemon connection, request-response, server instructions |
+| `cmd/aethel/mcp_tools.go` | New — 13 tool implementations with typed input structs |
+| `cmd/aethel/mcp_keys.go` | New — Key name → escape sequence map (50+ keys) |
+| `cmd/aethel/mcp_log.go` | New — Per-pane logging, redaction markers, regex fallback |
+| `internal/ipc/protocol.go` | Add `ID` field, 27 new message types + payload structs |
+| `internal/daemon/daemon.go` | 10 new handlers, `respondTo()`, `highlightPane()`, exit code capture |
+| `internal/daemon/session.go` | Add `ExitCode`, `ExitedAt`, `Cols`, `Rows` to Pane struct |
+| `internal/config/config.go` | Add `MCPConfig` with `HighlightDuration`, `LogDir` |
+| `internal/pty/session.go` | Add `WaitExit() int` to Session interface |
+| `internal/pty/session_unix.go` | Implement `WaitExit()` with `sync.Once` |
+| `internal/pty/session_windows.go` | Implement `WaitExit()` with `sync.Once`, `windows.Handle` |
+| `internal/tui/model.go` | Handle `MsgHighlightPane`, `MsgSetActivePane`, `MsgCloseTUI` |
+| `internal/tui/pane.go` | Orange border when `mcpHighlight` flag set |
+| `internal/tui/styles.go` | `mcpHighlightBorder` style (color 208) |
+| `cmd/aethel/main.go` | Add `mcp` subcommand routing, extract daemon retry constants |
 
 ## Success Criteria
 
-- [ ] `aethel mcp` starts and speaks MCP JSON-RPC over stdio
-- [ ] Claude Desktop can connect with the config above
-- [ ] `list_panes` returns all panes with metadata
-- [ ] `read_pane_output` returns last N lines from any pane
-- [ ] `send_to_pane` sends input to a pane's PTY
-- [ ] `get_pane_status` returns process state
-- [ ] AI can autonomously read build output and act on it
+- [x] `aethel mcp` starts and speaks MCP JSON-RPC over stdio
+- [x] Claude Desktop / Claude Code can connect via `.mcp.json` config
+- [x] `list_panes` returns all panes with metadata
+- [x] `read_pane_output` returns last N lines from any pane (ANSI-stripped)
+- [x] `send_to_pane` sends input to a pane's PTY
+- [x] `get_pane_status` returns process state and exit code
+- [x] `create_pane` creates new panes with plugin type support
+- [x] `send_keys` navigates interactive TUI menus (paced escape sequences)
+- [x] `screenshot_pane` shows VT-emulated screen state
+- [x] `restart_pane` kills and respawns with same config
+- [x] `set_active_pane` switches TUI focus (cross-tab)
+- [x] `close_tui` exits TUI while daemon persists
+- [x] Orange border highlights pane during MCP interaction
+- [x] Per-pane MCP logs with redaction (no secrets on disk)
+- [x] AI can communicate with Claude Code in another pane (tested end-to-end)
 
-## Open Questions
+## Resolved Questions
 
-- Should `read_pane_output` return raw terminal output or stripped ANSI?
-- Rate limiting on `send_to_pane` to prevent AI from flooding a terminal?
-- Should `create_pane` support workspace-file-style definitions?
-- Resource endpoints (MCP resources) for continuous pane monitoring?
+- **ANSI stripping** — `read_pane_output` returns stripped text via `charmbracelet/x/ansi.Strip()`. Raw output deferred.
+- **Rate limiting** — Deferred. AI tools self-regulate via conversation flow. `send_keys` capped at 1000 keys.
+- **Workspace definitions** — Deferred to M9 (workspace files).
+- **MCP resources** — Deferred. Tools sufficient for v1. Event subscriptions planned for M12 integration.
+- **Key pacing** — Escape sequences sent individually with 50ms delays. Plain text batched. Solved interactive TUI menu navigation.
+- **Screenshot dimensions** — Uses pane's last known `Cols`/`Rows` from resize events. Capped at 500x200.
+- **Sensitive data** — Two-layer redaction (AI markers + regex). Logs only metadata (byte counts, line counts). Verified no secrets in daemon/TUI/MCP logs.

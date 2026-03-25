@@ -84,6 +84,21 @@ Key capabilities:
 - **Version injection** — consistent `-ldflags` across GoReleaser, dev.sh, dev.ps1, rebuild.ps1, Makefile
 - **CI security** — actions pinned to SHA, per-job permissions, version format validation
 
+### M10: MCP Server — [PRD](docs/roadmap/mcp-server.md)
+> Make Aethel the AI's eyes and hands via Model Context Protocol.
+
+`aethel mcp` subcommand bridges MCP JSON-RPC (stdio) to daemon IPC (socket). AI assistants can read pane output, send commands, take screenshots, navigate tabs, restart panes, and control the TUI. No other terminal multiplexer offers this.
+
+Key capabilities:
+- **13 MCP tools** — Phase A: `list_panes`, `read_pane_output`, `send_to_pane`, `get_pane_status`, `create_pane`. Phase B: `send_keys`, `restart_pane`, `screenshot_pane`, `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane`, `close_tui`
+- **Official MCP SDK** — `modelcontextprotocol/go-sdk` v1.4+, typed tool handlers with struct-based input schemas
+- **Request-response IPC** — backward-compatible `Message.ID` field for correlation; daemon responds to specific connection
+- **VT-emulated screenshots** — `charmbracelet/x/vt` renders ring buffer into text grid showing actual screen state
+- **Orange highlight** — pane border flashes orange during MCP interaction (configurable `[mcp] highlight_duration`)
+- **Per-pane logging** — interaction metadata in `~/.aethel/mcp-logs/`; two-layer redaction (AI markers + regex fallback)
+- **TUI cooperation** — `set_active_pane` and `close_tui` use daemon broadcast → TUI handler pattern
+- **Process exit tracking** — `Pane.ExitCode` and `WaitExit()` with `sync.Once` on PTY sessions (Unix + Windows)
+
 ---
 
 ## In Progress
@@ -132,12 +147,6 @@ Side-by-side note-taking mode linked to individual panes. When enabled, the wind
 > `.aethel.toml` checked into repo — the "docker-compose.yml for dev environments."
 
 Define workspace blueprints committed to git: tabs, panes, plugins, CWDs, commands. `cd my-project && aethel` materializes the entire dev environment. Every team member gets the exact same setup. **Network effect within teams.**
-
-### M10: MCP Server — [PRD](docs/roadmap/mcp-server.md)
-
-> Make Aethel the AI's eyes and hands via Model Context Protocol.
-
-`aethel mcp` subcommand as a thin bridge: MCP JSON-RPC (stdio) ↔ daemon IPC (socket). AI assistants can read pane output, send commands, check process status, and create panes. **No other terminal multiplexer offers this** — Aethel becomes the bridge between AI and the dev environment.
 
 ### M11: Command Palette — [PRD](docs/roadmap/command-palette.md)
 
@@ -205,7 +214,7 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 | 2 | "Holy Shit" demo GIF/video | Small | Critical | Growth |
 | 3 | Project workspace files (`.aethel.toml`) | Medium | Very High | Core |
 | 4 | Command palette (`Ctrl+Shift+P`) | Medium | High | Core |
-| 5 | MCP server for AI integration | Medium | Very High | Core |
+| ~~5~~ | ~~MCP server for AI integration~~ | ~~Medium~~ | ~~Very High~~ | ~~Done~~ |
 | 5 | Notification center (sidebar + pane history) | Medium | High | Core |
 | 6 | Community plugin registry + 10 plugins | Medium | High | Growth |
 | 7 | Smart health monitoring + auto-restart | Medium | High | Advanced |

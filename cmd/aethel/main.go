@@ -21,6 +21,11 @@ import (
 
 var version = "dev"
 
+const (
+	daemonStartRetries  = 20
+	daemonRetryInterval = 100 * time.Millisecond
+)
+
 func main() {
 	// Check for --dev flag before anything else.
 	// Sets AETHEL_HOME to .aethel/ next to the executable for isolated dev instances.
@@ -43,6 +48,9 @@ func main() {
 		switch os.Args[1] {
 		case "daemon":
 			handleDaemon()
+			return
+		case "mcp":
+			runMCP()
 			return
 		case "version":
 			fmt.Println("aethel v" + version)
@@ -196,10 +204,6 @@ func launchTUI() {
 	log.Printf("config loaded, AutoStart=%v", cfg.Daemon.AutoStart)
 
 	// Try connecting; auto-start if needed
-	const (
-		daemonStartRetries  = 20
-		daemonRetryInterval = 100 * time.Millisecond
-	)
 
 	client, err := ipc.NewClient(sockPath)
 	if err != nil && cfg.Daemon.AutoStart {

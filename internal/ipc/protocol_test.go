@@ -74,11 +74,91 @@ func TestMessageTypes(t *testing.T) {
 		ipc.MsgSwitchTab,
 		ipc.MsgWorkspaceState,
 		ipc.MsgStateUpdate,
+		ipc.MsgListPanesReq,
+		ipc.MsgListPanesResp,
+		ipc.MsgReadPaneOutputReq,
+		ipc.MsgReadPaneOutputResp,
+		ipc.MsgPaneStatusReq,
+		ipc.MsgPaneStatusResp,
+		ipc.MsgCreatePaneReq,
+		ipc.MsgCreatePaneResp,
+		ipc.MsgRestartPaneReq,
+		ipc.MsgRestartPaneResp,
+		ipc.MsgScreenshotPaneReq,
+		ipc.MsgScreenshotPaneResp,
+		ipc.MsgSwitchTabReq,
+		ipc.MsgSwitchTabResp,
+		ipc.MsgListTabsReq,
+		ipc.MsgListTabsResp,
+		ipc.MsgDestroyPaneReq,
+		ipc.MsgDestroyPaneResp,
+		ipc.MsgSetActivePane,
+		ipc.MsgCloseTUI,
+		ipc.MsgHighlightPane,
 	}
 	for _, typ := range types {
 		if typ == "" {
 			t.Error("found empty message type constant")
 		}
+	}
+}
+
+func TestMessageIDBackwardCompat(t *testing.T) {
+	// Messages without ID should round-trip with empty ID (omitempty)
+	var buf bytes.Buffer
+	msg := &ipc.Message{Type: "attach", Payload: []byte(`{}`)}
+	if err := ipc.WriteMessage(&buf, msg); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	// Verify the wire format does NOT contain "id" when empty
+	if bytes.Contains(buf.Bytes()[4:], []byte(`"id"`)) {
+		t.Error("empty ID should be omitted from wire format")
+	}
+	got, err := ipc.ReadMessage(&buf)
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if got.ID != "" {
+		t.Errorf("ID should be empty, got %q", got.ID)
+	}
+
+	// Messages with ID should preserve it
+	buf.Reset()
+	msg = &ipc.Message{Type: "list_panes_req", ID: "req-123"}
+	if err := ipc.WriteMessage(&buf, msg); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	got, err = ipc.ReadMessage(&buf)
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if got.ID != "req-123" {
+		t.Errorf("ID: got %q, want %q", got.ID, "req-123")
+	}
+}
+
+func TestMCPPayloadRoundTrip(t *testing.T) {
+	// ListPanesResp
+	resp, err := ipc.NewMessage(ipc.MsgListPanesResp, ipc.ListPanesRespPayload{
+		Panes: []ipc.PaneInfo{
+			{ID: "pane-1", TabID: "tab-1", TabName: "Shell", Type: "terminal", CWD: "/home", Running: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	var payload ipc.ListPanesRespPayload
+	if err := resp.DecodePayload(&payload); err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if len(payload.Panes) != 1 {
+		t.Fatalf("Panes: got %d, want 1", len(payload.Panes))
+	}
+	if payload.Panes[0].ID != "pane-1" {
+		t.Errorf("Pane ID: got %q, want %q", payload.Panes[0].ID, "pane-1")
+	}
+	if !payload.Panes[0].Running {
+		t.Error("Pane should be running")
 	}
 }
 

@@ -5,25 +5,28 @@ package pty
 import (
 	"os"
 	"os/exec"
+	"sync"
 
 	cpty "github.com/creack/pty/v2"
 )
 
 type unixSession struct {
-	ptmx *os.File
-	cmd  *exec.Cmd
-	cols int
-	rows int
-	env  []string
-	cwd  string
+	ptmx     *os.File
+	cmd      *exec.Cmd
+	cols     int
+	rows     int
+	env      []string
+	cwd      string
+	waitOnce sync.Once
+	exitCode int
 }
 
 func New() Session {
-	return &unixSession{cols: 80, rows: 24}
+	return &unixSession{cols: 80, rows: 24, exitCode: -1}
 }
 
 func newWithSize(cols, rows int) Session {
-	return &unixSession{cols: cols, rows: rows}
+	return &unixSession{cols: cols, rows: rows, exitCode: -1}
 }
 
 func (s *unixSession) SetEnv(env []string) {
@@ -69,7 +72,7 @@ func (s *unixSession) Close() error {
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
 		s.cmd.Process.Kill()
-		s.cmd.Wait()
+		s.WaitExit() // reuses sync.Once — safe to call from Close and streamPTYOutput
 	}
 	return nil
 }
@@ -79,4 +82,19 @@ func (s *unixSession) Pid() int {
 		return s.cmd.Process.Pid
 	}
 	return 0
+}
+
+func (s *unixSession) WaitExit() int {
+	if s.cmd == nil {
+		return -1
+	}
+	s.waitOnce.Do(func() {
+		err := s.cmd.Wait()
+		if err == nil {
+			s.exitCode = 0
+		} else if s.cmd.ProcessState != nil {
+			s.exitCode = s.cmd.ProcessState.ExitCode()
+		}
+	})
+	return s.exitCode
 }

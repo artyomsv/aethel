@@ -107,3 +107,40 @@ func TestPid(t *testing.T) {
 		t.Error("expected non-zero PID")
 	}
 }
+
+func TestWaitExit_Success_ReturnsZero(t *testing.T) {
+	s := pty.New()
+	if err := s.Start("true"); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	code := s.WaitExit()
+	if code != 0 {
+		t.Errorf("WaitExit: got %d, want 0", code)
+	}
+	// Second call should return same result (sync.Once)
+	code2 := s.WaitExit()
+	if code2 != 0 {
+		t.Errorf("WaitExit second call: got %d, want 0", code2)
+	}
+}
+
+func TestWaitExit_Failure_ReturnsNonZero(t *testing.T) {
+	s := pty.New()
+	if err := s.Start("sh", "-c", "exit 42"); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	code := s.WaitExit()
+	if code != 42 {
+		t.Errorf("WaitExit: got %d, want 42", code)
+	}
+}
+
+func TestWaitExit_CalledFromClose_NoPanic(t *testing.T) {
+	s := pty.New()
+	if err := s.Start("true"); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	// WaitExit then Close — should not panic or race
+	s.WaitExit()
+	s.Close()
+}
