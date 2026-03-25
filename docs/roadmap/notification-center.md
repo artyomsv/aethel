@@ -6,7 +6,7 @@
 | Effort | Medium |
 | Impact | High |
 | Status | Proposed |
-| Depends on | — (Phase 3 integrates with Process Health + Cross-Pane Events) |
+| Depends on | M10 MCP Server (for AI event consumption). Phase 3 integrates with Process Health + Cross-Pane Events |
 
 ## Problem
 
@@ -260,6 +260,124 @@ type PaneRef struct {
 - [ ] Status bar shows event count when sidebar is hidden
 - [ ] Sidebar is non-modal — panes remain interactive
 - [ ] Focus mode hides sidebar; events accumulate
+- [ ] MCP `watch_notifications` blocks until event fires for specified panes
+- [ ] MCP `get_notifications` returns pending notifications without blocking
+- [ ] AI can wait for process exit or output pattern match without polling
+
+## MCP Integration: AI as Event Consumer
+
+The Notification Center is not just a TUI feature — it's the **central event hub** that both the TUI sidebar and MCP-connected AI tools consume from. This eliminates the need for AI to poll panes.
+
+### The Problem with Polling
+
+Without notifications, AI must poll panes to check if work is done:
+```
+AI: send_keys(build_pane, ["npm test", "enter"])
+AI: sleep(10)                               ← blind wait
+AI: screenshot_pane(build_pane)             ← too early? too late?
+AI: sleep(10)                               ← more polling
+AI: screenshot_pane(build_pane)             ← finally done
+```
+
+### The Solution: `watch_notifications` MCP Tool
+
+A blocking MCP tool that waits for events from the Notification Center:
+
+```
+AI: send_keys(build_pane, ["npm test", "enter"])
+AI: result = watch_notifications(
+        pane_ids=["build_pane"],
+        timeout=120
+    )
+    → blocks until: process exits, output matches a notification pattern, or timeout
+AI: result = {pane_id: "build_pane", event: "process_exit", exit_code: 1, title: "Tests failed"}
+AI: screenshot_pane(build_pane)  ← exact moment, no waste
+```
+
+### Architecture
+
+```
+┌──────────────────────────────────────────┐
+│         Daemon Event System              │
+│                                          │
+│  flushPaneOutput() ──► output watchers   │
+│  streamPTYOutput() ──► exit watchers     │
+│  plugin scrapers   ──► state watchers    │
+│                                          │
+│      ┌────────────────────────┐          │
+│      │  Notification Center   │          │
+│      │  (per-pane event queue)│          │
+│      └──────┬─────────┬───────┘          │
+│             │         │                  │
+│   ┌─────────┘         └──────────┐       │
+│   ▼                              ▼       │
+│ TUI Sidebar (M12)          MCP Bridge    │
+│ - visual notifications     - watch_notifications tool
+│ - toast popups             - per-pane filtering
+│ - Alt+N toggle             - blocking until event fires
+│ - badge counts             - returns event details
+└──────────────────────────────────────────┘
+```
+
+### MCP Tools for Notification Center
+
+| Tool | Description |
+|------|-------------|
+| `watch_notifications` | Block until an event fires for specified pane IDs. Returns event details. |
+| `get_notifications` | Non-blocking: return all pending notifications (for initial state check). |
+| `subscribe_pane` | Register interest in a pane — daemon prioritizes event delivery for subscribed panes. |
+
+### IPC Extension for MCP
+
+```go
+// MCP bridge → Daemon
+MsgWatchNotificationsReq = "watch_notifications_req"
+type WatchNotificationsReqPayload struct {
+    PaneIDs []string      `json:"pane_ids"`
+    Timeout time.Duration `json:"timeout"`
+}
+
+// Daemon → MCP bridge (when event fires or timeout)
+MsgWatchNotificationsResp = "watch_notifications_resp"
+type WatchNotificationsRespPayload struct {
+    Event   *PaneEventPayload `json:"event,omitempty"` // nil on timeout
+    Timeout bool              `json:"timeout"`
+}
+```
+
+The daemon registers a one-shot watcher for the specified panes. When any event fires for those panes, it responds to the waiting MCP bridge with the event details.
+
+### Example: AI Debugging Workflow
+
+```
+User: "The build pane seems stuck, check it"
+
+AI: panes = list_panes()
+    → finds build_pane = "pane-abc123"
+
+AI: status = get_pane_status(build_pane)
+    → running: true, type: "terminal"
+
+AI: screenshot = screenshot_pane(build_pane)
+    → sees: "npm test" running, output streaming
+
+AI: result = watch_notifications(pane_ids=[build_pane], timeout=120)
+    → blocks... daemon monitors pane events...
+    → 45 seconds later: process exits with code 1
+    → returns: {event: "process_exit", exit_code: 1, title: "Process failed"}
+
+AI: screenshot = screenshot_pane(build_pane)
+    → sees: "3 tests failed" output
+
+AI: [reads test output, fixes the code, reruns tests]
+```
+
+### Implementation Notes
+
+- `watch_notifications` uses the same `eventQueue` that the TUI sidebar consumes
+- The MCP bridge timeout for `watch_notifications` must be longer than the default 10s (up to 5 minutes)
+- Multiple `watch_notifications` calls can be active simultaneously (different panes)
+- When the MCP bridge disconnects, all its watchers are automatically cleaned up
 
 ## Open Questions
 
@@ -268,3 +386,5 @@ type PaneRef struct {
 - Should events auto-expire after a timeout (e.g., 30 minutes)?
 - Should "go back" (`Alt+Backspace`) work for all pane switches (not just notification navigation)?
 - Should dismissed events go to a history view or disappear permanently?
+- Should `watch_notifications` support custom regex patterns (ad-hoc) in addition to plugin-defined notification handlers?
+- Should AI be able to create notification rules via MCP (e.g., "notify me when this pane outputs ERROR")?

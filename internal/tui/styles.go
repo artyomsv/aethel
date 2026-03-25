@@ -22,6 +22,10 @@ var (
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("238"))
 
+	mcpHighlightBorder = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("208")) // orange
+
 	statusBarStyle = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("250")).
 		Background(lipgloss.Color("236")).

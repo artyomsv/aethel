@@ -41,11 +41,35 @@ const (
 
 	// Plugin management (Client -> Daemon)
 	MsgReloadPlugins = "reload_plugins"
+
+	// MCP request-response (Client -> Daemon -> Client)
+	MsgListPanesReq       = "list_panes_req"
+	MsgListPanesResp      = "list_panes_resp"
+	MsgReadPaneOutputReq  = "read_pane_output_req"
+	MsgReadPaneOutputResp = "read_pane_output_resp"
+	MsgPaneStatusReq      = "pane_status_req"
+	MsgPaneStatusResp     = "pane_status_resp"
+	MsgCreatePaneReq      = "create_pane_req"
+	MsgCreatePaneResp     = "create_pane_resp"
+	MsgRestartPaneReq     = "restart_pane_req"
+	MsgRestartPaneResp    = "restart_pane_resp"
+	MsgScreenshotPaneReq  = "screenshot_pane_req"
+	MsgScreenshotPaneResp = "screenshot_pane_resp"
+	MsgSwitchTabReq       = "switch_tab_req"
+	MsgSwitchTabResp      = "switch_tab_resp"
+	MsgListTabsReq        = "list_tabs_req"
+	MsgListTabsResp       = "list_tabs_resp"
+	MsgDestroyPaneReq     = "destroy_pane_req"
+	MsgDestroyPaneResp    = "destroy_pane_resp"
+	MsgSetActivePane      = "set_active_pane"  // broadcast to TUI
+	MsgCloseTUI           = "close_tui"        // broadcast to TUI
+	MsgHighlightPane      = "highlight_pane"   // broadcast to TUI (MCP interaction indicator)
 )
 
 // Message is the wire format for IPC communication.
 type Message struct {
 	Type    string          `json:"type"`
+	ID      string          `json:"id,omitempty"` // request-response correlation (MCP bridge)
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -119,6 +143,120 @@ type PluginErrorPayload struct {
 	PaneID  string `json:"pane_id"`
 	Title   string `json:"title"`
 	Message string `json:"message"`
+}
+
+// MCP request-response payloads
+
+type PaneInfo struct {
+	ID           string `json:"id"`
+	TabID        string `json:"tab_id"`
+	TabName      string `json:"tab_name"`
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	CWD          string `json:"cwd"`
+	Running      bool   `json:"running"`
+	InstanceName string `json:"instance_name,omitempty"`
+}
+
+type ListPanesRespPayload struct {
+	Panes []PaneInfo `json:"panes"`
+}
+
+type ReadPaneOutputReqPayload struct {
+	PaneID    string `json:"pane_id"`
+	LastLines int    `json:"last_lines"`
+}
+
+type ReadPaneOutputRespPayload struct {
+	PaneID string `json:"pane_id"`
+	Text   string `json:"text"`
+	Lines  int    `json:"lines"`
+}
+
+type PaneStatusReqPayload struct {
+	PaneID string `json:"pane_id"`
+}
+
+type PaneStatusRespPayload struct {
+	PaneID   string `json:"pane_id"`
+	Running  bool   `json:"running"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+	Type     string `json:"type"`
+	CWD      string `json:"cwd"`
+	Name     string `json:"name"`
+}
+
+type CreatePaneReqPayload struct {
+	TabID        string   `json:"tab_id,omitempty"`
+	CWD          string   `json:"cwd,omitempty"`
+	Type         string   `json:"type,omitempty"`
+	InstanceName string   `json:"instance_name,omitempty"`
+	InstanceArgs []string `json:"instance_args,omitempty"`
+}
+
+type CreatePaneRespPayload struct {
+	PaneID string `json:"pane_id"`
+	TabID  string `json:"tab_id"`
+}
+
+// Phase B MCP payloads
+
+type RestartPaneReqPayload struct {
+	PaneID string `json:"pane_id"`
+}
+
+type RestartPaneRespPayload struct {
+	PaneID  string `json:"pane_id"`
+	Success bool   `json:"success"`
+}
+
+type ScreenshotPaneReqPayload struct {
+	PaneID string `json:"pane_id"`
+	Width  int    `json:"width,omitempty"`
+	Height int    `json:"height,omitempty"`
+}
+
+type ScreenshotPaneRespPayload struct {
+	PaneID  string `json:"pane_id"`
+	Text    string `json:"text"`
+	CursorX int    `json:"cursor_x"`
+	CursorY int    `json:"cursor_y"`
+}
+
+type SwitchTabReqPayload struct {
+	TabID string `json:"tab_id"`
+}
+
+type SwitchTabRespPayload struct {
+	TabID string `json:"tab_id"`
+}
+
+type TabInfo struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Color     string `json:"color,omitempty"`
+	PaneCount int    `json:"pane_count"`
+	Active    bool   `json:"active"`
+}
+
+type ListTabsRespPayload struct {
+	Tabs []TabInfo `json:"tabs"`
+}
+
+type DestroyPaneReqPayload struct {
+	PaneID string `json:"pane_id"`
+}
+
+type DestroyPaneRespPayload struct {
+	Success bool `json:"success"`
+}
+
+type SetActivePanePayload struct {
+	PaneID string `json:"pane_id"`
+}
+
+type HighlightPanePayload struct {
+	PaneID string `json:"pane_id"`
 }
 
 // NewMessage creates a Message with a typed payload.

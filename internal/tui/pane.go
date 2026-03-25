@@ -37,6 +37,7 @@ type PaneModel struct {
 	spinnerFrame  int                 // current frame index in spinnerFrames
 	activeSel     *Selection          // set by Model before View() for selection rendering
 	focusMode     bool                // set by Model before View() when in focus mode
+	mcpHighlight  bool                // set by Model before View() when MCP is interacting
 }
 
 func NewPaneModel(id string, bufSize int) *PaneModel {
@@ -130,6 +131,9 @@ func (p *PaneModel) View() string {
 	}
 	if p.ghost || p.resuming || p.preparing {
 		borderColor = lipgloss.Color("95") // muted purple — distinct but not jarring
+	}
+	if p.mcpHighlight {
+		borderColor = lipgloss.Color("208") // orange — MCP interaction
 	}
 
 	innerW := p.Width - 2

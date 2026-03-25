@@ -14,7 +14,9 @@
 # IDE
 .idea/
 .vscode/
+.claude/settings.json
 .claude/settings.local.json
+.mcp.json
 *.swp
 *.swo
 

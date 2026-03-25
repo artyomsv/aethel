@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	apty "github.com/artyomsv/aethel/internal/pty"
@@ -31,6 +32,10 @@ type Pane struct {
 	PluginMu     sync.Mutex          // Protects PluginState from concurrent access
 	InstanceName string              // Which instance config was used
 	InstanceArgs []string            // Args used to start (for rerun strategy)
+	ExitCode     *int                // nil = still running, non-nil = exited
+	ExitedAt     time.Time           // When the process exited (zero if running)
+	Cols         int                 // Last known terminal width (0 = unknown)
+	Rows         int                 // Last known terminal height (0 = unknown)
 }
 
 type SessionManager struct {

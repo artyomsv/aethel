@@ -7,9 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 	"github.com/google/uuid"
 	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/ipc"
@@ -439,6 +442,30 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleReloadPlugins()
 	case ipc.MsgShutdown:
 		close(d.shutdown)
+
+	// MCP request-response
+	case ipc.MsgListPanesReq:
+		d.handleListPanesReq(conn, msg)
+	case ipc.MsgReadPaneOutputReq:
+		d.handleReadPaneOutputReq(conn, msg)
+	case ipc.MsgPaneStatusReq:
+		d.handlePaneStatusReq(conn, msg)
+	case ipc.MsgCreatePaneReq:
+		d.handleCreatePaneReq(conn, msg)
+	case ipc.MsgRestartPaneReq:
+		d.handleRestartPaneReq(conn, msg)
+	case ipc.MsgScreenshotPaneReq:
+		d.handleScreenshotPaneReq(conn, msg)
+	case ipc.MsgSwitchTabReq:
+		d.handleSwitchTabReq(conn, msg)
+	case ipc.MsgListTabsReq:
+		d.handleListTabsReq(conn, msg)
+	case ipc.MsgDestroyPaneReq:
+		d.handleDestroyPaneReq(conn, msg)
+	case ipc.MsgSetActivePane:
+		d.handleSetActivePane(conn, msg)
+	case ipc.MsgCloseTUI:
+		d.server.Broadcast(msg)
 	}
 }
 
@@ -701,6 +728,8 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 		return
 	}
 	pane.PTY.Resize(payload.Rows, payload.Cols)
+	pane.Cols = int(payload.Cols)
+	pane.Rows = int(payload.Rows)
 }
 
 func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
@@ -787,6 +816,15 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 		case chunk, ok := <-dataCh:
 			if !ok {
 				flush()
+				// Capture process exit code (protected by PluginMu to avoid data race)
+				if pane := d.session.Pane(paneID); pane != nil {
+					code := pty.WaitExit()
+					pane.PluginMu.Lock()
+					pane.ExitCode = &code
+					pane.ExitedAt = time.Now()
+					pane.PluginMu.Unlock()
+					log.Printf("pane %s: process exited with code %d", paneID, code)
+				}
 				return
 			}
 			acc = append(acc, chunk...)
@@ -999,4 +1037,446 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	pane.PTY = ptySession
 	go d.streamPTYOutput(pane.ID, ptySession)
 	return nil
+}
+
+// respondTo sends a response message to a specific connection with the same
+// request ID for correlation. Used by MCP request-response handlers.
+func respondTo(conn *ipc.Conn, requestID, msgType string, payload any) {
+	resp, err := ipc.NewMessage(msgType, payload)
+	if err != nil {
+		log.Printf("respondTo: marshal %s: %v", msgType, err)
+		return
+	}
+	resp.ID = requestID
+	conn.Send(resp)
+}
+
+// highlightPane broadcasts a highlight message to TUI clients so they can
+// visually indicate MCP interaction on a pane.
+func (d *Daemon) highlightPane(paneID string) {
+	if paneID == "" {
+		return
+	}
+	msg, _ := ipc.NewMessage(ipc.MsgHighlightPane, ipc.HighlightPanePayload{
+		PaneID: paneID,
+	})
+	d.server.Broadcast(msg)
+}
+
+// respondToAndHighlight sends a response and broadcasts a highlight for the pane.
+func (d *Daemon) respondToAndHighlight(conn *ipc.Conn, requestID, msgType string, payload any, paneID string) {
+	respondTo(conn, requestID, msgType, payload)
+	d.highlightPane(paneID)
+}
+
+func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
+	_, tabs, panesByTab := d.session.SnapshotState()
+
+	var panes []ipc.PaneInfo
+	for _, tab := range tabs {
+		for _, pane := range panesByTab[tab.ID] {
+			typ := pane.Type
+			if typ == "" {
+				typ = "terminal"
+			}
+			pane.PluginMu.Lock()
+			running := pane.ExitCode == nil
+			pane.PluginMu.Unlock()
+			panes = append(panes, ipc.PaneInfo{
+				ID:           pane.ID,
+				TabID:        tab.ID,
+				TabName:      tab.Name,
+				Name:         pane.Name,
+				Type:         typ,
+				CWD:          pane.CWD,
+				Running:      running,
+				InstanceName: pane.InstanceName,
+			})
+		}
+	}
+
+	respondTo(conn, msg.ID, ipc.MsgListPanesResp, ipc.ListPanesRespPayload{
+		Panes: panes,
+	})
+}
+
+func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.ReadPaneOutputReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleReadPaneOutputReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgReadPaneOutputResp, ipc.ReadPaneOutputRespPayload{})
+		return
+	}
+
+	pane := d.session.Pane(req.PaneID)
+	if pane == nil {
+		respondTo(conn, msg.ID, ipc.MsgReadPaneOutputResp, ipc.ReadPaneOutputRespPayload{
+			PaneID: req.PaneID,
+			Text:   "",
+			Lines:  0,
+		})
+		return
+	}
+	d.highlightPane(pane.ID)
+
+	lastLines := req.LastLines
+	if lastLines <= 0 {
+		lastLines = 50
+	}
+	if lastLines > 1000 {
+		lastLines = 1000
+	}
+
+	raw := pane.OutputBuf.Bytes()
+	stripped := ansi.Strip(string(raw))
+
+	// Extract last N lines
+	allLines := strings.Split(stripped, "\n")
+	// Trim trailing empty line from final newline
+	if len(allLines) > 0 && allLines[len(allLines)-1] == "" {
+		allLines = allLines[:len(allLines)-1]
+	}
+	if len(allLines) > lastLines {
+		allLines = allLines[len(allLines)-lastLines:]
+	}
+	text := strings.Join(allLines, "\n")
+
+	respondTo(conn, msg.ID, ipc.MsgReadPaneOutputResp, ipc.ReadPaneOutputRespPayload{
+		PaneID: req.PaneID,
+		Text:   text,
+		Lines:  len(allLines),
+	})
+}
+
+func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.PaneStatusReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handlePaneStatusReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, ipc.PaneStatusRespPayload{})
+		return
+	}
+
+	pane := d.session.Pane(req.PaneID)
+	if pane == nil {
+		respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, ipc.PaneStatusRespPayload{
+			PaneID: req.PaneID,
+		})
+		return
+	}
+	d.highlightPane(pane.ID)
+
+	typ := pane.Type
+	if typ == "" {
+		typ = "terminal"
+	}
+
+	pane.PluginMu.Lock()
+	exitCode := pane.ExitCode
+	running := exitCode == nil
+	pane.PluginMu.Unlock()
+
+	respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, ipc.PaneStatusRespPayload{
+		PaneID:   pane.ID,
+		Running:  running,
+		ExitCode: exitCode,
+		Type:     typ,
+		CWD:      pane.CWD,
+		Name:     pane.Name,
+	})
+}
+
+func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.CreatePaneReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleCreatePaneReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{})
+		return
+	}
+
+	tabID := req.TabID
+	if tabID == "" {
+		tabID = d.session.ActiveTabID()
+	}
+	if tabID == "" {
+		log.Print("handleCreatePaneReq: no active tab")
+		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{})
+		return
+	}
+
+	cwd := req.CWD
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+
+	// Validate CWD exists and is a directory
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		log.Printf("handleCreatePaneReq: invalid cwd %q: %v", cwd, err)
+		cwd, _ = os.Getwd()
+	}
+
+	pane, err := d.session.CreatePane(tabID, cwd)
+	if err != nil {
+		log.Printf("handleCreatePaneReq: create pane: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{})
+		return
+	}
+	d.highlightPane(pane.ID)
+
+	pane.Type = req.Type
+	if pane.Type == "" {
+		pane.Type = "terminal"
+	}
+	pane.InstanceName = req.InstanceName
+	pane.InstanceArgs = req.InstanceArgs
+
+	ptySession := apty.NewWithSize(80, 24)
+	if err := d.spawnPane(pane, ptySession, false); err != nil {
+		log.Printf("handleCreatePaneReq: spawn: %v", err)
+		// Pane exists but has no running process — caller can check via get_pane_status
+	}
+
+	d.broadcastState()
+	d.requestSnapshot()
+
+	respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{
+		PaneID: pane.ID,
+		TabID:  tabID,
+	})
+}
+
+func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.RestartPaneReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleRestartPaneReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{})
+		return
+	}
+
+	pane := d.session.Pane(req.PaneID)
+	if pane == nil {
+		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
+		return
+	}
+	d.highlightPane(pane.ID)
+
+	// Close existing PTY
+	if pane.PTY != nil {
+		pane.PTY.Close()
+		pane.PTY = nil
+	}
+
+	// Reset exit state
+	pane.PluginMu.Lock()
+	pane.ExitCode = nil
+	pane.ExitedAt = time.Time{}
+	pane.PluginMu.Unlock()
+
+	// Clear output buffer
+	if pane.OutputBuf != nil {
+		pane.OutputBuf.Reset()
+	}
+
+	// Respawn with same config, using last known dimensions
+	cols, rows := pane.Cols, pane.Rows
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	ptySession := apty.NewWithSize(cols, rows)
+	success := true
+	if err := d.spawnPane(pane, ptySession, false); err != nil {
+		log.Printf("handleRestartPaneReq: spawn: %v", err)
+		success = false
+	}
+
+	d.broadcastState()
+	d.requestSnapshot()
+
+	respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{
+		PaneID:  pane.ID,
+		Success: success,
+	})
+}
+
+func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.ScreenshotPaneReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleScreenshotPaneReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgScreenshotPaneResp, ipc.ScreenshotPaneRespPayload{})
+		return
+	}
+
+	pane := d.session.Pane(req.PaneID)
+	if pane == nil {
+		respondTo(conn, msg.ID, ipc.MsgScreenshotPaneResp, ipc.ScreenshotPaneRespPayload{
+			PaneID: req.PaneID,
+		})
+		return
+	}
+	d.highlightPane(pane.ID)
+
+	width := req.Width
+	if width <= 0 {
+		width = pane.Cols
+	}
+	if width <= 0 {
+		width = 80
+	}
+	if width > 500 {
+		width = 500
+	}
+	height := req.Height
+	if height <= 0 {
+		height = pane.Rows
+	}
+	if height <= 0 {
+		height = 24
+	}
+	if height > 200 {
+		height = 200
+	}
+
+	raw := pane.OutputBuf.Bytes()
+
+	// Feed ring buffer into a temporary VT emulator to get the screen state
+	em := vt.NewSafeEmulator(width, height)
+	em.Write(raw)
+
+	// Extract text grid from emulator cells
+	var lines []string
+	for y := 0; y < height; y++ {
+		var line strings.Builder
+		for x := 0; x < width; x++ {
+			cell := em.CellAt(x, y)
+			if cell != nil && cell.Content != "" {
+				line.WriteString(cell.Content)
+			} else {
+				line.WriteByte(' ')
+			}
+		}
+		lines = append(lines, strings.TrimRight(line.String(), " "))
+	}
+
+	// Trim trailing empty lines
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	cursor := em.CursorPosition()
+
+	respondTo(conn, msg.ID, ipc.MsgScreenshotPaneResp, ipc.ScreenshotPaneRespPayload{
+		PaneID:  pane.ID,
+		Text:    strings.Join(lines, "\n"),
+		CursorX: cursor.X,
+		CursorY: cursor.Y,
+	})
+}
+
+func (d *Daemon) handleSwitchTabReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.SwitchTabReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleSwitchTabReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgSwitchTabResp, ipc.SwitchTabRespPayload{})
+		return
+	}
+
+	d.session.SwitchTab(req.TabID)
+	d.broadcastState()
+	d.requestSnapshot()
+
+	respondTo(conn, msg.ID, ipc.MsgSwitchTabResp, ipc.SwitchTabRespPayload{
+		TabID: req.TabID,
+	})
+}
+
+func (d *Daemon) handleListTabsReq(conn *ipc.Conn, msg *ipc.Message) {
+	activeTab, tabs, panesByTab := d.session.SnapshotState()
+
+	var tabInfos []ipc.TabInfo
+	for _, tab := range tabs {
+		tabInfos = append(tabInfos, ipc.TabInfo{
+			ID:        tab.ID,
+			Name:      tab.Name,
+			Color:     tab.Color,
+			PaneCount: len(panesByTab[tab.ID]),
+			Active:    tab.ID == activeTab,
+		})
+	}
+
+	respondTo(conn, msg.ID, ipc.MsgListTabsResp, ipc.ListTabsRespPayload{
+		Tabs: tabInfos,
+	})
+}
+
+func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.DestroyPaneReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleDestroyPaneReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
+		return
+	}
+
+	pane := d.session.Pane(req.PaneID)
+	if pane == nil {
+		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
+		return
+	}
+	d.highlightPane(pane.ID)
+
+	tabID := pane.TabID
+	if err := d.session.DestroyPane(req.PaneID); err != nil {
+		log.Printf("handleDestroyPaneReq: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
+		return
+	}
+
+	// Auto-create replacement if last pane in tab (same as handleDestroyPane)
+	tab := d.session.Tab(tabID)
+	if tab != nil && len(tab.Panes) == 0 {
+		cwd, _ := os.Getwd()
+		newPane, _ := d.session.CreatePane(tabID, cwd)
+		if newPane != nil {
+			newPane.Type = "terminal"
+			ptySession := apty.NewWithSize(80, 24)
+			if err := d.spawnPane(newPane, ptySession, false); err != nil {
+				log.Printf("handleDestroyPaneReq: auto-create: %v", err)
+			}
+		}
+	}
+
+	d.broadcastState()
+	d.requestSnapshot()
+
+	respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{
+		Success: true,
+	})
+}
+
+func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.SetActivePanePayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleSetActivePane: decode: %v", err)
+		return
+	}
+
+	// Verify pane exists
+	pane := d.session.Pane(req.PaneID)
+	if pane == nil {
+		log.Printf("handleSetActivePane: pane not found: %s", req.PaneID)
+		return
+	}
+
+	// Switch to the pane's tab
+	d.session.SwitchTab(pane.TabID)
+
+	// Broadcast to TUI clients so they can set focus
+	broadcast, _ := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{
+		PaneID: req.PaneID,
+	})
+	d.server.Broadcast(broadcast)
+
+	d.broadcastState()
+	d.requestSnapshot()
 }

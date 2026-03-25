@@ -57,12 +57,31 @@ GoReleaser config: `.goreleaser.yml` (version 2). Version injected via `-ldflags
 
 Install script: `scripts/install.sh` — POSIX shell, detects OS/arch, downloads from GitHub Releases, verifies checksum, installs to `~/.local/bin/`.
 
+## MCP Server
+
+`aethel mcp` subcommand exposes Aethel as an MCP (Model Context Protocol) server over stdio. AI tools (Claude Desktop, VS Code, Cursor) spawn this as a child process and communicate via JSON-RPC 2.0.
+
+Architecture: thin bridge between MCP JSON-RPC (stdio) and daemon IPC (socket). The MCP bridge connects to the daemon as another IPC client — same as the TUI.
+
+MCP SDK: `github.com/modelcontextprotocol/go-sdk` (official SDK, v1.4+). Typed tool handlers with struct-based input schemas.
+
+13 MCP tools: `list_panes`, `read_pane_output` (ANSI-stripped), `send_to_pane`, `get_pane_status`, `create_pane`, `send_keys` (named key sequences), `restart_pane`, `screenshot_pane` (VT-emulated text screenshot), `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane` (TUI cooperation), `close_tui` (TUI cooperation).
+
+IPC request-response: `Message.ID` field (omitempty, backward compatible) correlates requests with responses. Daemon responds to the requesting connection when `ID` is set, broadcasts when empty.
+
+Key files: `cmd/aethel/mcp.go` (bridge + daemon connection), `cmd/aethel/mcp_tools.go` (13 tool implementations), `cmd/aethel/mcp_keys.go` (key name → escape sequence map), `cmd/aethel/mcp_log.go` (per-pane interaction logging + two-layer redaction).
+
+AI tool configuration:
+```json
+{"mcpServers": {"aethel": {"command": "aethel", "args": ["mcp"]}}}
+```
+
 ## Key Conventions
 
 - Platform-specific code uses `//go:build` tags (not `// +build`)
 - ConPTY API: `conpty.New(width, height, flags)` — 3 args, uses `Spawn()`, reads/writes directly on ConPty object
 - Bubble Tea v2 / Lipgloss v2 — import paths: `charm.land/bubbletea/v2`, `charm.land/lipgloss/v2`. View() returns `tea.View` struct (not string). KeyMsg is `tea.KeyPressMsg`. MouseMsg split into `tea.MouseClickMsg`, `tea.MouseWheelMsg`, `tea.MouseMotionMsg`, `tea.MouseReleaseMsg`. Clipboard via `internal/clipboard` (platform-native: Win32/pbcopy/xclip). Paste wraps in bracketed paste sequences (`\x1b[200~...\x1b[201~`). Mouse modifiers: `msg.Mod.Contains(tea.ModCtrl)`. Quit: `tea.Quit` (function value, not call)
-- IPC protocol: 4-byte big-endian length prefix + JSON payload
+- IPC protocol: 4-byte big-endian length prefix + JSON payload. Optional `ID` field for request-response correlation (MCP bridge). When `ID` is set, daemon responds to specific connection; when empty, broadcasts to all
 - `.gitignore` uses root-anchored patterns (`/aethel`, `/aetheld`) to avoid matching `cmd/` directories
 - Pane layout uses a binary split tree (`LayoutNode` in `internal/tui/layout.go`) — each internal node has its own `SplitDir`, enabling mixed H/V splits (tmux-style). The tree is serialized to JSON and persisted in the daemon's `Tab.Layout` field for reconnect restoration
 - Layout persistence: TUI sends `MsgUpdateLayout` after every state sync; daemon stores it opaquely (no broadcast to avoid feedback loop). On reconnect, `applyWorkspaceState()` deserializes the tree and prunes missing panes
@@ -133,3 +152,4 @@ AETHEL_HOME=/custom/path ./aethel  # Arbitrary data directory
 - **M6 (Done):** Pane Focus — Ctrl+E toggles active pane full-screen (`TabModel.focusMode`). Layout tree stays intact; `Resize()`/`View()` skip non-active panes. `* FOCUS *` in pane top border, `[focus]` in status bar. Pane nav disabled in focus. Split/close auto-exit focus. Not persisted
 - **M7:** Pane Notes — side-by-side note-taking linked to panes
 - **M8 (Done):** Bubble Tea v2 + Lipgloss v2 migration — declarative View, typed mouse events, platform-native clipboard (Win32/pbcopy/xclip), text selection (keyboard + mouse), bracketed paste
+- **M10 (Done):** MCP Server — `aethel mcp` exposes 13 tools via Model Context Protocol. Phase A: list_panes, read_pane_output, send_to_pane, get_pane_status, create_pane. Phase B: send_keys, restart_pane, screenshot_pane (VT-emulated), switch_tab, list_tabs, destroy_pane, set_active_pane, close_tui. Official Go SDK (`modelcontextprotocol/go-sdk`). Request-response IPC via `Message.ID` field. TUI cooperation via broadcast messages for set_active_pane and close_tui

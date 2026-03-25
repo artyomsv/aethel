@@ -20,6 +20,9 @@ type Session interface {
 	Close() error
 	// Pid returns the process ID of the running command.
 	Pid() int
+	// WaitExit blocks until the process exits and returns the exit code.
+	// Returns -1 if the exit code cannot be determined.
+	WaitExit() int
 }
 
 // NewWithSize creates a new PTY session with the given initial dimensions.

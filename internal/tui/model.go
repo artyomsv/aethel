@@ -67,6 +67,23 @@ type PluginErrorMsg struct {
 	Message string
 }
 
+// setActivePaneMsg is sent when MCP requests focus on a specific pane.
+type setActivePaneMsg struct {
+	PaneID string
+}
+
+// highlightPaneMsg triggers an orange border highlight on a pane for MCP interactions.
+type highlightPaneMsg struct {
+	PaneID string
+}
+
+// clearHighlightMsg clears the orange border highlight after the timer expires.
+// Seq must match the pane's current sequence to avoid clearing a renewed highlight.
+type clearHighlightMsg struct {
+	PaneID string
+	Seq    int
+}
+
 // spinnerTickMsg advances the resuming spinner animation for a pane.
 type spinnerTickMsg struct {
 	paneID string
@@ -148,6 +165,8 @@ type Model struct {
 	mouseStartY          int                    // screen Y of mouse press
 	configChanged        bool                   // true when config needs saving on exit
 	disclaimerTipIdx     int                    // random tip index for disclaimer dialog
+	mcpHighlights        map[string]bool        // pane IDs with active MCP highlight
+	mcpHighlightSeq      map[string]int         // sequence number for highlight timer reset
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
@@ -158,6 +177,8 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		devMode:        os.Getenv("AETHEL_HOME") != "",
 		pluginRegistry: registry,
 		instanceStore:  LoadInstances(config.InstancesPath()),
+		mcpHighlights:  make(map[string]bool),
+		mcpHighlightSeq: make(map[string]int),
 	}
 	if cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
 		m.dialog = dialogDisclaimer
@@ -381,6 +402,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case setActivePaneMsg:
+		// Find which tab contains this pane and switch to it
+		for i, tab := range m.tabs {
+			if tab.Root != nil && tab.Root.PaneIDs()[msg.PaneID] {
+				m.activeTab = i
+				tab.ActivePane = msg.PaneID
+				log.Printf("set_active_pane: switched to tab %d pane %s", i, msg.PaneID)
+				return m, m.listenForMessages()
+			}
+		}
+		log.Printf("set_active_pane: pane %s not found", msg.PaneID)
+		return m, m.listenForMessages()
+
+	case highlightPaneMsg:
+		m.mcpHighlights[msg.PaneID] = true
+		m.mcpHighlightSeq[msg.PaneID]++
+		seq := m.mcpHighlightSeq[msg.PaneID]
+		dur, err := time.ParseDuration(m.cfg.MCP.HighlightDuration)
+		if err != nil || dur <= 0 {
+			dur = 10 * time.Second
+		}
+		if dur > 60*time.Second {
+			dur = 60 * time.Second
+		}
+		paneID := msg.PaneID
+		return m, tea.Batch(
+			m.listenForMessages(),
+			tea.Tick(dur, func(_ time.Time) tea.Msg {
+				return clearHighlightMsg{PaneID: paneID, Seq: seq}
+			}),
+		)
+
+	case clearHighlightMsg:
+		// Only clear if sequence matches (a newer highlight hasn't replaced us)
+		if m.mcpHighlightSeq[msg.PaneID] == msg.Seq {
+			delete(m.mcpHighlights, msg.PaneID)
+		}
+		return m, nil
+
 	case listenContinueMsg:
 		return m, m.listenForMessages()
 	}
@@ -418,6 +478,7 @@ func (m Model) View() tea.View {
 				for _, pane := range tab.Root.Leaves() {
 					pane.activeSel = m.selection
 					pane.focusMode = tab.FocusMode() && pane.ID == tab.ActivePane
+					pane.mcpHighlight = m.mcpHighlights[pane.ID]
 				}
 			}
 			sections = append(sections, tab.View())
@@ -1384,6 +1445,21 @@ func (m Model) listenForMessages() tea.Cmd {
 				Title:   payload.Title,
 				Message: payload.Message,
 			}
+
+		case ipc.MsgSetActivePane:
+			var payload ipc.SetActivePanePayload
+			msg.DecodePayload(&payload)
+			log.Printf("ipc recv: set_active_pane %s", payload.PaneID)
+			return setActivePaneMsg{PaneID: payload.PaneID}
+
+		case ipc.MsgCloseTUI:
+			log.Print("ipc recv: close_tui")
+			return tea.QuitMsg{}
+
+		case ipc.MsgHighlightPane:
+			var payload ipc.HighlightPanePayload
+			msg.DecodePayload(&payload)
+			return highlightPaneMsg{PaneID: payload.PaneID}
 
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)

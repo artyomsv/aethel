@@ -16,6 +16,12 @@ type Config struct {
 	Security    SecurityConfig    `toml:"security"`
 	UI          UIConfig          `toml:"ui"`
 	Keybindings KeybindingsConfig `toml:"keybindings"`
+	MCP         MCPConfig         `toml:"mcp"`
+}
+
+type MCPConfig struct {
+	HighlightDuration string `toml:"highlight_duration"` // e.g., "10s"
+	LogDir            string `toml:"log_dir"`            // empty = ~/.aethel/mcp-logs/
 }
 
 type DaemonConfig struct {
@@ -92,6 +98,9 @@ func Default() Config {
 			MouseScrollLines: 3,
 			PageScrollLines:  0, // 0 = half-page (dynamic)
 			ShowDisclaimer:   true,
+		},
+		MCP: MCPConfig{
+			HighlightDuration: "10s",
 		},
 		Keybindings: KeybindingsConfig{
 			Quit:            "ctrl+q",
@@ -184,4 +193,11 @@ func WindowStatePath() string {
 
 func InstancesPath() string {
 	return filepath.Join(AethelDir(), "instances.json")
+}
+
+func MCPLogDir(cfg MCPConfig) string {
+	if cfg.LogDir != "" {
+		return cfg.LogDir
+	}
+	return filepath.Join(AethelDir(), "mcp-logs")
 }
