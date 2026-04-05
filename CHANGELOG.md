@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-04-05
+
 ### Added
 
 - **Notification Center (M12)** — daemon event queue with process exit detection, output pattern matching via `[[idle_handlers]]` TOML, and bell character detection with 30s cooldown. TUI sidebar toggled via Alt+N (visibility) / F3 (focus+navigate). Pane history stack with Alt+Backspace navigation. Status bar `[N events]` badge
