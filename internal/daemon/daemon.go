@@ -2574,6 +2574,9 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 		if payload.RemoveWorktree {
 			worktrees = ownedWorktreePaths([]*Pane{pane})
 		}
+		// Same window, same reason: the card needs the pane's name, which is
+		// gone once DestroyPane runs.
+		d.notifyPaneDestroyed(pane, "user")
 	}
 	log.Printf("pane destroy: %s (tab=%s)", payload.PaneID, tabID)
 
@@ -2826,6 +2829,102 @@ func (d *Daemon) notifyMCPControl(pane *Pane, title string) {
 	})
 }
 
+// notifyPaneMark surfaces a pin or deletion mark the user set by hand.
+//
+// Four explicit event types rather than two carrying a boolean in Data: the
+// sidebar title then needs no branching, and the queue's (PaneID, Title)
+// aggregation cannot merge a pin with an unpin into one card wearing the wrong
+// label.
+//
+// No cooldown — these are deliberate single acts, not a stream.
+func (d *Daemon) notifyPaneMark(pane *Pane, eventType, title string) {
+	if pane == nil {
+		return
+	}
+	pane.PluginMu.Lock()
+	tabID, name := pane.TabID, pane.Name
+	pane.PluginMu.Unlock()
+
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     tabID,
+		PaneName:  name,
+		Type:      eventType,
+		Title:     title,
+		Severity:  "info",
+		Timestamp: time.Now(),
+	})
+}
+
+// notifyPaneDestroyed records a pane closing, and who closed it.
+//
+// The two destroy paths do not share a funnel — handleDestroyPane serves the
+// TUI and takes no conn, handleDestroyPaneReq serves MCP and does — so this is
+// called from both rather than from one common point that does not exist.
+//
+// It MUST run before session.DestroyPane: that call removes the pane from the
+// session maps, and the name and tab id go with it.
+//
+// Overlay panes are skipped. They are auto-destroyed on exit by onPaneExit as
+// ordinary lifecycle, so a card per Alt+G toggle would be exactly the telemetry
+// the event filter exists to remove.
+func (d *Daemon) notifyPaneDestroyed(pane *Pane, by string) {
+	if pane == nil {
+		return
+	}
+	pane.PluginMu.Lock()
+	isOverlay := pane.Overlay
+	tabID, name := pane.TabID, pane.Name
+	pane.PluginMu.Unlock()
+	if isOverlay {
+		return
+	}
+
+	title := "Pane closed"
+	if by == "mcp" {
+		title = "Pane closed by MCP agent"
+	}
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     tabID,
+		PaneName:  name,
+		Type:      "pane_destroyed",
+		Title:     title,
+		Severity:  "info",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"by": by},
+	})
+}
+
+// notifyWorktreeReady says a git worktree finished preparing and its pane is
+// live.
+//
+// Emitted only on the success path: a failed add already surfaces as SpawnError
+// inside the placeholder pane, and a second telling of the same failure in the
+// sidebar adds nothing.
+func (d *Daemon) notifyWorktreeReady(pane *Pane, branch string) {
+	if pane == nil {
+		return
+	}
+	pane.PluginMu.Lock()
+	tabID, name := pane.TabID, pane.Name
+	pane.PluginMu.Unlock()
+
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     tabID,
+		PaneName:  name,
+		Type:      "worktree_ready",
+		Title:     "Worktree ready: " + branch,
+		Severity:  "info",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"branch": branch},
+	})
+}
+
 func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	var payload ipc.ResizePanePayload
 	if err := msg.DecodePayload(&payload); err != nil {
@@ -2969,6 +3068,10 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 	// and therefore winning.
 	if payload.PinnedAttention != nil {
 		pane.PluginMu.Lock()
+		// Captured inside the lock, beside the write it is about: these fields
+		// are PluginMu-guarded, and reading one outside to compute "did it
+		// change" is a data race CI's -race run fails on.
+		changed := pane.PinnedAttention != *payload.PinnedAttention
 		pane.PinnedAttention = *payload.PinnedAttention
 		cleared := false
 		if *payload.PinnedAttention {
@@ -2984,9 +3087,28 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		if cleared {
 			log.Printf("pane %s: marked_for_deletion cleared by the attention pin", pane.ID)
 		}
+		// AFTER the unlock: notifyPaneMark takes PluginMu itself, and Go
+		// mutexes are not reentrant.
+		//
+		// Only on a real CHANGE — a client may re-send a mark it already
+		// holds, and a card per re-send is the repeat telemetry this feature
+		// exists to remove.
+		//
+		// The implicit clear of the OPPOSITE mark gets no second card. A pane
+		// can hold at most one of the two, so "Pane pinned for attention"
+		// already says the deletion mark is gone; a second card would describe
+		// one act twice. The log line above remains the audit trail.
+		if changed {
+			if *payload.PinnedAttention {
+				d.notifyPaneMark(pane, "pane_pinned", "Pane pinned for attention")
+			} else {
+				d.notifyPaneMark(pane, "pane_unpinned", "Pane attention cleared")
+			}
+		}
 	}
 	if payload.MarkedForDeletion != nil {
 		pane.PluginMu.Lock()
+		changed := pane.MarkedForDeletion != *payload.MarkedForDeletion
 		pane.MarkedForDeletion = *payload.MarkedForDeletion
 		cleared := false
 		if *payload.MarkedForDeletion {
@@ -2997,6 +3119,13 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		log.Printf("pane %s: marked_for_deletion=%v", pane.ID, *payload.MarkedForDeletion)
 		if cleared {
 			log.Printf("pane %s: pinned_attention cleared by the deletion mark", pane.ID)
+		}
+		if changed {
+			if *payload.MarkedForDeletion {
+				d.notifyPaneMark(pane, "pane_marked_deletion", "Pane marked for deletion")
+			} else {
+				d.notifyPaneMark(pane, "pane_unmarked_deletion", "Pane deletion mark cleared")
+			}
 		}
 	}
 	if payload.Unseen != nil {
@@ -5814,6 +5943,9 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	d.highlightPane(pane.ID)
+
+	// Before DestroyPane, which takes the pane's name out of the session maps.
+	d.notifyPaneDestroyed(pane, "mcp")
 
 	// Same cleanup as handleDestroyPane: spool file, ingester state, and
 	// persisted session-id files before the pane disappears.
