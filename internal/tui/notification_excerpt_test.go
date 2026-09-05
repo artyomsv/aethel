@@ -44,7 +44,7 @@ func TestNotificationCenter_View_RendersExcerpt(t *testing.T) {
 		Severity: "error",
 	})
 
-	rendered := nc.View(20)
+	rendered := nc.View(20, nil)
 	if !strings.Contains(rendered, "Error: missing semicolon") {
 		t.Errorf("View did not render excerpt; output:\n%s", rendered)
 	}
@@ -68,7 +68,7 @@ func TestNotificationCenter_View_NoExcerptStillRendersTitle(t *testing.T) {
 		Severity: "warning",
 	})
 
-	rendered := nc.View(20)
+	rendered := nc.View(20, nil)
 	if !strings.Contains(rendered, "Attention") {
 		t.Errorf("View did not render title; output:\n%s", rendered)
 	}
@@ -91,7 +91,7 @@ func TestNotificationCenter_View_ExcerptShowsFirstLineOnly(t *testing.T) {
 		Severity: "warning",
 	})
 
-	rendered := nc.View(20)
+	rendered := nc.View(20, nil)
 	if !strings.Contains(rendered, "first context line") {
 		t.Errorf("View should contain first line; output:\n%s", rendered)
 	}

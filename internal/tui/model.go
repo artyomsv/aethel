@@ -2726,8 +2726,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// tabAreaHeight is the height the tab area — and therefore the notification
+// sidebar composited over it — is rendered at.
+//
+// The expression is spelled inline at nine other sites and is left alone
+// there: this exists so the sidebar's SCROLL arithmetic and its RENDER agree
+// about the viewport, not as a refactor of the render path.
+func (m Model) tabAreaHeight() int {
+	return m.height - chromeHeight
+}
+
 func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 	action, eventID, paneID := m.notifications.HandleKey(key)
+	// Keyboard navigation must bring the selection into view. Done here rather
+	// than inside HandleKey because the height belongs to the Model, and
+	// threading it through the key handler would put a layout concern in the
+	// one method a test can call without one.
+	m.notifications.revealCursor(m.tabAreaHeight())
 	switch action {
 	case "navigate":
 		// The sidebar carries events from every pane in every project, so the
@@ -4309,7 +4324,7 @@ func (m Model) View() tea.View {
 			// projectSidebarWidth() columns WIDER than the terminal. The
 			// strip's screen columns are unchanged — after the left join
 			// the pane area's right edge is still the screen's.
-			tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.paneAreaWidth(), sw)
+			tabContent = overlayRight(tabContent, m.notifications.View(tabH, m.paneLocator()), m.paneAreaWidth(), sw)
 		}
 		// The tab bar labels the PANE column, so it is joined above the panes
 		// and INSIDE that column — one line of paneAreaWidth() starting at

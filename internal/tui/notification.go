@@ -248,153 +248,302 @@ func (nc *NotificationCenter) HandleKey(key string) (action, eventID, paneID str
 	}
 }
 
+// notifyViewportOffset is the screen row of the card viewport's first line.
+//
+//	row 0   tab bar (never the sidebar)
+//	row 1   box top border
+//	row 2   " Notifications " title
+//	row 3   card viewport line 0   <- nc.scroll indexes from here
+//
+// The arithmetic: the sidebar box is composited onto tabContent by
+// overlayRight, which aligns overlay line i with tabContent line i, and
+// tabContent is joined BELOW the one-row tab bar. So box line 0 (its top
+// border) lands on screen row 1, and the two interior rows above the viewport
+// push its first line to row 3.
+//
+// Named rather than spelled 3 at each site: the renderer and the mouse hit test
+// must agree about it, and a literal in two places is how they drift.
+const notifyViewportOffset = 3
+
+// paneLocator answers, for one pane id, where the pane lives and whether it
+// still exists. Supplied by the Model, which owns the project/tab tree; the
+// NotificationCenter deliberately does not reach into it.
+//
+// The two answers travel together because one lookup produces both, and
+// because a card whose pane is gone must be rendered differently AND must not
+// offer a jump — the same fact drives both decisions.
+//
+// A nil locator means "do not know": every pane reads as alive with no label,
+// which is what a test that does not care about location wants.
+type paneLocator func(paneID string) (label string, alive bool)
+
+// renderedLine is one screen line of the card viewport, tagged with the index
+// (into the VISIBLE event list) of the card it belongs to. eventIdx is -1 for
+// chrome — the separators between cards.
+type renderedLine struct {
+	text     string
+	eventIdx int
+}
+
+// notificationLines renders the card viewport to a flat line list.
+//
+// It is the SINGLE source of truth for sidebar geometry: View slices its output
+// by nc.scroll, and eventIndexAtRow looks up by index. Two independent answers
+// to "which card owns screen row N" is how a click lands on the wrong card the
+// first time a card changes height.
+//
+// Pure — no NotificationCenter receiver, no Model — so its tests assert against
+// fixed expected output rather than against the other caller. A test that
+// compares two callers of a shared helper is a self-comparison and stays green
+// on broken geometry.
+func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focused bool, loc paneLocator) []renderedLine {
+	if innerW < 5 {
+		return nil
+	}
+	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	separator := sepStyle.Render(truncateRunes(strings.Repeat("·", innerW), innerW))
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+
+	var out []renderedLine
+	for i, e := range events {
+		selected := i == cursor && focused
+
+		label, alive := "", true
+		if loc != nil {
+			label, alive = loc(e.PaneID)
+		}
+
+		out = append(out, renderedLine{text: separator, eventIdx: -1})
+
+		// Line 1: pane name (severity-coloured, or grey when the pane is gone)
+		// + right-aligned relative age.
+		name := e.PaneName
+		if name == "" {
+			name = e.PaneID
+			if len(name) > 12 {
+				name = name[:12]
+			}
+		}
+		name = truncateRunes(sanitizeRemoteText(name), innerW)
+		nameStyle := severityNameStyle(e.Severity)
+		if !alive {
+			// A card that cannot be jumped to must not wear an urgency colour.
+			nameStyle = dim
+		}
+		if selected {
+			nameStyle = nameStyle.Bold(true).Reverse(true)
+		}
+		age := relativeTime(time.UnixMilli(e.Timestamp))
+		gap := innerW - len([]rune(name)) - len([]rune(age))
+		if gap < 1 {
+			gap = 1
+		}
+		out = append(out, renderedLine{
+			text:     nameStyle.Render(name) + strings.Repeat(" ", gap) + dim.Render(age),
+			eventIdx: i,
+		})
+
+		// Line 2: title + optional ×N aggregation badge.
+		//
+		// sanitizeRemoteText runs BEFORE truncation, and that order is
+		// load-bearing: truncateRunes slices runes with no idea what an escape
+		// is, so sanitising afterwards would leave a cut sequence swallowing
+		// the styling bytes that follow it. A title comes from a pane's own
+		// child via the hook spool and reaches the terminal with no VT
+		// emulator in between, so U+202E — printable, and therefore past any
+		// C0-only filter — would reverse the rendered line.
+		titleBody := "  " + sanitizeRemoteText(e.Title)
+		if e.Data != nil {
+			if n, err := strconv.Atoi(e.Data["count"]); err == nil && n > 1 {
+				titleBody += "  ×" + e.Data["count"]
+			}
+		}
+		titleText := truncateRunes(titleBody, innerW)
+		if selected {
+			titleText = lipgloss.NewStyle().Reverse(true).Render(titleText)
+		} else {
+			titleText = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(titleText)
+		}
+		out = append(out, renderedLine{text: titleText, eventIdx: i})
+
+		// Line 3: where the pane lives, so a click's destination is visible
+		// before the click. A pane that is gone says so instead — the sidebar
+		// carries events that outlive their pane (pane_destroyed is one), and
+		// offering a jump that silently does nothing is worse than saying why.
+		locText := "  " + sanitizeRemoteText(label)
+		if !alive {
+			locText = "  (closed)"
+		}
+		locStyle := dim
+		if selected {
+			locStyle = dim.Reverse(true)
+		}
+		out = append(out, renderedLine{
+			text:     locStyle.Render(truncateRunes(locText, innerW)),
+			eventIdx: i,
+		})
+
+		// Line 4: excerpt — EMITTED ONLY WHEN THERE IS ONE. The old renderer
+		// always emitted it, blank or not, to keep every card four lines so
+		// the card-indexed pagination arithmetic stayed simple. Line-based
+		// scrolling removes that constraint, and dropping the blank line is
+		// most of the extra events now on screen.
+		if e.Message != "" {
+			preview := truncateRunes("  "+sanitizeRemoteText(firstNonEmptyLine(e.Message)), innerW)
+			st := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+			if selected {
+				st = st.Reverse(true)
+			}
+			out = append(out, renderedLine{text: st.Render(preview), eventIdx: i})
+		}
+	}
+	if len(out) > 0 {
+		out = append(out, renderedLine{text: separator, eventIdx: -1})
+	}
+	return out
+}
+
+// notifyViewportHeight is how many card lines fit: the box interior less the
+// title row and the hints row.
+func notifyViewportHeight(height int) int {
+	h := height - 2 /* borders */ - 2 /* title + hints */
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// ScrollBy moves the card viewport by delta lines, clamped to the content.
+//
+// height is passed in rather than stored because the sidebar is drawn at the
+// tab area's height, which changes with the terminal — a stored copy would be
+// one frame stale exactly when the user resizes and scrolls together.
+func (nc *NotificationCenter) ScrollBy(delta, height int) {
+	nc.scroll += delta
+	nc.clampScroll(height, nil)
+}
+
+// clampScroll bounds nc.scroll to the rendered content.
+//
+// loc may be nil: the locator changes a line's TEXT, never how many lines a
+// card occupies, so the line count is the same either way.
+func (nc *NotificationCenter) clampScroll(height int, loc paneLocator) {
+	total := len(notificationLines(nc.visibleEvents(), nc.width-2, nc.cursor, nc.focused, loc))
+	maxScroll := total - notifyViewportHeight(height)
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if nc.scroll > maxScroll {
+		nc.scroll = maxScroll
+	}
+	if nc.scroll < 0 {
+		nc.scroll = 0
+	}
+}
+
+// eventIndexAtRow maps a screen row to the index (into visibleEvents()) of the
+// card drawn there, or -1 for chrome and out-of-range rows.
+func (nc *NotificationCenter) eventIndexAtRow(y, height int, loc paneLocator) int {
+	vy := y - notifyViewportOffset
+	if vy < 0 || vy >= notifyViewportHeight(height) {
+		return -1
+	}
+	lines := notificationLines(nc.visibleEvents(), nc.width-2, nc.cursor, nc.focused, loc)
+	idx := vy + nc.scroll
+	if idx < 0 || idx >= len(lines) {
+		return -1
+	}
+	return lines[idx].eventIdx
+}
+
+// SelectIndex moves the cursor to a visible-list index and brings it into view.
+func (nc *NotificationCenter) SelectIndex(i, height int) {
+	if i < 0 || i >= len(nc.visibleEvents()) {
+		return
+	}
+	nc.cursor = i
+	nc.revealCursor(height)
+}
+
+// revealCursor scrolls the minimum distance needed to show the selected card
+// whole.
+//
+// Called after keyboard navigation and after a click, never when an event
+// arrives: a new event landing at index 0 must not yank a user reading history
+// back to the top.
+func (nc *NotificationCenter) revealCursor(height int) {
+	lines := notificationLines(nc.visibleEvents(), nc.width-2, nc.cursor, nc.focused, nil)
+	first, last := -1, -1
+	for i, l := range lines {
+		if l.eventIdx != nc.cursor {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		last = i
+	}
+	if first < 0 {
+		return
+	}
+	vh := notifyViewportHeight(height)
+	if first < nc.scroll {
+		nc.scroll = first
+	} else if last >= nc.scroll+vh {
+		nc.scroll = last - vh + 1
+	}
+	nc.clampScroll(height, nil)
+}
+
 // View renders the sidebar at the given height.
-func (nc *NotificationCenter) View(height int) string {
+//
+// loc resolves each card's project/tab label and liveness; pass nil in a test
+// that does not care, and every pane then reads as alive with an empty label.
+func (nc *NotificationCenter) View(height int, loc paneLocator) string {
 	innerW := nc.width - 2
 	innerH := height - 2
 	if innerW < 5 || innerH < 3 {
 		return ""
 	}
 
-	var lines []string
+	out := make([]string, 0, innerH)
+	out = append(out, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).
+		Render(truncateRunes(" Notifications ", innerW)))
 
-	// Title
-	title := " Notifications "
-	title = truncateRunes(title, innerW)
-	lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Render(title))
+	lines := notificationLines(nc.visibleEvents(), innerW, nc.cursor, nc.focused, loc)
 
-	separator := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(
-		truncateRunes(strings.Repeat("·", innerW), innerW),
-	)
-
-	if len(nc.events) == 0 {
-		lines = append(lines, separator)
-		noEvents := "No notifications"
-		noEvents = truncateRunes(noEvents, innerW)
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(noEvents))
+	if len(lines) == 0 {
+		out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("238")).
+			Render(truncateRunes(strings.Repeat("·", innerW), innerW)))
+		// Naming the override matters only when something is actually being
+		// hidden: on an unfiltered center there is nothing for it to reveal.
+		empty := "No notifications"
+		if !nc.showAll && nc.groups != nil && len(nc.events) > 0 {
+			empty = "None shown (a: show all)"
+		}
+		out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("243")).
+			Render(truncateRunes(empty, innerW)))
 	} else {
-		// Each event = separator + name/time + title + excerpt = 4 lines.
-		// The excerpt line is always emitted (blank if Message is empty) so
-		// every event has the same height — keeps pagination math predictable.
-		const linesPerEvent = 4
-		maxVisible := (innerH - 3) / linesPerEvent
-		if maxVisible < 1 {
-			maxVisible = 1
-		}
-		start := 0
-		if nc.cursor >= maxVisible {
-			start = nc.cursor - maxVisible + 1
-		}
-		end := start + maxVisible
-		if end > len(nc.events) {
-			end = len(nc.events)
-		}
-
-		for i := start; i < end; i++ {
-			e := nc.events[i]
-			selected := i == nc.cursor && nc.focused
-
-			// Separator
-			lines = append(lines, separator)
-
-			// Pane name or ID
-			name := e.PaneName
-			if name == "" {
-				name = e.PaneID
-				if len(name) > 12 {
-					name = name[:12]
-				}
-			}
-
-			// Relative time (right-aligned)
-			age := relativeTime(time.UnixMilli(e.Timestamp))
-
-			// Line 1: colored name + right-aligned time
-			nameStyle := severityNameStyle(e.Severity)
-			if selected {
-				nameStyle = nameStyle.Bold(true).Reverse(true)
-			}
-			styledName := nameStyle.Render(name)
-
-			// Pad between name and time
-			nameLen := len([]rune(name))
-			ageLen := len([]rune(age))
-			gap := innerW - nameLen - ageLen
-			if gap < 1 {
-				gap = 1
-			}
-			line1 := styledName + strings.Repeat(" ", gap) + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(age)
-
-			// Line 2: title (indented), with optional ×N badge for
-			// daemon-side aggregation. count > 1 means this card already
-			// absorbed N repeats of the same (PaneID, Title).
-			// Sanitised for the same reason every pane-sourced string in
-			// sidebar.go is: a card title comes from a pane's own child via the
-			// hook spool, and this card is composited straight into the frame
-			// with no VT emulator in between — so an unfiltered title is one of
-			// the few strings in Quil that reaches the terminal with nothing
-			// parsing it first. Escapes could clear the screen or write the
-			// clipboard; U+202E is printable, so it survives a C0-only filter
-			// and reverses the rendered line.
-			//
-			// It runs BEFORE the truncation below, and that order is
-			// load-bearing: truncateRunes slices runes with no idea what an
-			// escape is, so sanitising afterwards would still leave a cut
-			// sequence swallowing the styling bytes that follow it.
-			titleBody := "  " + sanitizeRemoteText(e.Title)
-			countBadge := ""
-			if e.Data != nil {
-				if n, err := strconv.Atoi(e.Data["count"]); err == nil && n > 1 {
-					countBadge = "  ×" + e.Data["count"]
-				}
-			}
-			titleText := truncateRunes(titleBody+countBadge, innerW)
-			if selected {
-				titleText = lipgloss.NewStyle().Reverse(true).Render(titleText)
-			} else {
-				titleText = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(titleText)
-			}
-
-			// Line 3: excerpt — first non-empty line of Message (the
-			// triggering output). Dim grey so it visually subordinates to
-			// the title; blank line preserved if no excerpt so the
-			// per-event height stays constant.
-			excerptLine := ""
-			if e.Message != "" {
-				preview := "  " + firstNonEmptyLine(e.Message)
-				preview = truncateRunes(preview, innerW)
-				if selected {
-					excerptLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Reverse(true).Render(preview)
-				} else {
-					excerptLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(preview)
-				}
-			}
-
-			lines = append(lines, line1)
-			lines = append(lines, titleText)
-			lines = append(lines, excerptLine)
-		}
-
-		// Trailing separator
-		if len(lines) < innerH-1 {
-			lines = append(lines, separator)
+		nc.clampScroll(height, loc)
+		vh := notifyViewportHeight(height)
+		for i := nc.scroll; i < nc.scroll+vh && i < len(lines); i++ {
+			out = append(out, lines[i].text)
 		}
 	}
 
-	// Pad to fill height
-	for len(lines) < innerH-1 {
-		lines = append(lines, "")
+	for len(out) < innerH-1 {
+		out = append(out, "")
 	}
 
-	// Key hints at bottom
-	hints := "^!N Focus  Enter Go"
+	hints := "^!N Focus  Click Go"
 	if nc.focused {
-		hints = "Up/Dn  Enter  d/D  Esc"
+		hints = "↑↓ ⏎go d/D a:all Esc"
 	}
-	hints = truncateRunes(hints, innerW)
-	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(hints))
-
-	content := strings.Join(lines, "\n")
+	if nc.showAll {
+		hints = "SHOWING ALL  a:filter"
+	}
+	out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("243")).
+		Render(truncateRunes(hints, innerW)))
 
 	borderColor := lipgloss.Color("63")
 	if nc.focused {
@@ -406,7 +555,7 @@ func (nc *NotificationCenter) View(height int) string {
 		BorderForeground(borderColor).
 		Width(nc.width).
 		Height(height).
-		Render(content)
+		Render(strings.Join(out, "\n"))
 }
 
 // firstNonEmptyLine returns the first non-empty trimmed line of s, or "".
