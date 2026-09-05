@@ -1184,11 +1184,30 @@ func paneSize(pane *Pane) (cols, rows int) {
 // the lazy-spawn path while the IPC server is live, so pane.Cols/Rows must be
 // snapshotted under PluginMu by the caller (see paneSize).
 func newRestoredPTY(cols, rows int) apty.Session {
-	if cols > 0 && rows > 0 {
+	if cols > 0 && rows > 0 && !degenerateSize(cols, rows) {
 		return newSessionFn(cols, rows)
 	}
 	return newSessionFn(0, 0)
 }
+
+// degenerateSize reports a geometry with no usable area — the size a client
+// with no console attached produces, since Bubble Tea reports such a process as
+// 1x1 and the TUI's own floors (paneVTSize) keep both dimensions at 1.
+//
+// BOTH dimensions at the floor together, never either alone. A genuinely narrow
+// SPLIT pane is narrow in one dimension and wide in the other — a vertical
+// split gives few columns and many rows, a horizontal split the reverse — and
+// paneVTSize floors at 1 precisely so those keep working. Collapsing to 1x1 in
+// both takes a terminal with no usable area at all.
+//
+// Two callers, and the restore one is not redundant: a workspace persisted
+// while the bug was live holds `"cols": 1, "rows": 1`, and newRestoredPTY would
+// otherwise boot that pane's child at one column on every daemon start
+// thereafter — apty.NewWithSize floors only NON-POSITIVE values, so 1x1
+// survives it, and resizeKick re-applies the stored size on first output. The
+// live guard in handleResizePane cannot reach that: it runs when a client sends
+// a size, and this happens before any client has attached.
+func degenerateSize(cols, rows int) bool { return cols <= 1 && rows <= 1 }
 
 // newSessionFn constructs the PTY session for a restored pane. It is a
 // package-level var (not a direct apty call) so tests can swap in a fake that
@@ -2776,33 +2795,54 @@ func (d *Daemon) notifyInputBlocked(pane *Pane) {
 	})
 }
 
+// notifyDegenerateResize records a refused resize, at most once per pane per
+// cooldown window. Mirrors notifyInputBlocked, and needs the same throttle for
+// the same reason: the client this guard exists for does not send ONE bad
+// resize, it re-sends every pane's size on every broadcast — 48+ lines a round
+// in the workspace that motivated the fix. quild.log keeps 5 MB x 10 files, so
+// an unthrottled line rotates away the history that explains the flood.
+//
+// No sidebar event, unlike notifyInputBlocked: nothing the user can do about
+// it, the pane keeps its last good size, and the fixed client never gets here.
+func (d *Daemon) notifyDegenerateResize(pane *Pane, cols, rows uint16) {
+	const degenerateResizeCooldown = 30 * time.Second
+	pane.PluginMu.Lock()
+	if !pane.LastDegenerateResizeAt.IsZero() &&
+		time.Since(pane.LastDegenerateResizeAt) < degenerateResizeCooldown {
+		pane.PluginMu.Unlock()
+		return
+	}
+	pane.LastDegenerateResizeAt = time.Now()
+	pane.PluginMu.Unlock()
+	log.Printf("pane %s: refusing degenerate resize to %dx%d", pane.ID, cols, rows)
+}
+
 func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	var payload ipc.ResizePanePayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
 
-	// Degenerate-geometry floor. A client with no console attached is reported
-	// by Bubble Tea as 1x1, and the TUI's own floors (paneVTSize) turn that
-	// into a request that looks perfectly legal by the time it lands here.
-	// Applied, it reflows every child to one column and each transcript
-	// re-wraps permanently — seen twice in production against a 48-tab
-	// workspace. Model.terminalPaintable now refuses to send it; this is the
-	// same refusal for an older or third-party client.
-	//
-	// BOTH dimensions at the floor together, never either alone. A genuinely
-	// narrow SPLIT pane is narrow in ONE dimension and wide in the other — a
-	// vertical split gives few columns and many rows, a horizontal split the
-	// reverse — and paneVTSize floors at 1 precisely so those keep working.
-	// Collapsing to 1x1 in both takes a terminal with no usable area at all.
-	if payload.Cols <= 1 && payload.Rows <= 1 {
-		log.Printf("pane %s: refusing degenerate resize to %dx%d",
-			payload.PaneID, payload.Cols, payload.Rows)
-		return
-	}
-
 	pane := d.session.Pane(payload.PaneID)
 	if pane == nil {
+		return
+	}
+	// Degenerate-geometry floor — see degenerateSize for why BOTH dimensions
+	// must be at the floor. A client with no console attached is reported by
+	// Bubble Tea as 1x1, and the TUI's own floors (paneVTSize) turn that into a
+	// request that looks perfectly legal by the time it lands here. Applied, it
+	// reflows every child to one column and each transcript re-wraps
+	// permanently — seen twice in production against a 48-tab workspace.
+	// Model.terminalPaintable now refuses to send it; this is the same refusal
+	// for an older or third-party client.
+	//
+	// BELOW the pane lookup, not above it, so the log names a pane that exists.
+	// PaneID is bounded only by the 10 MB IPC frame cap while quild.log's whole
+	// budget is 5 MB x 10 files, so an echo on a pre-lookup path lets a
+	// malformed payload evict the history an operator needs to diagnose this
+	// very incident. A resolved pane's id is one the daemon minted itself.
+	if degenerateSize(int(payload.Cols), int(payload.Rows)) {
+		d.notifyDegenerateResize(pane, payload.Cols, payload.Rows)
 		return
 	}
 	// Same-size guard: skip when this exact size was already applied to

@@ -14,7 +14,7 @@ import (
 // Tea. Every resize fan-out computed from it floors at 1x1 (paneVTSize does so
 // deliberately, for genuinely narrow SPLIT panes), so the daemon reflowed every
 // PTY in the workspace to one column and each child permanently re-wrapped its
-// whole transcript. Observed in ~/.quil/quild.log as
+// whole transcript. The daemon log recorded it as
 // `attach: client connected (1x1), tabs=48, restored=true` on 2026-08-25 and
 // again on 2026-09-05.
 //
@@ -159,5 +159,126 @@ func TestUpdate_WorkspaceStateBelowMinimum_ShipsNoPaneResize(t *testing.T) {
 	if n := countResizes(t, conn); n != 0 {
 		t.Fatalf("MsgResizePane count = %d, want 0 — a broadcast must not push "+
 			"pane sizes derived from a terminal the TUI refuses to paint", n)
+	}
+}
+
+// The gate's whole safety argument is that nothing is permanently suppressed:
+// the panes keep their last good size and are resized normally once a usable
+// geometry is reported. Until this test existed that rested on reading alone —
+// a gate that withheld a resize and never released it would look identical to
+// this one in every other test in the file, all of which assert an absence.
+func TestUpdate_GrowBackAboveMinimum_ShipsPaneResize(t *testing.T) {
+	m, conn := tinyTermModel(t)
+
+	next, cmd := m.Update(tea.WindowSizeMsg{Width: 1, Height: 1})
+	runCmd(cmd)
+	m = next.(Model)
+	if n := countResizes(t, conn); n != 0 {
+		t.Fatalf("setup is wrong: the degenerate size shipped %d resizes", n)
+	}
+
+	// The window is restored. The tea.Tick is not run; the arm under test is
+	// resizeTickMsg, delivered here directly.
+	next, _ = m.Update(tea.WindowSizeMsg{Width: 172, Height: 48})
+	m = next.(Model)
+	_, tickCmd := m.Update(resizeTickMsg{seq: m.resizeSeq})
+	runCmd(tickCmd)
+
+	if n := countResizes(t, conn); n != 1 {
+		t.Fatalf("MsgResizePane count = %d, want 1 — a pane whose resize was "+
+			"withheld must be sized again as soon as the terminal is usable", n)
+	}
+}
+
+// An overlay pane sits OUTSIDE the layout tree, so resizeAllPanes never walks
+// it and diffResizes keeps no sizedOnce ledger for it: the resizeTickMsg sweep
+// is the only resize it ever receives. That made a background tab's overlay the
+// one place the gate could withhold a resize with nothing owed afterwards —
+// the pane kept its spawn-time size for the rest of its life.
+func TestUpdate_GrowBackAboveMinimum_ResizesABackgroundTabsOverlay(t *testing.T) {
+	m, conn := tinyTermModel(t)
+
+	// A second tab, in the background, carrying a visible overlay.
+	bg := NewTabModel("tab-2", "Git")
+	bgLeaf := NewPaneModel("pane-2", testRingBufSize)
+	t.Cleanup(bgLeaf.Dispose)
+	bg.Root = NewLeaf(bgLeaf)
+	overlay := NewPaneModel("overlay-2", testRingBufSize)
+	t.Cleanup(overlay.Dispose)
+	bg.overlayPane = overlay
+	bg.overlayVisible = true
+	m.projects[0].tabs = append(m.projects[0].tabs, bg)
+
+	next, cmd := m.Update(tea.WindowSizeMsg{Width: 1, Height: 1})
+	runCmd(cmd)
+	m = next.(Model)
+	clearSent(conn)
+
+	next, _ = m.Update(tea.WindowSizeMsg{Width: 172, Height: 48})
+	m = next.(Model)
+	_, tickCmd := m.Update(resizeTickMsg{seq: m.resizeSeq})
+	runCmd(tickCmd)
+
+	if !sawResizeFor(t, conn, "overlay-2") {
+		t.Fatal("the background tab's overlay pane was never resized — it is " +
+			"outside the layout tree, so this sweep is the only resize it gets")
+	}
+}
+
+// sawResizeFor reports whether a MsgResizePane for paneID reached the wire.
+func sawResizeFor(t *testing.T, conn *fakeConn, paneID string) bool {
+	t.Helper()
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	for _, msg := range conn.sent {
+		if msg.Type != ipc.MsgResizePane {
+			continue
+		}
+		var p ipc.ResizePanePayload
+		if err := msg.DecodePayload(&p); err != nil {
+			t.Fatalf("decode resize payload: %v", err)
+		}
+		if p.PaneID == paneID {
+			return true
+		}
+	}
+	return false
+}
+
+// attachMessage is the one change that alters what the daemon SPAWNS: its
+// Cols/Rows size the first PTY of an empty workspace. A floored 1x1 would start
+// that child at one column; 0 lets handleAttach apply its own 80x24 default.
+func TestAttachMessage_ReportsNoGeometryBelowTheMinimum(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		width, height int
+		wantZero      bool
+	}{
+		{"console-less client", 1, 1, true},
+		{"one column short", minTermWidth - 1, 40, true},
+		{"one row short", 120, minTermHeight - 1, true},
+		{"exactly the minimum", minTermWidth, minTermHeight, false},
+		{"ordinary terminal", 172, 48, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := Model{cfg: config.Default(), width: tt.width, height: tt.height}
+
+			var p ipc.AttachPayload
+			if err := m.attachMessage("").DecodePayload(&p); err != nil {
+				t.Fatalf("decode attach payload: %v", err)
+			}
+
+			if tt.wantZero {
+				if p.Cols != 0 || p.Rows != 0 {
+					t.Fatalf("attach geometry = %dx%d at %dx%d, want 0x0 so the "+
+						"daemon applies its own default", p.Cols, p.Rows, tt.width, tt.height)
+				}
+				return
+			}
+			if p.Cols <= 0 || p.Rows <= 0 {
+				t.Fatalf("attach geometry = %dx%d at %dx%d, want a real size",
+					p.Cols, p.Rows, tt.width, tt.height)
+			}
+		})
 	}
 }

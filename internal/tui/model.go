@@ -1546,8 +1546,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Also resize an active overlay pane so the daemon's PTY tracks the new size.
 		var overlayCmds []tea.Cmd
 		overlayCmds = append(overlayCmds, m.resizeAllPanes())
-		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil {
-			overlayCmds = append(overlayCmds, m.overlayResizeCmd(tab))
+		// EVERY tab, not just the active one. An overlay pane sits outside the
+		// layout tree, so resizeAllPanes never walks it (it iterates
+		// tab.Leaves()) and diffResizes keeps no sizedOnce ledger for it —
+		// these commands are the only resize an overlay ever receives. That
+		// made the active-tab-only sweep the one place terminalPaintable could
+		// withhold a resize with nothing owed afterwards: an overlay opened
+		// while the terminal was too small, on a tab left in the background,
+		// would keep its spawn-time size for the rest of its life.
+		for _, tab := range m.allTabs() {
+			if tab.overlayVisible && tab.overlayPane != nil {
+				overlayCmds = append(overlayCmds, m.overlayResizeCmd(tab))
+			}
 		}
 		return m, tea.Batch(overlayCmds...)
 
@@ -6616,19 +6626,23 @@ func (m Model) attachMessage(dest string) *ipc.Message {
 	tabH := m.height - chromeHeight
 	cols := m.paneAreaWidth() - 2
 	rows := tabH - 2
-	if cols < 1 {
-		cols = 1
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	// A terminal the TUI refuses to paint reports NO geometry rather than the
-	// 1x1 the floors above produce. The daemon sizes the first PTY of an empty
-	// workspace from these, and handleAttach turns a non-positive value into
-	// its own 80x24 default — a usable default beats a measured-but-unusable
-	// size. Same reasoning as terminalPaintable, one message earlier.
+	// A terminal the TUI refuses to paint reports NO geometry, rather than the
+	// 1x1 the floors below would produce. The daemon sizes the first PTY of an
+	// empty workspace from these, and handleAttach turns a non-positive value
+	// into its own 80x24 default — a usable default beats a measured-but-
+	// unusable size. Same reasoning as terminalPaintable, one message earlier.
+	//
+	// Ahead of the floors so they stay reachable only for a paintable terminal;
+	// putting it after left them dead, since this branch overwrites both.
 	if !m.terminalPaintable() {
 		cols, rows = 0, 0
+	} else {
+		if cols < 1 {
+			cols = 1
+		}
+		if rows < 1 {
+			rows = 1
+		}
 	}
 	// Best-effort; if Getwd fails the daemon falls back to its own CWD.
 	localCWD, _ := os.Getwd()
@@ -8088,7 +8102,9 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 // suppressed send free — and when a usable geometry arrives the ordinary
 // fan-out runs: diffResizes returns before it marks sizedOnce, so every pane is
 // still owed its first-resize kick.
-func (m Model) terminalPaintable() bool {
+// Pointer receiver so a caller in a per-tab loop does not copy the whole Model
+// on every iteration — overlayResizeCmd runs once per tab per broadcast.
+func (m *Model) terminalPaintable() bool {
 	return m.width >= minTermWidth && m.height >= minTermHeight
 }
 

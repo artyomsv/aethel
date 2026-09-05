@@ -6,6 +6,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
+	apty "github.com/artyomsv/quil/internal/pty"
 )
 
 // The TUI re-sends every pane's size on each workspace broadcast
@@ -188,13 +189,80 @@ func TestHandleResizePane_DegenerateSize_IsRefused(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := &Daemon{session: NewSessionManager(4096)}
 			fake := &fakeSession{}
-			d.session.panes["p1"] = &Pane{ID: "p1", PTY: fake}
+			// Pre-applied, so the same-size guard can never be what makes a
+			// row pass. A fresh pane has appliedCols/appliedRows == 0, which
+			// already matches a 0x0 payload — that row proved nothing about
+			// this floor until the guard had a different size to compare with.
+			// 200x50 collides with no row in the table, so every row reaches
+			// the floor on its own merits.
+			d.session.panes["p1"] = &Pane{
+				ID: "p1", PTY: fake,
+				appliedCols: 200, appliedRows: 50,
+			}
 
 			d.handleResizePane(resizeMsg(t, "p1", tt.cols, tt.rows))
 
 			if len(fake.resizes) != tt.want {
 				t.Fatalf("PTY.Resize called %d times for %dx%d, want %d",
 					len(fake.resizes), tt.cols, tt.rows, tt.want)
+			}
+		})
+	}
+}
+
+// The refusal log runs once per pane per cooldown window. The client this floor
+// exists for re-sends every pane's size on every broadcast, so an unthrottled
+// line would rotate quild.log away — taking with it the history that explains
+// the flood.
+func TestNotifyDegenerateResize_LogsOncePerCooldownWindow(t *testing.T) {
+	d := &Daemon{session: NewSessionManager(4096)}
+	pane := &Pane{ID: "p1"}
+
+	d.notifyDegenerateResize(pane, 1, 1)
+	first := pane.LastDegenerateResizeAt
+	if first.IsZero() {
+		t.Fatal("the first refusal did not stamp the cooldown")
+	}
+
+	d.notifyDegenerateResize(pane, 1, 1)
+	if !pane.LastDegenerateResizeAt.Equal(first) {
+		t.Error("a refusal inside the cooldown window restamped it; the log " +
+			"would run once per pane per broadcast")
+	}
+}
+
+// A workspace persisted while the bug was live holds "cols": 1, "rows": 1 for
+// every pane. handleResizePane's floor cannot help there — it runs when a
+// client sends a size, and this happens before any client has attached — so a
+// restored child would boot at one column on every daemon start thereafter.
+// apty.NewWithSize floors only NON-POSITIVE values, so 1x1 survives it.
+func TestNewRestoredPTY_DegenerateStoredSizeFallsBackToTheDefault(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		cols, rows       int
+		wantCols, wantRows int
+	}{
+		{"poisoned by the 1x1 bug", 1, 1, 0, 0},
+		{"never sized", 0, 0, 0, 0},
+		{"narrow split column", 1, 40, 1, 40},
+		{"short split row", 100, 1, 100, 1},
+		{"ordinary pane", 172, 46, 172, 46},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotCols, gotRows int
+			prev := newSessionFn
+			newSessionFn = func(cols, rows int) apty.Session {
+				gotCols, gotRows = cols, rows
+				return &fakeSession{}
+			}
+			t.Cleanup(func() { newSessionFn = prev })
+
+			newRestoredPTY(tt.cols, tt.rows)
+
+			if gotCols != tt.wantCols || gotRows != tt.wantRows {
+				t.Fatalf("newRestoredPTY(%d, %d) spawned at %dx%d, want %dx%d "+
+					"(0x0 means: let apty apply its own 80x24 default)",
+					tt.cols, tt.rows, gotCols, gotRows, tt.wantCols, tt.wantRows)
 			}
 		})
 	}
