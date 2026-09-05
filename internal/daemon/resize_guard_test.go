@@ -160,3 +160,42 @@ func (f *failingResizeSession) Resize(rows, cols uint16) error {
 	f.okResizes++
 	return nil
 }
+
+// A client with no console attached is reported by Bubble Tea as 1x1, and the
+// TUI's own floors (paneVTSize) turn that into a resize request that looks
+// legal. Applied, it reflows every child to one column and each transcript
+// re-wraps permanently. The client refuses to send it now
+// (Model.terminalPaintable); this is the daemon's own floor, for an older or
+// third-party client.
+//
+// Only BOTH dimensions at the floor together. A genuinely narrow SPLIT pane is
+// narrow in ONE dimension and wide in the other — a vertical split gives few
+// columns and many rows, a horizontal split the reverse — and paneVTSize floors
+// at 1 precisely so those keep working. A pane that is 1x1 in both needs a
+// terminal with no usable area at all.
+func TestHandleResizePane_DegenerateSize_IsRefused(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		cols, rows uint16
+		want       int
+	}{
+		{"one by one", 1, 1, 0},
+		{"zero by zero", 0, 0, 0},
+		{"narrow split column", 1, 40, 1},
+		{"short split row", 100, 1, 1},
+		{"ordinary pane", 100, 40, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Daemon{session: NewSessionManager(4096)}
+			fake := &fakeSession{}
+			d.session.panes["p1"] = &Pane{ID: "p1", PTY: fake}
+
+			d.handleResizePane(resizeMsg(t, "p1", tt.cols, tt.rows))
+
+			if len(fake.resizes) != tt.want {
+				t.Fatalf("PTY.Resize called %d times for %dx%d, want %d",
+					len(fake.resizes), tt.cols, tt.rows, tt.want)
+			}
+		})
+	}
+}

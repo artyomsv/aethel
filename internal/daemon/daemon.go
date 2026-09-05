@@ -2782,6 +2782,25 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 		return
 	}
 
+	// Degenerate-geometry floor. A client with no console attached is reported
+	// by Bubble Tea as 1x1, and the TUI's own floors (paneVTSize) turn that
+	// into a request that looks perfectly legal by the time it lands here.
+	// Applied, it reflows every child to one column and each transcript
+	// re-wraps permanently — seen twice in production against a 48-tab
+	// workspace. Model.terminalPaintable now refuses to send it; this is the
+	// same refusal for an older or third-party client.
+	//
+	// BOTH dimensions at the floor together, never either alone. A genuinely
+	// narrow SPLIT pane is narrow in ONE dimension and wide in the other — a
+	// vertical split gives few columns and many rows, a horizontal split the
+	// reverse — and paneVTSize floors at 1 precisely so those keep working.
+	// Collapsing to 1x1 in both takes a terminal with no usable area at all.
+	if payload.Cols <= 1 && payload.Rows <= 1 {
+		log.Printf("pane %s: refusing degenerate resize to %dx%d",
+			payload.PaneID, payload.Cols, payload.Rows)
+		return
+	}
+
 	pane := d.session.Pane(payload.PaneID)
 	if pane == nil {
 		return
