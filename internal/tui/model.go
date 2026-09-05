@@ -1613,10 +1613,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Sidebar overlay region: the press belongs to the sidebar, not
 		// the pane rendered beneath it. Clear drag flags so no half-armed
-		// drag survives the swallowed press.
+		// drag survives the press, then let the sidebar ACT on it — this
+		// used to swallow every click and do nothing with it, which is why
+		// the notification list was keyboard-only.
 		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
 			m.clearDragState()
-			return m, nil
+			return m.handleNotificationClick(msg)
 		}
 		// Project sidebar: a RESERVED left column, so the press belongs to
 		// it and never to a pane — the pane area starts at its right edge.
@@ -2009,9 +2011,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			return m, nil
 		}
-		// Wheel over the sidebar overlay must not scroll the pane beneath.
+		// Wheel over the sidebar overlay scrolls the sidebar, and must not
+		// reach the pane beneath it.
 		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
-			return m, nil
+			return m.handleNotificationWheel(msg)
 		}
 		// The project sidebar's reserved column scrolls its own PANES section;
 		// the pane the wheel would otherwise scroll is not the one under the
@@ -2734,6 +2737,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // about the viewport, not as a refactor of the render path.
 func (m Model) tabAreaHeight() int {
 	return m.height - chromeHeight
+}
+
+// handleNotificationClick acts on a press inside the notification sidebar.
+//
+// Left on a card selects it and jumps to its pane; left on chrome focuses the
+// sidebar only; right on a card dismisses it. Focus is taken on EVERY press,
+// chrome included, so the keyboard works immediately after — a strip that
+// swallows a click without taking focus reads as dead.
+//
+// The jump and the dismiss reuse handleNotificationKey's own paths rather than
+// re-implementing them, so the pane-still-exists guard, the history push, the
+// focus-mode handling and the dismiss IPC send are inherited instead of
+// duplicated. That guard is what makes a click on a card whose pane has since
+// closed a no-op rather than a broken jump.
+func (m Model) handleNotificationClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	m.sidebarFocused = true
+	m.notifications.focused = true
+
+	h := m.tabAreaHeight()
+	idx := m.notifications.eventIndexAtRow(msg.Y, h, m.paneLocator())
+	if idx < 0 {
+		return m, nil
+	}
+	m.notifications.SelectIndex(idx, h)
+
+	switch msg.Button {
+	case tea.MouseLeft:
+		return m.handleNotificationKey("enter")
+	case tea.MouseRight:
+		return m.handleNotificationKey("d")
+	}
+	return m, nil
+}
+
+// handleNotificationWheel scrolls the sidebar by the configured step.
+//
+// Both vertical buttons are matched EXPLICITLY, as every other wheel consumer
+// in this package does: tea.MouseWheelMsg also carries MouseWheelLeft/Right
+// from a trackpad or shift-scroll, and collapsing the test to "not up" scrolls
+// the wrong way on those. The swallow is the function itself, so a horizontal
+// notch aimed at the strip does not fall through to the pane area either.
+func (m Model) handleNotificationWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	lines := m.cfg.UI.MouseScrollLines
+	if lines < 1 {
+		lines = 3
+	}
+	switch msg.Button {
+	case tea.MouseWheelUp:
+		m.notifications.ScrollBy(-lines, m.tabAreaHeight())
+	case tea.MouseWheelDown:
+		m.notifications.ScrollBy(lines, m.tabAreaHeight())
+	}
+	return m, nil
 }
 
 func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
