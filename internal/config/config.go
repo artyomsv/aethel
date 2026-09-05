@@ -115,6 +115,39 @@ type NotificationConfig struct {
 	MaxEvents    int                     `toml:"max_events"`    // default 200
 	Hooks        HookNotificationsConfig `toml:"hooks"`
 	Desktop      DesktopConfig           `toml:"desktop"`
+	Events       EventGroupsConfig       `toml:"events"`
+}
+
+// EventGroupsConfig selects which notification groups the TUI sidebar shows.
+//
+// Consumed ONLY by the client. The daemon event queue and the three MCP
+// notification tools stay unfiltered by design: an agent polling for "has this
+// pane gone quiet" wants output_idle and a human does not, so one queue with a
+// client-side filter serves both without either reader losing. Hiding a group
+// is a display preference, never a subscription change.
+//
+// Plain bools rather than pointers: Load starts from Default() and decodes over
+// it, so an absent key already means "the default" and there is no third state
+// to express. That is what keeps a config.toml written before this feature from
+// blanking the sidebar on upgrade.
+//
+// GROUPS, not event types. Event types are internal strings that change
+// whenever an upstream tool adds a hook (hook.claude.*, hook.codex.*), so a
+// config keyed on them would rot; a new type joins an existing group instead.
+// The type -> group table lives at internal/tui/notification_class.go, and an
+// unrecognised type is treated as System — which defaults on, so a newer daemon
+// paired with an older client shows its new events rather than dropping them.
+type EventGroupsConfig struct {
+	AgentTurn     bool `toml:"agent_turn"`     // Working on… / Reply ready
+	AgentBlocked  bool `toml:"agent_blocked"`  // permission prompts, waiting for you, bell
+	AgentSubagent bool `toml:"agent_subagent"` // subagent + task start/stop
+	AgentSession  bool `toml:"agent_session"`  // session end, compaction
+	Process       bool `toml:"process"`        // process exited / failed
+	Pane          bool `toml:"pane"`           // closed, pinned, marked for deletion
+	MCP           bool `toml:"mcp"`            // an agent drove a pane
+	System        bool `toml:"system"`         // input blocked, worktree ready, unknown types
+	Commands      bool `toml:"commands"`       // every shell command (OSC 133)
+	Idle          bool `toml:"idle"`           // output idle
 }
 
 // DesktopConfig controls operating-system toasts raised from the project
@@ -522,6 +555,31 @@ func Default() Config {
 				Claude:   "default",
 				OpenCode: "default",
 				Codex:    "default",
+			},
+			// Commands and Idle default OFF. Both describe machine state
+			// rather than news: output_idle fires for every quiet pane every
+			// 30 s for as long as the pane exists, and command_complete fires
+			// on every shell command. Because eventQueue.Push aggregates by
+			// (PaneID, Title) and re-PREPENDS the merged entry, a repeat
+			// carrying a constant title jumps back to position 1 each time it
+			// fires — so left on, these two permanently occupy the handful of
+			// rows the sidebar can draw and push real events below the fold.
+			// Measured on a production workspace: eight of twelve visible
+			// cards were "Output idle", with repeat counts past 2400.
+			//
+			// MCP consumers still receive them; only this client's sidebar
+			// hides them.
+			Events: EventGroupsConfig{
+				AgentTurn:     true,
+				AgentBlocked:  true,
+				AgentSubagent: true,
+				AgentSession:  true,
+				Process:       true,
+				Pane:          true,
+				MCP:           true,
+				System:        true,
+				Commands:      false,
+				Idle:          false,
 			},
 		},
 		Overlay: OverlayConfig{
