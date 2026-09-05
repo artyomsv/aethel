@@ -11,13 +11,32 @@ import (
 )
 
 // NotificationCenter manages the notification sidebar state.
+//
+// It stores EVERY event it is given and filters at READ time. Storing the
+// filtered set instead would make turning a group back on silently useless —
+// the events that arrived while it was off would already be gone — and the
+// filter is a display preference, not a subscription.
 type NotificationCenter struct {
-	events    []ipc.PaneEventPayload
-	cursor    int
+	events []ipc.PaneEventPayload
+	// cursor indexes visibleEvents(), NOT events. Every read path resolves
+	// through the same accessor so none of them can disagree about which
+	// event position N is.
+	cursor int
+	// scroll is the first visible LINE of the card viewport. Lines, not
+	// cards: cards vary in height, so a card-indexed window cannot show a
+	// partially-scrolled one.
+	scroll    int
 	visible   bool
 	focused   bool
 	width     int
 	maxEvents int
+	// groups is the display filter. NIL shows everything, which is what a
+	// Model built directly by a test gets.
+	groups eventGroupFilter
+	// showAll is the sidebar's 'a' override: display every stored event
+	// regardless of the configured groups. Session-only and never persisted —
+	// a debugging affordance, not a setting.
+	showAll bool
 }
 
 // NewNotificationCenter creates a notification center with the given sidebar width and max events.
@@ -29,6 +48,47 @@ func NewNotificationCenter(width, maxEvents int) *NotificationCenter {
 		maxEvents = 50
 	}
 	return &NotificationCenter{width: width, maxEvents: maxEvents}
+}
+
+// SetGroups installs the display filter. Called at construction and again
+// whenever the user toggles a group in F1 -> Settings -> Notifications, so the
+// change applies live — a visible control that did nothing until relaunch reads
+// as a broken dialog, the same rule the Sidebar width row states.
+//
+// The cursor is clamped rather than reset: hiding a group must not throw away
+// a selection that is still visible.
+func (nc *NotificationCenter) SetGroups(f eventGroupFilter) {
+	nc.groups = f
+	nc.clampCursor()
+}
+
+// visibleEvents returns the events the configured groups allow, newest first.
+//
+// EVERY read path resolves through this — cursor, selection, dismissal, the
+// status-bar badge and the renderer — so none of them can disagree about which
+// event position N is.
+func (nc *NotificationCenter) visibleEvents() []ipc.PaneEventPayload {
+	if nc.showAll || nc.groups == nil {
+		return nc.events
+	}
+	out := make([]ipc.PaneEventPayload, 0, len(nc.events))
+	for _, e := range nc.events {
+		if nc.groups.shows(e.Type) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// clampCursor keeps the cursor inside the visible list after anything that can
+// shrink it: a filter change, a dismissal, an eviction at maxEvents.
+func (nc *NotificationCenter) clampCursor() {
+	if n := len(nc.visibleEvents()); nc.cursor >= n {
+		nc.cursor = n - 1
+	}
+	if nc.cursor < 0 {
+		nc.cursor = 0
+	}
 }
 
 // AddEvent prepends an event. When an event with the same ID is already
@@ -51,32 +111,42 @@ func (nc *NotificationCenter) AddEvent(e ipc.PaneEventPayload) {
 		// Capture the cursor's current event ID so we can chase it through
 		// the move-to-front. The aggregated event itself is allowed to move
 		// — what we protect is selection of OTHER events.
+		//
+		// Read from and written back to the VISIBLE list, because that is what
+		// the cursor indexes. Using the stored slice on either side was
+		// correct only while the two lists were the same one, and would now
+		// silently jump the selection to an unrelated card whenever anything
+		// is hidden.
 		var cursorID string
-		if nc.cursor >= 0 && nc.cursor < len(nc.events) {
-			cursorID = nc.events[nc.cursor].ID
+		if vis := nc.visibleEvents(); nc.cursor >= 0 && nc.cursor < len(vis) {
+			cursorID = vis[nc.cursor].ID
 		}
 
 		nc.events = append(nc.events[:i], nc.events[i+1:]...)
 		nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
 
 		// Restore cursor onto the same logical event. When the aggregated
-		// event WAS the cursor, follow it to position 0 (the visual
+		// event WAS the cursor, follow it to its new position (the visual
 		// equivalent of "stay on the card you were looking at"). When the
 		// cursor was on a different event, find its new index.
 		if cursorID != "" {
-			for j, ev := range nc.events {
+			for j, ev := range nc.visibleEvents() {
 				if ev.ID == cursorID {
 					nc.cursor = j
 					break
 				}
 			}
 		}
+		nc.clampCursor()
 		return
 	}
 	nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
 	if len(nc.events) > nc.maxEvents {
 		nc.events = nc.events[:nc.maxEvents]
 	}
+	// The eviction above can drop the event the cursor was on, and with a
+	// filter installed the visible list can shrink by more than one.
+	nc.clampCursor()
 	// Deliberately do NOT shift the cursor on a fresh prepend. The legacy
 	// contract is "cursor 0 = newest event"; a fresh event landing at index
 	// 0 should become the new selection by default. Only the aggregation
@@ -85,37 +155,56 @@ func (nc *NotificationCenter) AddEvent(e ipc.PaneEventPayload) {
 }
 
 // DismissSelected removes the selected event and returns its ID.
+//
+// It resolves the cursor through visibleEvents() and then deletes BY ID from
+// the stored slice. Slicing nc.events by the cursor directly — which is what
+// this did before the filter existed — dismisses a different event than the one
+// under the cursor as soon as anything is hidden.
 func (nc *NotificationCenter) DismissSelected() string {
-	if nc.cursor >= len(nc.events) {
+	vis := nc.visibleEvents()
+	if nc.cursor < 0 || nc.cursor >= len(vis) {
 		return ""
 	}
-	id := nc.events[nc.cursor].ID
-	nc.events = append(nc.events[:nc.cursor], nc.events[nc.cursor+1:]...)
-	if nc.cursor >= len(nc.events) && len(nc.events) > 0 {
-		nc.cursor = len(nc.events) - 1
-	} else if len(nc.events) == 0 {
-		nc.cursor = 0
+	id := vis[nc.cursor].ID
+	for i, e := range nc.events {
+		if e.ID == id {
+			nc.events = append(nc.events[:i], nc.events[i+1:]...)
+			break
+		}
 	}
+	nc.clampCursor()
 	return id
 }
 
 // DismissAll removes all events.
+//
+// Every stored event, not just the visible ones: the key is documented as
+// "dismiss all", the daemon-side MsgDismissEvent with an empty ID clears the
+// whole queue, and leaving hidden events behind would make the client and the
+// daemon disagree about what is still pending.
 func (nc *NotificationCenter) DismissAll() {
 	nc.events = nil
 	nc.cursor = 0
+	nc.scroll = 0
 }
 
 // SelectedEvent returns the currently selected event, or nil.
 func (nc *NotificationCenter) SelectedEvent() *ipc.PaneEventPayload {
-	if nc.cursor >= len(nc.events) {
+	vis := nc.visibleEvents()
+	if nc.cursor < 0 || nc.cursor >= len(vis) {
 		return nil
 	}
-	return &nc.events[nc.cursor]
+	return &vis[nc.cursor]
 }
 
-// Count returns the number of pending events.
+// Count returns the number of events the user can currently see.
+//
+// The status-bar badge reads this, so a workspace holding nothing but hidden
+// telemetry shows no badge — which is the point of the filter. Safe for the
+// existing callers: all of them build a center or a Model without ever calling
+// SetGroups, and a nil filter shows everything.
 func (nc *NotificationCenter) Count() int {
-	return len(nc.events)
+	return len(nc.visibleEvents())
 }
 
 // HandleKey processes a key press when the sidebar is focused.
@@ -129,9 +218,17 @@ func (nc *NotificationCenter) HandleKey(key string) (action, eventID, paneID str
 		}
 		return "none", "", ""
 	case "down", "j":
-		if nc.cursor < len(nc.events)-1 {
+		if nc.cursor < len(nc.visibleEvents())-1 {
 			nc.cursor++
 		}
+		return "none", "", ""
+	case "a":
+		// Reveal every stored event regardless of the configured groups, for
+		// as long as the user wants it. Not persisted: F1 -> Settings ->
+		// Notifications is where a lasting choice is made, and this is the
+		// affordance for looking at what the filter is currently hiding.
+		nc.showAll = !nc.showAll
+		nc.clampCursor()
 		return "none", "", ""
 	case "enter":
 		if e := nc.SelectedEvent(); e != nil {

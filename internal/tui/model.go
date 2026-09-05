@@ -1059,6 +1059,10 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 			m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))
 		}
 	}
+	// Installed here rather than in NewNotificationCenter's signature: the
+	// center is also constructed directly by tests, and those must keep the
+	// nil filter that shows everything.
+	m.notifications.SetGroups(groupFilterFrom(cfg.Notification.Events))
 	m.initKeymap()
 	return m
 }
