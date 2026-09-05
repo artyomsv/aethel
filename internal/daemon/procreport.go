@@ -279,6 +279,22 @@ func (r *helloRegistry) put(conn *ipc.Conn, p ipc.ClientHelloPayload) {
 	r.mu.Unlock()
 }
 
+// roleOf returns a connection's self-declared role ("tui" or "bridge"), or ""
+// when it never said hello.
+//
+// This is the honest way to tell an MCP bridge from the TUI. The tempting
+// alternative — treating an id-bearing request as an agent — is wrong:
+// Message.ID is a request-response correlation id, so any future
+// request-response caller would be misreported as an agent.
+func (r *helloRegistry) roleOf(conn *ipc.Conn) string {
+	if conn == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.byConn[conn].payload.Role
+}
+
 // putStat records a client's latest self-measurement.
 //
 // A stat for a connection that never said hello is DROPPED, not stored. Rows

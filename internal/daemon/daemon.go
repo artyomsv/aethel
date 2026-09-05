@@ -2690,6 +2690,18 @@ func (d *Daemon) handlePaneInput(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	out := d.paneInputOutcome(payload)
+	// Surfaced from HERE rather than from paneInputOutcome, which does the
+	// pane lookup but takes no conn — and conn is what carries the client's
+	// role. One extra map read on a path already doing IPC work, in exchange
+	// for not widening that function's signature.
+	//
+	// Gated on Delivered so a card can never claim an agent typed into a pane
+	// whose input the daemon refused (no such pane, no process, a worktree
+	// still preparing, or a full queue). paneInputOutcome has released
+	// PluginMu by now, so notifyMCPControl taking it again is safe.
+	if out.Delivered && d.hellos.roleOf(conn) == "bridge" {
+		d.notifyMCPControl(d.session.Pane(payload.PaneID), "MCP agent typed here")
+	}
 	// ONLY an id-bearing request is answered. The TUI sets no ID and sends one
 	// of these per keystroke, so it is untouched — a response per keystroke
 	// would be a frame per keystroke on that client's 64-slot must-deliver
@@ -2772,6 +2784,44 @@ func (d *Daemon) notifyInputBlocked(pane *Pane) {
 		Title:     "Pane not accepting input",
 		Message:   "The process stopped reading its input — keystrokes are being dropped. Restart the pane if it stays stuck.",
 		Severity:  "warning",
+		Timestamp: time.Now(),
+	})
+}
+
+// mcpControlCooldown is how long one pane stays quiet after an mcp_control
+// card. An agent driving a pane sends many messages per turn; the card says
+// "an agent is on this pane", which is a state rather than a per-message fact.
+const mcpControlCooldown = 30 * time.Second
+
+// notifyMCPControl surfaces an MCP agent acting on a pane.
+//
+// Cooldown bookkeeping happens under PluginMu; the emit happens AFTER the
+// unlock. emitEvent re-locks this pane's PluginMu for its mute check and Go
+// mutexes are not reentrant, so emitting while holding the lock self-deadlocks
+// the calling goroutine and everything queued behind that pane — the
+// daemon-wide freeze of 2026-06-12. notifyInputBlocked above is shaped the
+// same way for the same reason.
+func (d *Daemon) notifyMCPControl(pane *Pane, title string) {
+	if pane == nil {
+		return
+	}
+	pane.PluginMu.Lock()
+	if !pane.LastMCPEventAt.IsZero() && time.Since(pane.LastMCPEventAt) < mcpControlCooldown {
+		pane.PluginMu.Unlock()
+		return
+	}
+	pane.LastMCPEventAt = time.Now()
+	tabID, name := pane.TabID, pane.Name
+	pane.PluginMu.Unlock()
+
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     tabID,
+		PaneName:  name,
+		Type:      "mcp_control",
+		Title:     title,
+		Severity:  "info",
 		Timestamp: time.Now(),
 	})
 }
@@ -5537,6 +5587,11 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		// happened.
 		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
 		return
+	}
+	// Placed AFTER the refusals above, so a restart the daemon declined does
+	// not produce a card claiming an agent restarted the pane.
+	if d.hellos.roleOf(conn) == "bridge" {
+		d.notifyMCPControl(pane, "MCP agent restarted this pane")
 	}
 	// Clear any deferred state first so the restart below operates on a normal
 	// live pane (Pending=false) rather than racing the lazy-spawn guard.
