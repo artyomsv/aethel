@@ -774,6 +774,19 @@ func (nc *NotificationCenter) Count() int {
 }
 ```
 
+**Verified: this does not break the existing `Count()` callers.** There are
+eighteen of them across seven test files plus `model.go:2488` and
+`model.go:6434`. Four assert on `output_idle` and `bell` events — types the
+default config HIDES — but every one of them builds its `Model` or its
+`NotificationCenter` without ever calling `SetGroups`
+(`notification_active_pane_test.go:18`, `notification_workstate_callsite_test.go`,
+`workstate_test.go:1332`, `notification_test.go`,
+`notification_aggregate_test.go`). Their filter is therefore nil, and a nil
+filter shows everything.
+
+That is precisely why `visibleEvents()` treats nil as show-everything rather
+than as an empty allow-list. Do not "tidy" that branch away.
+
 - [ ] **Step 5: Bound the cursor and add the `a` key**
 
 In `HandleKey`, replace the `up` / `down` cases and add `a`:
@@ -1382,18 +1395,31 @@ func (nc *NotificationCenter) View(height int, loc paneLocator) string {
 - [ ] **Step 7: Reveal the cursor after keyboard navigation**
 
 `HandleKey` has no height. Rather than thread one through, have the Model call
-`revealCursor` after dispatching a key. In `internal/tui/model.go`, at the top
-of `handleNotificationKey` (`:2726`), replace the first line with:
+`revealCursor` after dispatching a key.
+
+The sidebar is drawn at `tabH`, and every one of the nine sites that needs it
+spells it `tabH := m.height - chromeHeight` (`model.go:1918, 1972, 2985, 3012,
+3045, 3165, 4267, 5956, 6616`). Add a named accessor beside `paneLocator` in
+`internal/tui/model.go`:
+
+```go
+// tabAreaHeight is the height the tab area — and therefore the notification
+// sidebar drawn over it — is rendered at.
+//
+// The expression is spelled inline at nine other sites and is left alone
+// there: this exists so the sidebar's SCROLL arithmetic and its RENDER agree,
+// not as a refactor of the render path.
+func (m Model) tabAreaHeight() int {
+	return m.height - chromeHeight
+}
+```
+
+Then, in `handleNotificationKey` (`model.go:2726`), replace the first line with:
 
 ```go
 	action, eventID, paneID := m.notifications.HandleKey(key)
 	m.notifications.revealCursor(m.tabAreaHeight())
 ```
-
-If `tabAreaHeight()` does not exist, run `grep -n "tabH :=" internal/tui/model.go`
-and use the same expression that feeds `m.notifications.View(tabH)` at
-`model.go:4308`, extracting it into a `func (m Model) tabAreaHeight() int`
-helper used by both sites.
 
 - [ ] **Step 8: Update the one production `View` call site**
 
@@ -1515,10 +1541,7 @@ func TestWheelOverSidebar_Scrolls(t *testing.T) {
 	m := mouseTestModel(t)
 	before := m.notifications.scroll
 
-	next, _ := m.Update(tea.MouseWheelMsg{
-		Mouse:  tea.Mouse{X: sidebarX(m), Y: 6},
-		Button: tea.MouseWheelDown,
-	})
+	next, _ := m.Update(tea.MouseWheelMsg{X: sidebarX(m), Y: 6, Button: tea.MouseWheelDown})
 	got := next.(Model).notifications.scroll
 	if got <= before {
 		t.Errorf("scroll after wheel down: got %d, want > %d", got, before)
@@ -1533,8 +1556,7 @@ func TestWheelOverSidebar_DoesNotReachPane(t *testing.T) {
 	// opposite edge: one column LEFT of the strip must not scroll it.
 	before := m.notifications.scroll
 	next, _ := m.Update(tea.MouseWheelMsg{
-		Mouse:  tea.Mouse{X: m.width - m.notifications.width - 1, Y: 6},
-		Button: tea.MouseWheelDown,
+		X: m.width - m.notifications.width - 1, Y: 6, Button: tea.MouseWheelDown,
 	})
 	if got := next.(Model).notifications.scroll; got != before {
 		t.Errorf("scroll after a wheel notch outside the strip: got %d, want %d", got, before)
@@ -1546,10 +1568,7 @@ func TestClickOnCard_SelectsAndFocuses(t *testing.T) {
 	m.notifications.cursor = 0
 
 	// Screen row 4 = viewport line 1 = the newest card's name line.
-	next, _ := m.Update(tea.MouseClickMsg{
-		Mouse:  tea.Mouse{X: sidebarX(m), Y: 4},
-		Button: tea.MouseLeft,
-	})
+	next, _ := m.Update(tea.MouseClickMsg{X: sidebarX(m), Y: 4, Button: tea.MouseLeft})
 	nm := next.(Model)
 	if !nm.sidebarFocused {
 		t.Error("sidebar not focused after a click on a card")
@@ -1564,10 +1583,7 @@ func TestClickOnChrome_FocusesWithoutSelecting(t *testing.T) {
 	m.notifications.cursor = 3
 
 	// Screen row 2 is the " Notifications " title — chrome.
-	next, _ := m.Update(tea.MouseClickMsg{
-		Mouse:  tea.Mouse{X: sidebarX(m), Y: 2},
-		Button: tea.MouseLeft,
-	})
+	next, _ := m.Update(tea.MouseClickMsg{X: sidebarX(m), Y: 2, Button: tea.MouseLeft})
 	nm := next.(Model)
 	if !nm.sidebarFocused {
 		t.Error("sidebar not focused after a click on chrome")
@@ -1581,10 +1597,7 @@ func TestRightClickOnCard_Dismisses(t *testing.T) {
 	m := mouseTestModel(t)
 	before := m.notifications.Count()
 
-	next, _ := m.Update(tea.MouseClickMsg{
-		Mouse:  tea.Mouse{X: sidebarX(m), Y: 4},
-		Button: tea.MouseRight,
-	})
+	next, _ := m.Update(tea.MouseClickMsg{X: sidebarX(m), Y: 4, Button: tea.MouseRight})
 	if got := next.(Model).notifications.Count(); got != before-1 {
 		t.Errorf("Count after right-click: got %d, want %d", got, before-1)
 	}
@@ -1746,7 +1759,16 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-func key(s string) tea.KeyPressMsg { return tea.KeyPressMsg{Code: 0, Text: s} }
+// Named keys travel in Code, printable ones in Text — that is how the rest of
+// this package's dialog tests build them (dialog_test.go:112, :138, :213), and
+// it is what msg.String() reads. A "enter" string in Text does NOT produce
+// String() == "enter".
+var (
+	keyEnter = tea.KeyPressMsg{Code: tea.KeyEnter}
+	keyEsc   = tea.KeyPressMsg{Code: tea.KeyEscape}
+	keyDown  = tea.KeyPressMsg{Code: tea.KeyDown}
+	keyUp    = tea.KeyPressMsg{Code: tea.KeyUp}
+)
 
 // notifyRowIndex finds a row by label so a test does not hard-code an index
 // that a later row insertion would silently invalidate.
@@ -1792,7 +1814,7 @@ func TestNotifySettings_ToggleAppliesLiveAndMarksConfigChanged(t *testing.T) {
 		t.Fatal("fixture: idle already on")
 	}
 
-	next, _ := m.Update(key("enter"))
+	next, _ := m.Update(keyEnter)
 	nm := next.(Model)
 
 	if !nm.cfg.Notification.Events.Idle {
@@ -1810,7 +1832,7 @@ func TestNotifySettings_EscReturnsToSettings(t *testing.T) {
 	m := NewModelForDialogTest(t)
 	m.dialog = dialogNotifySettings
 
-	next, _ := m.Update(key("esc"))
+	next, _ := m.Update(keyEsc)
 	if got := next.(Model).dialog; got != dialogSettings {
 		t.Errorf("dialog after Esc: got %v, want dialogSettings", got)
 	}
@@ -1831,7 +1853,7 @@ func TestSettings_NotificationsRowOpensSubmenu(t *testing.T) {
 	}
 	m.dialogCursor = found
 
-	next, _ := m.Update(key("enter"))
+	next, _ := m.Update(keyEnter)
 	if got := next.(Model).dialog; got != dialogNotifySettings {
 		t.Errorf("dialog after Enter on the submenu row: got %v, want dialogNotifySettings", got)
 	}
@@ -2364,12 +2386,28 @@ func (d *Daemon) notifyMCPControl(pane *Pane, title string) {
 
 - [ ] **Step 7: Call it from the two bridge-reachable handlers**
 
-In `handlePaneInput` (`daemon.go:2687`), immediately after the pane lookup
-succeeds and before the `EnqueueInput` call:
+In `handlePaneInput` (`daemon.go:2687`), after the `paneInputOutcome` call and
+before the `respondTo` block.
+
+`handlePaneInput` is a thin wrapper: it holds `conn` but does the pane lookup
+and the `EnqueueInput` inside `paneInputOutcome` (`daemon.go:2713`), which does
+NOT take `conn`. So the emit belongs in the wrapper, and the pane is looked up
+again here — one map read on a path that is already doing IPC work, in exchange
+for not widening `paneInputOutcome`'s signature.
+
+Gating on `out.Delivered` is not incidental: it means the card never claims an
+agent typed into a pane whose input the daemon refused (no such pane, no
+process, a worktree still preparing, or a full queue).
+
+`paneInputOutcome` has released `PluginMu` by the time it returns, so
+`notifyMCPControl` taking it again is safe.
 
 ```go
-	if d.hellos.roleOf(conn) == "bridge" {
-		d.notifyMCPControl(pane, "MCP agent typed here")
+	out := d.paneInputOutcome(payload)
+	if out.Delivered && d.hellos.roleOf(conn) == "bridge" {
+		if pane := d.session.Pane(payload.PaneID); pane != nil {
+			d.notifyMCPControl(pane, "MCP agent typed here")
+		}
 	}
 ```
 
@@ -2614,19 +2652,70 @@ Expected: PASS.
 
 - [ ] **Step 5: Call `notifyPaneMark` from `handleUpdatePane`**
 
-In `handleUpdatePane` (`daemon.go:2867`), find where `PinnedAttention` and
-`MarkedForDeletion` are applied. Wrap each with a change check. The pattern for
-the pin (apply the same shape to the deletion mark):
+**Do NOT replace these two blocks. Add to them.** The existing code carries two
+things a rewrite would silently destroy, and both are load-bearing:
+
+1. **All reads and writes of these fields happen under `pane.PluginMu`.** The
+   fields are documented "read under PluginMu" (`session.go:197-207`), and CI
+   runs `go test -race ./...`. An unlocked read of `pane.PinnedAttention` to
+   compute "did it change" turns the whole suite red.
+2. **Setting either mark CLEARS the other**, with its own log line. The two are
+   opposite claims about the same pane, and the daemon is deliberately the one
+   authority on that — a client-side clear leaves a second TUI and the next
+   restore holding the mark the user just replaced.
+
+The current code, verbatim, at `internal/daemon/daemon.go:2919`:
 
 ```go
 	if payload.PinnedAttention != nil {
-		// Emit only on a real CHANGE. The pointers are what make this
-		// possible: a no-op write from an OSC 7 CWD update carries nil for
-		// both marks, which is also why they are pointers in the first place
-		// (see UpdatePanePayload) — the panes carrying a deletion mark are
-		// exactly the ones still reporting cd from a background job.
-		if pane.PinnedAttention != *payload.PinnedAttention {
-			pane.PinnedAttention = *payload.PinnedAttention
+		pane.PluginMu.Lock()
+		pane.PinnedAttention = *payload.PinnedAttention
+		cleared := false
+		if *payload.PinnedAttention {
+			cleared = pane.MarkedForDeletion
+			pane.MarkedForDeletion = false
+		}
+		pane.PluginMu.Unlock()
+		log.Printf("pane %s: pinned_attention=%v", pane.ID, *payload.PinnedAttention)
+		if cleared {
+			log.Printf("pane %s: marked_for_deletion cleared by the attention pin", pane.ID)
+		}
+	}
+```
+
+Add ONE line inside the lock and ONE block after the existing log lines:
+
+```go
+	if payload.PinnedAttention != nil {
+		pane.PluginMu.Lock()
+		// Captured inside the lock, beside the write it is about. Reading it
+		// outside would be an unlocked read of a PluginMu-guarded field, which
+		// CI's race detector fails.
+		changed := pane.PinnedAttention != *payload.PinnedAttention
+		pane.PinnedAttention = *payload.PinnedAttention
+		cleared := false
+		if *payload.PinnedAttention {
+			cleared = pane.MarkedForDeletion
+			pane.MarkedForDeletion = false
+		}
+		pane.PluginMu.Unlock()
+		log.Printf("pane %s: pinned_attention=%v", pane.ID, *payload.PinnedAttention)
+		if cleared {
+			log.Printf("pane %s: marked_for_deletion cleared by the attention pin", pane.ID)
+		}
+		// AFTER the unlock. notifyPaneMark takes PluginMu itself and Go
+		// mutexes are not reentrant.
+		//
+		// Only on a real change: a client may re-send the mark it already
+		// holds, and a card per re-send is the repeat-telemetry this feature
+		// exists to remove.
+		//
+		// The implicit clear of the OPPOSITE mark gets no second card. A pane
+		// can hold at most one of the two, so "Pane pinned for attention"
+		// already says the deletion mark is gone; a second card would describe
+		// one act twice, and they aggregate by (PaneID, Title) into an
+		// unreadable pair. The log line above remains the audit trail.
+		if changed {
 			if *payload.PinnedAttention {
 				d.notifyPaneMark(pane, "pane_pinned", "Pane pinned for attention")
 			} else {
@@ -2636,27 +2725,26 @@ the pin (apply the same shape to the deletion mark):
 	}
 ```
 
-and for the deletion mark:
+Apply exactly the same shape to the `MarkedForDeletion` block that follows it
+(`daemon.go:2937`) — `changed` inside the lock, the emit after the existing log
+lines:
 
 ```go
-	if payload.MarkedForDeletion != nil {
-		if pane.MarkedForDeletion != *payload.MarkedForDeletion {
-			pane.MarkedForDeletion = *payload.MarkedForDeletion
+		if changed {
 			if *payload.MarkedForDeletion {
 				d.notifyPaneMark(pane, "pane_marked_deletion", "Pane marked for deletion")
 			} else {
 				d.notifyPaneMark(pane, "pane_unmarked_deletion", "Pane deletion mark cleared")
 			}
 		}
-	}
 ```
 
-Preserve whatever the existing code does around these assignments (locking,
-broadcast, snapshot request). Read `daemon.go:2867-2960` first and edit
-in place rather than replacing the block.
+Leave everything else in `handleUpdatePane` untouched — in particular the
+`quiet` computation and the broadcast/snapshot tail below these blocks.
 
 `Unseen` is deliberately left alone: it is set and cleared constantly by
-ordinary focus changes and would be pure telemetry.
+ordinary focus changes and would be pure telemetry. It is also on the `quiet`
+list precisely because it churns.
 
 - [ ] **Step 6: Call `notifyPaneDestroyed` from both destroy paths**
 
