@@ -339,7 +339,8 @@ const (
 	dialogProjectNew    // Alt+Shift+N: create a project (Task 13)
 	dialogProjectRename // sidebar context menu: rename a project (Task 13)
 	dialogProjectPick   // Alt+P: fuzzy project picker (Task 14)
-	dialogWhatsNew      // post-upgrade highlights; also F1 → What's New
+	dialogWhatsNew       // post-upgrade highlights; also F1 → What's New
+	dialogNotifySettings // F1 → Settings → Notifications: toasts + sidebar event groups
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined

@@ -203,6 +203,11 @@ type settingsField struct {
 	// the row that needs it is the row that declares it, and renaming a
 	// label cannot silently drop the resize.
 	relayout bool
+	// submenu marks a row that OPENS ANOTHER SCREEN instead of editing a
+	// value. get supplies the right-hand hint; set is never called. A flag
+	// for the same reason relayout is one — the row that needs the behaviour
+	// declares it, so renaming a label cannot silently break it.
+	submenu bool
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -442,17 +447,18 @@ func settingsFields() []settingsField {
 			// toggle is exactly the auto-register behaviour this design
 			// rejected; it names the command instead.
 			//
-			// Applies LIVE, unlike most rows here: raiseAttentionToast reads
-			// m.cfg.Notification.Desktop on every edge, so there is no apply
-			// step. An on/off switch that did nothing until relaunch would read
-			// as a broken dialog — the same reason Sidebar width is live.
-			label: "Desktop notifications",
-			get:   func(m *Model) string { return m.desktopState().label() },
-			set: func(m *Model, _ string) {
-				m.cfg.Notification.Desktop.Enabled = !m.cfg.Notification.Desktop.Enabled
-				m.configChanged = true
-			},
-			isBool: true,
+			// Opens the Notifications screen, which holds the desktop-toast
+			// toggles this row used to carry — Enabled, and the Blocked/Done
+			// pair that was previously reachable only by hand-editing
+			// config.toml — plus the ten sidebar event groups.
+			//
+			// Promoted to a submenu because renderSettingsDialog paints every
+			// row unwindowed and unscrolled: thirteen more rows here would push
+			// the box off the bottom of an ordinary terminal.
+			label:   "Notifications",
+			get:     func(m *Model) string { return "…" },
+			set:     func(m *Model, _ string) {},
+			submenu: true,
 		},
 		{
 			label: "Max live overlays",
@@ -688,6 +694,8 @@ func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleAboutKey(msg)
 	case dialogSettings:
 		return m.handleSettingsKey(msg)
+	case dialogNotifySettings:
+		return m.handleNotifySettingsKey(msg)
 	case dialogShortcuts:
 		return m.handleShortcutsKey(msg)
 	case dialogConfirm:
@@ -981,9 +989,13 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter", " ":
 		f := fields[m.dialogCursor]
-		if f.isBool {
+		switch {
+		case f.submenu:
+			m.dialog = dialogNotifySettings
+			m.dialogCursor = firstNotifyRow(notifySettingsRows())
+		case f.isBool:
 			f.set(&m, "")
-		} else {
+		default:
 			m.dialogEdit = true
 			m.dialogInput = f.get(&m)
 		}
@@ -1398,6 +1410,8 @@ func (m Model) renderDialog() string {
 		content = m.renderAboutDialog()
 	case dialogSettings:
 		content = m.renderSettingsDialog()
+	case dialogNotifySettings:
+		content = m.renderNotifySettingsDialog()
 	case dialogShortcuts:
 		content = m.renderShortcutsDialog()
 	case dialogConfirm:
