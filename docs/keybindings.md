@@ -172,6 +172,13 @@ you rely on `M-a` in a pane's readline.
 |---|---|
 | `Alt+N` | Cycle sidebar visibility: hidden → visible+unfocused → visible+focused → hidden |
 | `F3` | Focus the notification sidebar (when visible) |
+| `↑` / `↓` | Move between cards (sidebar focused) |
+| `Enter` | Jump to the selected card's pane (sidebar focused) |
+| `d` / `D` | Dismiss the selected card / dismiss all (sidebar focused) |
+| `a` | Show every event, ignoring the configured filter — a toggle, not persisted (sidebar focused) |
+| Left-click | Jump to that card's pane. Takes focus first, so the keys above work straight after |
+| Right-click | Dismiss that card |
+| Wheel | Scroll the list. Choose which events appear in **F1 → Settings → Notifications** |
 | `Alt+M` | Mute / unmute notifications for the active pane. Muted panes show `[muted]` on the border and never fire process-exit, bell, OSC 133, or idle events. Useful for `npm test --watch` and other chatty processes. |
 | `Alt+Shift+E` | Toggle eager restore on the active pane. Eager panes respawn immediately on daemon restart instead of loading lazily on tab open; marked with `●` on the tab. |
 
