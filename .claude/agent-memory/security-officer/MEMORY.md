@@ -4,3 +4,4 @@
 - [Semgrep in a git worktree](project_semgrep_worktree_scan.md) — scans 0 files and still reports success; copy changed files to a scratch dir, run from PowerShell, check paths.scanned
 - [project_uintptrescapes_com_helper.md](project_uintptrescapes_com_helper.md) — a hand-rolled COM vtable call helper needs //go:uintptrescapes; x/sys's own Call has it, yours does not
 - [log injection escaped by slog](project_log_injection_escaped_by_slog.md) — `%s` of an attacker string is NOT injectable (slog TextHandler quotes the whole msg); flag length-bounds + rate-limits instead, and the initLogging-returns-nil raw-stderr path
+- [per-dest table cleanup](project_per_dest_table_cleanup.md) — a new dest-keyed map on tui.Model must be deleted in disconnectDest (dialdest.go); Origin is router-stamped so bucket choice needs no re-review
