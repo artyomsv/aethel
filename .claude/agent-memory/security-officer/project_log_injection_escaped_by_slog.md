@@ -17,11 +17,21 @@ Verified by probe (2026-09-06), not from docs. A `PaneID` of
 `time=... level=INFO msg="pane p1\nlevel=ERROR msg=\"...\"\n\x1b[31m...\a: refusing ..."`.
 So no forged log line, and no ANSI/OSC reaching an operator's terminal on `cat`/`tail`.
 
-**Residual, and the only place to look:** `initLogging` (`cmd/quild/main.go:177-190`)
-returns `nil` — leaving `logger.Init` **never called** — when `config.QuilDir()` is empty or
+**Scope of the claim:** this covers values reaching an operator's log THROUGH `log.Printf`
+once `logger.Init` has run. It is NOT a statement that nothing in the daemon can write raw
+bytes to a terminal.
+
+**Residual on that path:** `initLogging` (`cmd/quild/main.go:177-190`) returns `nil` —
+leaving `logger.Init` **never called** — when `config.QuilDir()` is empty or
 `NewRotatingWriter` fails to open. Stdlib `log` then writes to raw `os.Stderr`, which
-`startDaemon` points at `$QUIL_HOME/quild.stderr.log`, with no escaping at all. That is the
-only path where control characters survive.
+`startDaemon` points at `$QUIL_HOME/quild.stderr.log`, with no escaping at all.
+
+**Other raw sinks exist and bypass the bridge entirely**, so do not read the above as "the
+only unescaped path". `internal/logger/rotate.go:137` writes its rename error straight to
+`os.Stderr` with `fmt.Fprintf`, and `cmd/quil/` prints startup and daemon-control errors the
+same way. Those carry error text and paths rather than IPC payload strings today, but the
+sink is unescaped — judge each on what actually flows into it rather than dismissing it
+because of this note.
 
 **How to apply:** do not raise `%s` vs `%q` on a payload string as a log-injection finding —
 it is cosmetic here. Raise instead: (a) whether the value is length-bounded, since a payload
