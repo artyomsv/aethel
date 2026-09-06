@@ -11,6 +11,41 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.69.0] - 2026-09-06
+
+### Changed
+- **The notification sidebar shows work, not telemetry.** `Output idle` and
+  `Command completed` fired for every quiet pane and every shell command, and
+  because the queue merges repeats and moves the merged card back to the top,
+  the two of them permanently occupied the handful of rows the sidebar could
+  draw. Both are now off by default. What is left is the timeline: turns
+  starting and finishing, permission prompts, processes exiting, panes closed
+  or pinned, MCP agents taking a pane, and worktrees finishing their checkout.
+- **Click a card to jump to its pane, and scroll the list with the wheel.**
+  Both gestures were previously swallowed and discarded. Cards now name the
+  project and tab they will take you to, shrink when they carry no excerpt — so
+  about twice as many fit — and mark themselves `(closed)` when their pane is
+  gone, instead of offering a jump that silently does nothing.
+- **Choose what appears in `F1 → Settings → Notifications`.** Ten event groups
+  plus the desktop-toast switches, two of which (`blocked` and `done`) were
+  previously reachable only by hand-editing `config.toml`. Changes apply
+  immediately. Press `a` in the focused sidebar to reveal everything for a
+  moment without changing the setting.
+- **Hiding a group never hides it from MCP agents.** `get_notifications` and
+  `watch_notifications` still receive every event: an agent polling for "has
+  this pane gone quiet" wants exactly what a human does not.
+
+### Fixed
+- **Closing a dialog forces a full repaint.** A dialog is a centred box and is
+  almost never the width of the frame that replaces it — the pane-setup step is
+  at least 70 columns, the split step 60, the processes list 92. Bubble Tea's
+  cell diff left the box's border columns standing on rows the new frame painted
+  identically, and the notification sidebar is where that showed up, because it
+  is not drawn at all while a dialog is open. Two exits already forced the
+  repaint and the one that actually closes the create-pane flow did not; the
+  guarantee now lives at the single point that sees a dialog close, so a new
+  dialog cannot miss it.
+
 ## [1.68.2] - 2026-09-06
 
 ### Internal
