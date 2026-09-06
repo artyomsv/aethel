@@ -84,6 +84,11 @@ type eventLoopStats struct {
 	// maxSinceKey correctly.
 	sinceLastKey int64
 	maxSinceKey  int64
+
+	// lastRuntime is the runtime/metrics reading taken at the previous flush.
+	// The perf line reports DELTAS against it — see perfruntime.go for why a
+	// cumulative counter cannot answer the question this log is read to answer.
+	lastRuntime runtimeSample
 }
 
 type perfBucket struct {
@@ -94,8 +99,9 @@ type perfBucket struct {
 
 func newEventLoopStats() *eventLoopStats {
 	return &eventLoopStats{
-		lastFlush: time.Now(),
-		byType:    make(map[string]*perfBucket),
+		lastFlush:   time.Now(),
+		byType:      make(map[string]*perfBucket),
+		lastRuntime: readRuntimeSample(),
 	}
 }
 
@@ -199,7 +205,14 @@ func (s *eventLoopStats) flush() {
 	if s == nil {
 		return
 	}
-	window := time.Since(s.lastFlush)
+	// ONE instant closes this window and opens the next. Taking `window` here
+	// and letting resetCounters call time.Now() again at the bottom would leave
+	// the log write itself outside both windows, so the CPU delta would cover a
+	// longer span than the `window` it is printed against — and cpu/window
+	// would read high by exactly the cost of a blocking disk write, which is
+	// one of the things this line exists to detect.
+	now := time.Now()
+	window := now.Sub(s.lastFlush)
 	breakdown := s.formatBreakdown()
 
 	var viewAvg time.Duration
@@ -207,15 +220,24 @@ func (s *eventLoopStats) flush() {
 		viewAvg = time.Duration(s.viewTotalNs / s.viewCount)
 	}
 
-	logger.Info("perf window=%s | view(n=%d skipped=%d hidden=%d avg=%s max=%s) | pane-out(bytes=%d max-vt=%s) | key-backlog-max=%d | %s",
+	// Sampled before the log call rather than inside it, so the CPU the
+	// formatting itself costs lands in the NEXT window rather than in the one
+	// being reported.
+	rt := readRuntimeSample()
+	runtimeSection := formatRuntimeDelta(s.lastRuntime, rt, window)
+
+	logger.Info("perf window=%s | view(n=%d skipped=%d hidden=%d avg=%s max=%s) | pane-out(bytes=%d max-vt=%s) | key-backlog-max=%d | %s | %s",
 		window.Round(time.Millisecond),
 		s.viewCount, s.viewSkipped, s.viewHidden, viewAvg, time.Duration(s.viewMaxNs),
 		s.paneOutBytes, time.Duration(s.paneOutMaxNs),
 		s.maxSinceKey,
+		runtimeSection,
 		breakdown,
 	)
 
+	s.lastRuntime = rt
 	s.resetCounters()
+	s.lastFlush = now
 }
 
 // formatBreakdown sorts active buckets by total time desc and renders them
@@ -246,8 +268,14 @@ func (s *eventLoopStats) formatBreakdown() string {
 
 // resetCounters zeros every accumulator and rebuilds the bucket map so
 // types that stop appearing get garbage-collected instead of accumulating
-// zombie entries forever. sinceLastKey is intentionally preserved — see
-// the field comment.
+// zombie entries forever.
+//
+// TWO fields are intentionally preserved. sinceLastKey, for the reason in its
+// field comment. And lastRuntime, which is a delta BASELINE rather than an
+// accumulator: zeroing it would make every runtime figure on the next line
+// unreportable, and the line would go on looking plausible while saying "?"
+// forever. lastFlush is likewise owned by flush(), which sets it to the same
+// instant it closed the window with.
 func (s *eventLoopStats) resetCounters() {
 	s.byType = make(map[string]*perfBucket, len(s.byType))
 	s.paneOutBytes = 0
@@ -258,7 +286,6 @@ func (s *eventLoopStats) resetCounters() {
 	s.viewSkipped = 0
 	s.viewHidden = 0
 	s.maxSinceKey = 0
-	s.lastFlush = time.Now()
 }
 
 // trimMsgType strips the package-qualified prefix from a Go type string,
