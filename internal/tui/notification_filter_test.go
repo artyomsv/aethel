@@ -3,7 +3,9 @@ package tui
 import (
 	"testing"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
 )
 
 // showOnly builds a filter that shows exactly the named groups and hides the
@@ -21,6 +23,36 @@ func showOnly(groups ...string) eventGroupFilter {
 		f[g] = true
 	}
 	return f
+}
+
+// The feature's ON SWITCH.
+//
+// Every other test in this file builds a NotificationCenter or a Model struct
+// literal and calls SetGroups itself, so none of them observes NewModel's own
+// wiring — deleting that one line left the whole suite green while the filter
+// stayed nil, `visibleEvents()` returned everything, and the shipped defaults
+// never took effect. That is exactly the production symptom this feature exists
+// to remove, returning silently.
+func TestNewModel_InstallsTheConfiguredFilter(t *testing.T) {
+	// So nothing in the construction path can touch the real ~/.quil: a test
+	// that writes there is green in Docker and pollutes every other
+	// environment.
+	t.Setenv("QUIL_HOME", t.TempDir())
+
+	m := NewModel(newFakeConn(), config.Default(), "test", plugin.NewRegistry(), nil, nil)
+
+	if m.notifications.groups == nil {
+		t.Fatal("NewModel left the notification filter nil; the configured groups never apply")
+	}
+	if m.notifications.groups.shows("output_idle") {
+		t.Error("output_idle is shown; the shipped default (off) did not reach the sidebar")
+	}
+	if m.notifications.groups.shows("command_complete") {
+		t.Error("command_complete is shown; the shipped default (off) did not reach the sidebar")
+	}
+	if !m.notifications.groups.shows("hook.claude.Stop") {
+		t.Error("agent turns are hidden; the filter is installed but wrong")
+	}
 }
 
 func TestNotificationCenter_HiddenGroupIsStoredButNotVisible(t *testing.T) {
@@ -266,6 +298,23 @@ func TestNotificationCenter_EvictsHiddenEventsFirst(t *testing.T) {
 	}
 	if nc.Count() != 2 {
 		t.Errorf("visible events: got %d, want 2 — hidden events evicted the visible ones", nc.Count())
+	}
+}
+
+// DismissAll clears every STORED event, not just the visible ones: the daemon
+// answers an empty MsgDismissEvent by clearing its whole queue, so keeping
+// hidden events would leave client and daemon disagreeing about what is pending.
+func TestNotificationCenter_DismissAll_ClearsHiddenEventsToo(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	nc.SetGroups(showOnly(groupProcess))
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-h", Type: "output_idle"})
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v", Type: "process_exit"})
+
+	nc.DismissAll()
+
+	if len(nc.events) != 0 {
+		t.Errorf("stored events after DismissAll: got %d, want 0 — hidden events survived",
+			len(nc.events))
 	}
 }
 

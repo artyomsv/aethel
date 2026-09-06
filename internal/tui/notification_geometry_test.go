@@ -234,6 +234,96 @@ func TestEventIndexAtRow_RefusesWhenTheSidebarIsNotDrawn(t *testing.T) {
 	}
 }
 
+// revealCursor's scroll-UP branch. Only the downward direction was covered, so
+// `if first < nc.scroll` could be replaced with `if false` and stay green —
+// meaning `k` back above the fold would never bring the card into view.
+func TestRevealCursor_ScrollsUpToTheSelection(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	for i := 0; i < 20; i++ {
+		nc.AddEvent(geomEvent("TEST-"+string(rune('a'+i)), "title", "excerpt"))
+	}
+	const height = 20
+
+	nc.SelectIndex(15, height) // scrolls down
+	deep := nc.scroll
+	if deep == 0 {
+		t.Fatal("fixture did not scroll down; the up branch cannot be exercised")
+	}
+
+	nc.cursor = 0
+	nc.revealCursor(height)
+
+	if nc.scroll >= deep {
+		t.Fatalf("scroll after selecting the newest card: got %d, want less than %d", nc.scroll, deep)
+	}
+	// The contract is that the selected card is WHOLE on screen, not that the
+	// scroll hits a particular number — card 0's first line is its separator,
+	// which the viewport is allowed to leave above the fold.
+	owners := notificationLineOwners(nc.visibleEvents())
+	vh := notifyViewportHeight(height)
+	for i, owner := range owners {
+		if owner != 0 {
+			continue
+		}
+		if i < nc.scroll || i >= nc.scroll+vh {
+			t.Errorf("line %d of the selected card is outside the viewport [%d, %d)",
+				i, nc.scroll, nc.scroll+vh)
+		}
+	}
+}
+
+// A sidebar too narrow or too short to draw must render nothing rather than
+// something the box then wraps.
+func TestView_RefusesDegenerateSizes(t *testing.T) {
+	nc := NewNotificationCenter(6, 50)
+	nc.AddEvent(geomEvent("TEST-1", "title", "excerpt"))
+
+	if got := nc.View(4, nil); got != "" {
+		t.Errorf("View at height 4: got %q, want empty", got)
+	}
+
+	narrow := NewNotificationCenter(5, 50)
+	narrow.AddEvent(geomEvent("TEST-1", "title", "excerpt"))
+	if got := narrow.View(20, nil); got != "" {
+		t.Errorf("View at width 5 (innerW 3): got %q, want empty", got)
+	}
+}
+
+func TestNotificationLines_RefusesANarrowBox(t *testing.T) {
+	got := notificationLines(
+		[]ipc.PaneEventPayload{geomEvent("TEST-1", "title", "excerpt")},
+		4, 0, false, liveLoc,
+	)
+	if got != nil {
+		t.Errorf("notificationLines at innerW 4: got %d lines, want none", len(got))
+	}
+}
+
+// The floor matters because the viewport height is used as a divisor and a
+// window size; zero or negative would make clampScroll compute a bogus bound.
+func TestNotifyViewportHeight_FloorsAtOne(t *testing.T) {
+	for _, h := range []int{0, 1, 4, -3} {
+		if got := notifyViewportHeight(h); got < 1 {
+			t.Errorf("notifyViewportHeight(%d) = %d, want at least 1", h, got)
+		}
+	}
+}
+
+// The empty state must fit the box it declares. lipgloss does not clip, so one
+// extra interior row is drawn past the bottom border.
+func TestView_EmptyStateFitsTheMinimumHeight(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+
+	const height = 5 // innerH == 3, the smallest View will draw
+	got := nc.View(height, nil)
+	if got == "" {
+		t.Fatal("View refused the minimum drawable height")
+	}
+	if n := len(strings.Split(got, "\n")); n != height {
+		t.Errorf("box height: got %d rows, want %d", n, height)
+	}
+}
+
 func TestScrollBy_ClampsAtBothEnds(t *testing.T) {
 	nc := NewNotificationCenter(30, 50)
 	for i := 0; i < 20; i++ {

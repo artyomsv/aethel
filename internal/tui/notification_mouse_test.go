@@ -174,12 +174,21 @@ func TestClickOnCard_JumpsToThePane(t *testing.T) {
 
 // A click on a card whose pane no longer exists must not navigate, and must
 // not push navigation history for a jump that never happened.
+//
+// The contrast against TestClickOnCard_JumpsToThePane is what makes this
+// meaningful: the fixture has real projects, so findPaneAndTab CAN resolve —
+// it just does not resolve THIS card's pane. An earlier version set
+// `m.projects = nil`, which mouseTestModel already leaves nil, so the arrange
+// step did nothing and the guard could be deleted without failing it.
 func TestClickOnCard_DeadPaneDoesNotNavigate(t *testing.T) {
 	m := mouseTestModel(t)
-	// No projects at all, so findPaneAndTab resolves nothing.
-	m.projects = nil
+	m.projects = []*ProjectModel{
+		{ID: "proj-a", Name: "A", tabs: []*TabModel{tabWith(NewPaneModel("pane-unrelated", 1024))}},
+	}
+	m.activeProject = 0
 	before := len(m.paneHistory)
 
+	// The newest card names pane-test-h, which is in no project.
 	next, _ := m.Update(tea.MouseClickMsg{X: sidebarX(m), Y: 4, Button: tea.MouseLeft})
 	nm := next.(Model)
 
@@ -187,7 +196,52 @@ func TestClickOnCard_DeadPaneDoesNotNavigate(t *testing.T) {
 		t.Errorf("paneHistory grew for a jump that could not land: got %d, want %d",
 			len(nm.paneHistory), before)
 	}
+	if tab := nm.activeTabModel(); tab != nil && tab.ActivePane == "pane-test-h" {
+		t.Error("navigated to a pane that does not exist")
+	}
 	if nm.notifications.cursor != 0 {
 		t.Errorf("cursor: got %d, want 0 (selection still moves)", nm.notifications.cursor)
+	}
+}
+
+// nc.focused drives the selection highlight and the hints row, and is separate
+// from m.sidebarFocused — the mouse tests asserted only the latter, so dropping
+// the former stayed green while the clicked card rendered unselected.
+func TestClickOnChrome_MarksTheCenterFocused(t *testing.T) {
+	m := mouseTestModel(t)
+
+	next, _ := m.Update(tea.MouseClickMsg{X: sidebarX(m), Y: 2, Button: tea.MouseLeft})
+	if !next.(Model).notifications.focused {
+		t.Error("notification center not marked focused after a click")
+	}
+}
+
+// Keyboard navigation must bring the selection into view. Without the
+// revealCursor call the cursor walks off the bottom of the viewport and the
+// user is moving a selection they cannot see.
+func TestKeyboardNav_ScrollsTheViewport(t *testing.T) {
+	m := mouseTestModel(t)
+	m.sidebarFocused = true
+	m.notifications.focused = true
+	for i := 0; i < 20; i++ {
+		m.notifications.AddEvent(ipc.PaneEventPayload{
+			ID: "TEST-nav-" + string(rune('a'+i)), PaneID: "pane-nav", PaneName: "shell",
+			Type: "process_exit", Title: "Process exited", Message: "excerpt", Severity: "info",
+		})
+	}
+	m.notifications.cursor = 0
+	m.notifications.scroll = 0
+
+	updated := tea.Model(m)
+	for i := 0; i < 12; i++ {
+		updated, _ = updated.(Model).Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+
+	nm := updated.(Model)
+	if nm.notifications.cursor == 0 {
+		t.Fatal("cursor did not move; the key never reached the sidebar")
+	}
+	if nm.notifications.scroll == 0 {
+		t.Error("scroll never moved; keyboard navigation does not follow the cursor")
 	}
 }
