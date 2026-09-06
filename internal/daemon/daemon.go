@@ -826,6 +826,23 @@ func (d *Daemon) restoreWorkspace() error {
 				// back to the default PTY dimensions).
 				cols, _ := paneData["cols"].(float64)
 				rows, _ := paneData["rows"].(float64)
+				// A snapshot written while the console-less-client bug was
+				// live holds 1x1 for every pane, and the PTY constructor is not
+				// the only reader of the pair: streamPTYOutput's first-output
+				// callback re-applies it through resizeKick the moment the
+				// child writes a byte, redrawKick jiggles with it on attach,
+				// and snapshot() writes it straight back out — so the poison
+				// outlives every restart and re-flows the transcript to one
+				// column however the PTY was sized. Normalising HERE, where the
+				// pair enters the daemon, disarms all of them at once.
+				//
+				// 0 is the field's documented "unknown" (see Pane.Cols): the
+				// respawn falls back to the default dimensions, resizeKick
+				// no-ops, and snapshot() persists only a positive pair — so the
+				// first real client resize establishes the truth.
+				if degenerateSize(int(cols), int(rows)) {
+					cols, rows = 0, 0
+				}
 				muted, _ := paneData["muted"].(bool)
 				eager, _ := paneData["eager"].(bool)
 				pinnedAttention, _ := paneData["pinned_attention"].(bool)
