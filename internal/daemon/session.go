@@ -147,6 +147,11 @@ type Pane struct {
 	// LastInputBlockedAt: cooldown for the input_blocked event emitted when
 	// the input queue overflows (child stopped reading stdin). Under PluginMu.
 	LastInputBlockedAt time.Time
+	// LastDegenerateResizeAt: cooldown for the log line written when a resize
+	// to a no-usable-area geometry is refused (see degenerateSize). A client
+	// old enough to send one re-sends every pane's size on every broadcast, so
+	// the line needs the same per-pane throttle. Under PluginMu, runtime-only.
+	LastDegenerateResizeAt time.Time
 	// Redraw-key throttle, both under PluginMu. A plugin's redraw_key is
 	// INPUT, and a program may give a REPEATED press a second meaning:
 	// claude-code >= v2.1.126 runs /clear on two Ctrl+L within two seconds,

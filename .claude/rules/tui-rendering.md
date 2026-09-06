@@ -16,6 +16,8 @@ paths:
   - "**/internal/config/bindings*.go"
   - "**/internal/tui/oscfilter.go"
   - "**/internal/tui/splitdrag*.go"
+  - "**/internal/tui/perf*.go"
+  - "**/internal/tui/frame_*_test.go"
   - "**/internal/clipboard/**"
 ---
 
@@ -314,3 +316,64 @@ equivalence test fails, DELETE the helper rather than adjusting the test.
 **Image paste proxy**: `clipboard.ReadImage()` reads `CF_DIBV5`/`CF_DIB` on Windows (Unix is a stub), `dib.go` parses the DIB into an `image.Image` (24bpp BI_RGB, 32bpp BI_RGB and BI_BITFIELDS, top-down + bottom-up, all-zero-alpha promotion). `pasteClipboard` falls through to image when text is empty: saves PNG to `config.PasteDir()` (`~/.quil/paste/quil-paste-<timestamp>.png`) and types the path into the PTY. Works around the upstream Claude Code Windows clipboard bug (anthropics/claude-code#32791). Paste keys: `Ctrl+V` (kb.Paste — eaten by Windows Terminal), `Ctrl+Alt+V` and `F8` are hardcoded aliases; `F8` is the recommended Windows trigger because it has no AltGr ambiguity
 
 
+
+## Frame-cost instrumentation (`internal/tui/perf*.go`)
+
+`eventLoopStats` (`perf.go`) writes one INFO line every 5 s. Its shape:
+
+```
+perf window=5s | view(n= skipped= hidden= avg= max=) | pane-out(bytes= max-vt=) |
+  key-backlog-max=N | rt(cpu=/ gor= heap= gc= pause= assist=) | MsgType(n= avg= max=)
+```
+
+`rt(...)` (`perfruntime.go`) exists because the rest of the line can say a frame took
+900 ms but not WHY a frame doing the same work cost fourteen times more. Three
+hypotheses for the 2026-09 production stall — GC pressure, a large live VT heap, an
+expensive renderer state — each had to be reproduced in a benchmark before they could be
+ruled out, because the log could not separate them. **Read `cpu` against the View+Update
+time on the same line**: comparable means the work genuinely cost more (look inside
+quil); far below means the process was not running (look outside it).
+
+Three rules the fields obey, all load-bearing:
+
+- **`cpu` comes from the OS** — `getrusage(2)` / `GetProcessTimes`, in `perfcpu_unix.go`
+  and `perfcpu_windows.go`. NOT from `/cpu/classes/total` minus `/cpu/classes/idle`.
+  Those are a snapshot `work.cpuStats.accumulate` writes only from
+  `gcMarkTermination`, so they advance when a GC cycle COMPLETES and never otherwise.
+  Measured on Go 1.25: four goroutines burning CPU for 3 s with the collector off report
+  `0.000s`. A TUI collecting every ~9 minutes would have printed `cpu=0s/5s` in ~99
+  windows out of 100 — which this line's own reading rule calls "the process was off the
+  CPU". `TestProcessCPU_Advances_WithoutAGarbageCollection` fails against that
+  implementation and is the guard against reintroducing it.
+- **Two sentinels, never a zero.** `?` = could not be measured (metric absent, or a
+  counter that fell, meaning the samples did not come from one continuous run). `-` =
+  nothing was published to report; assist is accounted at mark termination, so a window
+  with no completed cycle has no assist figure. A `0s` in either position would be a
+  finding the reading does not support.
+- **Deltas, except `heap` and `gor`.** A cumulative counter on a process up for days
+  cannot show that this window differed from the last. `heap` is the heap the PREVIOUS
+  GC marked, so it holds between cycles — a step function by design, and `gc=` on the
+  same line says when it last moved. `resetCounters` must never zero `lastRuntime`: it is
+  the delta baseline, and zeroing it makes every later line read `?` while still looking
+  plausible.
+
+Sampled with `runtime/metrics`, not `runtime.ReadMemStats` — the latter stops the world,
+and instrumentation that pauses the program is a poor way to investigate pauses.
+`histogramTotal` sums with each bucket's UPPER bound: the bias is identical in both
+samples of a delta, so it cancels, and the +Inf final bucket must fall back to its lower
+bound or the duration conversion produces garbage that also poisons the next window.
+
+**Two reproduction harnesses**, both `t.Skip`-gated so they never join `dev.sh test` or
+CI (the large one holds ~1 GB and runs for minutes):
+
+| Env var | Test | Answers |
+|---|---|---|
+| `QUIL_GC_REPRO` | `TestFrameLatencyVsLiveHeap` | Does live heap size move frame latency? Three arms: 2000-line scrollback, 100-line, and 2000 at GOGC=10. |
+| `QUIL_STATE_SWEEP` | `TestFrameCostByModelState` | Does any model state (all panes blocked, notification sidebar open, scrolled back, selection held, wide-canvas off, 96 tabs) multiply frame cost? |
+
+Run them with a direct `docker run … -e QUIL_GC_REPRO=1`; `dev.sh test` passes no env
+vars and takes only one package argument. A frame classified as GC-affected is one where
+a cycle was IN PROGRESS (`/gc/cycles/started` > `/gc/cycles/total`), not merely one where
+a cycle finished — assists are charged across the whole mark phase, and the narrower test
+files every assisted frame but the last under "clean", biasing the result toward
+acquitting GC.

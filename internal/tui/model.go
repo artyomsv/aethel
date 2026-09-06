@@ -1552,8 +1552,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Also resize an active overlay pane so the daemon's PTY tracks the new size.
 		var overlayCmds []tea.Cmd
 		overlayCmds = append(overlayCmds, m.resizeAllPanes())
-		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil {
-			overlayCmds = append(overlayCmds, m.overlayResizeCmd(tab))
+		// EVERY tab, not just the active one. An overlay pane sits outside the
+		// layout tree, so resizeAllPanes never walks it (it iterates
+		// tab.Leaves()) and diffResizes keeps no sizedOnce ledger for it —
+		// these commands are the only resize an overlay ever receives. That
+		// made the active-tab-only sweep the one place terminalPaintable could
+		// withhold a resize with nothing owed afterwards: an overlay opened
+		// while the terminal was too small, on a tab left in the background,
+		// would keep its spawn-time size for the rest of its life.
+		for _, tab := range m.allTabs() {
+			if tab.overlayVisible && tab.overlayPane != nil {
+				overlayCmds = append(overlayCmds, m.overlayResizeCmd(tab))
+			}
 		}
 		return m, tea.Batch(overlayCmds...)
 
@@ -6698,11 +6708,23 @@ func (m Model) attachMessage(dest string) *ipc.Message {
 	tabH := m.height - chromeHeight
 	cols := m.paneAreaWidth() - 2
 	rows := tabH - 2
-	if cols < 1 {
-		cols = 1
-	}
-	if rows < 1 {
-		rows = 1
+	// A terminal the TUI refuses to paint reports NO geometry, rather than the
+	// 1x1 the floors below would produce. The daemon sizes the first PTY of an
+	// empty workspace from these, and handleAttach turns a non-positive value
+	// into its own 80x24 default — a usable default beats a measured-but-
+	// unusable size. Same reasoning as terminalPaintable, one message earlier.
+	//
+	// Ahead of the floors so they stay reachable only for a paintable terminal;
+	// putting it after left them dead, since this branch overwrites both.
+	if !m.terminalPaintable() {
+		cols, rows = 0, 0
+	} else {
+		if cols < 1 {
+			cols = 1
+		}
+		if rows < 1 {
+			rows = 1
+		}
 	}
 	// Best-effort; if Getwd fails the daemon falls back to its own CWD.
 	localCWD, _ := os.Getwd()
@@ -8141,10 +8163,40 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 	return nil
 }
 
+// terminalPaintable reports whether the terminal has reported a geometry the
+// TUI is willing to paint. View() draws "Terminal too small" below
+// minTermWidth x minTermHeight and renders no panes at all, so a pane size
+// derived from a smaller geometry describes nothing that is on screen.
+//
+// It gates EVERY MsgResizePane this client produces — resizeAllPanes,
+// diffResizes and overlayResizeCmd — and it has to sit at those fan-outs rather
+// than further down, because by the time a size reaches the wire the degenerate
+// case is indistinguishable from a legal one: paneVTSize floors both dimensions
+// at 1 on purpose, since a genuinely narrow SPLIT pane needs that floor. A
+// client started with no console attached (`quil.exe --version` from a
+// non-interactive shell) is reported by Bubble Tea as 1x1, and the fan-out then
+// reflowed every PTY in the workspace to one column, permanently re-wrapping
+// each child's whole transcript. Seen twice in production against a 48-tab
+// workspace — `attach: client connected (1x1), tabs=48` in quild.log.
+//
+// Withholding the resize is safe in both directions. The panes keep the last
+// size a paintable terminal produced — the daemon's same-size guard makes a
+// suppressed send free — and when a usable geometry arrives the ordinary
+// fan-out runs: diffResizes returns before it marks sizedOnce, so every pane is
+// still owed its first-resize kick.
+// Pointer receiver so a caller in a per-tab loop does not copy the whole Model
+// on every iteration — overlayResizeCmd runs once per tab per broadcast.
+func (m *Model) terminalPaintable() bool {
+	return m.width >= minTermWidth && m.height >= minTermHeight
+}
+
 // resizeAllPanes walks the projects rather than allTabs() so each pane's
 // message can carry its own daemon: this is a broadcast over EVERY project, so
 // the active dest would be the right answer for at most one of them.
 func (m Model) resizeAllPanes() tea.Cmd {
+	if !m.terminalPaintable() {
+		return nil // see terminalPaintable
+	}
 	return func() tea.Msg {
 		for _, proj := range m.projects {
 			for _, tab := range proj.tabs {
@@ -8432,6 +8484,11 @@ func (m *Model) hasProjectForDest(dest string) bool {
 // diffResizes decides which panes need a resize pushed after a broadcast.
 // See Model.sizedOnce for why the first send per pane is never suppressed.
 func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
+	// Ahead of every sizedOnce write, so the first-resize kick each pane is
+	// owed survives until the terminal is paintable again. See terminalPaintable.
+	if !m.terminalPaintable() {
+		return nil
+	}
 	type size struct {
 		cols, rows uint16
 		pending    bool

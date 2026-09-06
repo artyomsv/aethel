@@ -488,6 +488,11 @@ func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 	if tab.overlayPane == nil {
 		return nil
 	}
+	// The overlay fills the tab, so it collapses with the terminal. Same gate as
+	// the two tree fan-outs; see Model.terminalPaintable.
+	if !m.terminalPaintable() {
+		return nil
+	}
 	paneID, dest := tab.overlayPane.ID, tab.Dest
 	cols := tab.Width - 2
 	rows := tab.Height - 2
