@@ -443,12 +443,28 @@ func (m *Model) toastTitle(pane *PaneModel, proj *ProjectModel) string {
 // events that outlive their pane (pane_destroyed is one), and such a card is
 // rendered dim and does not offer a jump.
 func (m *Model) paneLocator() paneLocator {
-	return func(paneID string) (string, bool) {
+	return func(paneID string) paneSource {
 		pane, proj, idx := m.findPaneAndTab(paneID)
 		if pane == nil || proj == nil || idx < 0 || idx >= len(proj.tabs) {
-			return "", false
+			return paneSource{}
 		}
-		return proj.Name + " · " + proj.tabs[idx].Name, true
+		tab := proj.tabs[idx]
+
+		// A tab holding ONE pane is named by its tab: that is the name the user
+		// typed for this piece of work, and the pane below it has usually never
+		// been named at all — "pane-fd2d33b" identifies nothing. With several
+		// panes the tab name no longer picks one out, so the pane's own name
+		// (or its id) is the only thing that does.
+		name := pane.Name
+		label := proj.Name + " · " + tab.Name
+		if len(tab.Leaves()) == 1 {
+			name = tab.Name
+			// The tab has been promoted to the card's title, so the label drops
+			// it: two adjacent lines both reading "Test" look like a rendering
+			// fault, and the project alone is the part the title is missing.
+			label = proj.Name
+		}
+		return paneSource{Name: name, Label: label, Alive: true}
 	}
 }
 

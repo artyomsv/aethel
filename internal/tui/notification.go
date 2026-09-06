@@ -313,17 +313,28 @@ func (nc *NotificationCenter) HandleKey(key string) (action, eventID, paneID str
 // must agree about it, and a literal in two places is how they drift.
 const notifyViewportOffset = 3
 
-// paneLocator answers, for one pane id, where the pane lives and whether it
-// still exists. Supplied by the Model, which owns the project/tab tree; the
-// NotificationCenter deliberately does not reach into it.
+// paneSource is what the sidebar needs to know about the pane a card came from.
 //
-// The two answers travel together because one lookup produces both, and
-// because a card whose pane is gone must be rendered differently AND must not
-// offer a jump — the same fact drives both decisions.
+// One lookup produces all of it, and the parts are decided together: a card
+// whose pane is gone must be rendered differently AND must not offer a jump,
+// and whether the tab's name identifies the pane depends on the same tab the
+// label names.
+type paneSource struct {
+	// Name is what the card shows as its source, or "" to fall back to the
+	// event's own PaneName.
+	Name string
+	// Label is the second line — where a click will land.
+	Label string
+	// Alive is false when the pane no longer exists.
+	Alive bool
+}
+
+// paneLocator resolves one pane id. Supplied by the Model, which owns the
+// project/tab tree; the NotificationCenter deliberately does not reach into it.
 //
-// A nil locator means "do not know": every pane reads as alive with no label,
-// which is what a test that does not care about location wants.
-type paneLocator func(paneID string) (label string, alive bool)
+// A nil locator means "do not know": every pane reads as alive with no label
+// and the event's own name, which is what a test that does not care wants.
+type paneLocator func(paneID string) paneSource
 
 // renderedLine is one screen line of the card viewport, tagged with the index
 // (into the VISIBLE event list) of the card it belongs to. eventIdx is -1 for
@@ -356,16 +367,24 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 	for i, e := range events {
 		selected := i == cursor && focused
 
-		label, alive := "", true
+		src := paneSource{Alive: true}
 		if loc != nil {
-			label, alive = loc(e.PaneID)
+			src = loc(e.PaneID)
 		}
 
 		out = append(out, renderedLine{text: separator, eventIdx: -1})
 
-		// Line 1: pane name (severity-coloured, or grey when the pane is gone)
-		// + right-aligned relative age.
-		name := e.PaneName
+		// Line 1: the card's SOURCE (severity-coloured, or grey when the pane is
+		// gone) + right-aligned relative age.
+		//
+		// The locator's name wins when it has one: for a tab holding a single
+		// pane it returns the TAB's name, which is the name the user actually
+		// gave that work. An unnamed pane otherwise falls back to a truncated
+		// id — "pane-fd2d33b" identifies nothing.
+		name := src.Name
+		if name == "" {
+			name = e.PaneName
+		}
 		if name == "" {
 			name = e.PaneID
 			if len(name) > 12 {
@@ -373,7 +392,7 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 			}
 		}
 		nameStyle := severityNameStyle(e.Severity)
-		if !alive {
+		if !src.Alive {
 			// A card that cannot be jumped to must not wear an urgency colour.
 			nameStyle = dim
 		}
@@ -425,8 +444,8 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 		// before the click. A pane that is gone says so instead — the sidebar
 		// carries events that outlive their pane (pane_destroyed is one), and
 		// offering a jump that silently does nothing is worse than saying why.
-		locText := "  " + sanitizeRemoteText(label)
-		if !alive {
+		locText := "  " + sanitizeRemoteText(src.Label)
+		if !src.Alive {
 			locText = "  (closed)"
 		}
 		locStyle := dim

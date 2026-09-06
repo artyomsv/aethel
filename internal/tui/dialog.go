@@ -683,7 +683,30 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return updated, cmd
 	}
 	next.promptNextUpgrade()
-	return next, cmd
+	// A dialog closing swaps a centred box for the whole frame, and the box is
+	// almost never the width of what replaces it — the create-pane setup step
+	// floors at 70, the split step is dialogWidth 60, processes 92, shortcuts
+	// 100. Bubble Tea v2's cell diff leaves the box's border columns standing on
+	// rows the new frame paints identically, until something else forces a full
+	// repaint. That is the same rule the About sub-dialogs already follow on the
+	// way IN; this is the way out.
+	//
+	// It shows up on the notification sidebar first, because the sidebar is NOT
+	// drawn while a dialog is open (sidebarOverlayWidth returns 0 for a
+	// non-None dialog) — so its columns are exactly the ones making the
+	// transition, and the leftover border lands on its edge.
+	//
+	// Here rather than in each arm: this is the one place that sees the
+	// open→closed edge, which is why promptNextUpgrade already lives here. Two
+	// arms had remembered the clear (submitSetupDialog, the disconnect confirm)
+	// and the one that actually closes the create-pane flow —
+	// handleCreatePaneSplit — had not. A per-arm rule is a rule the next dialog
+	// will miss. Batching a second ClearScreen onto an arm that already returns
+	// one is harmless.
+	//
+	// Cost is one full repaint per dialog close, which is user-initiated and
+	// never on a timer.
+	return next, tea.Batch(tea.ClearScreen, cmd)
 }
 
 // dispatchDialogKey is handleDialogKey's switch, split out so the drain above

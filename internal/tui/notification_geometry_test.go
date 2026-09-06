@@ -10,10 +10,10 @@ import (
 )
 
 // liveLoc reports every pane as alive, in project "proj", tab "tab".
-func liveLoc(paneID string) (string, bool) { return "proj · tab", true }
+func liveLoc(paneID string) paneSource { return paneSource{Label: "proj · tab", Alive: true} }
 
 // deadLoc reports every pane as gone.
-func deadLoc(paneID string) (string, bool) { return "", false }
+func deadLoc(paneID string) paneSource { return paneSource{} }
 
 func geomEvent(id, title, message string) ipc.PaneEventPayload {
 	return ipc.PaneEventPayload{
@@ -142,8 +142,8 @@ func TestNotificationLines_WideGlyphsStayWithinTheWidth(t *testing.T) {
 		Severity: "error",
 		Data:     map[string]string{"count": "12"},
 	}
-	wideLoc := func(string) (string, bool) {
-		return "项目名称项目名称项目名称 · 标签页标签页标签页", true
+	wideLoc := func(string) paneSource {
+		return paneSource{Label: "项目名称项目名称项目名称 · 标签页标签页标签页", Alive: true}
 	}
 
 	for _, l := range notificationLines([]ipc.PaneEventPayload{wide}, innerW, 0, true, wideLoc) {
@@ -445,5 +445,62 @@ func TestView_EmptyStateMentionsFilter(t *testing.T) {
 	out := ansi.Strip(nc.View(20, nil))
 	if !strings.Contains(out, "show all") {
 		t.Errorf("filtered empty state does not mention the override:\n%s", out)
+	}
+}
+
+// A tab holding ONE pane is named by its tab. That is the name the user typed
+// for this piece of work; the pane under it has usually never been named, and
+// "pane-fd2d33b" identifies nothing.
+func TestPaneLocator_SinglePaneTabUsesTheTabName(t *testing.T) {
+	only := NewPaneModel("pane-only", 1024)
+	tab := tabWith(only)
+	tab.Name = "Test"
+	m := Model{projects: []*ProjectModel{{ID: "p", Name: "Default", tabs: []*TabModel{tab}}}}
+
+	src := m.paneLocator()("pane-only")
+
+	if src.Name != "Test" {
+		t.Errorf("Name: got %q, want the tab name %q", src.Name, "Test")
+	}
+	// The tab is now the card's title, so repeating it underneath would put the
+	// same word on two adjacent lines.
+	if src.Label != "Default" {
+		t.Errorf("Label: got %q, want the project alone %q", src.Label, "Default")
+	}
+	if !src.Alive {
+		t.Error("Alive: got false, want true")
+	}
+}
+
+// With several panes the tab name no longer picks one out, so the pane's own
+// name is the only thing that does — and the label carries the tab again.
+func TestPaneLocator_MultiPaneTabUsesThePaneName(t *testing.T) {
+	first := NewPaneModel("pane-first", 1024)
+	first.Name = "build"
+	second := NewPaneModel("pane-second", 1024)
+	tab := tabWith(first, second)
+	tab.Name = "Test"
+	m := Model{projects: []*ProjectModel{{ID: "p", Name: "Default", tabs: []*TabModel{tab}}}}
+
+	src := m.paneLocator()("pane-first")
+
+	if src.Name != "build" {
+		t.Errorf("Name: got %q, want the pane name %q", src.Name, "build")
+	}
+	if src.Label != "Default · Test" {
+		t.Errorf("Label: got %q, want %q", src.Label, "Default · Test")
+	}
+}
+
+// An unnamed pane in a multi-pane tab has no name to offer, so the renderer
+// falls back to the event's own PaneName and then to a truncated id.
+func TestNotificationLines_FallsBackWhenTheLocatorHasNoName(t *testing.T) {
+	noName := func(string) paneSource { return paneSource{Label: "Default · Test", Alive: true} }
+	lines := notificationLines(
+		[]ipc.PaneEventPayload{geomEvent("TEST-1", "Reply ready", "")},
+		40, 0, false, noName,
+	)
+	if joined := renderedText(lines); !strings.Contains(joined, "shell") {
+		t.Errorf("card lost the event's own pane name:\n%s", joined)
 	}
 }

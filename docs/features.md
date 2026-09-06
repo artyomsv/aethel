@@ -415,7 +415,7 @@ A non-modal sidebar (drawn as an overlay on the right edge — panes keep their 
 - **Scroll with the mouse wheel**, or `↑`/`↓` once the sidebar is focused (`F3`).
 - **Right-click a card** to dismiss it; `d` dismisses the selected one, `D` dismisses all.
 - **`a`** reveals every event for a moment, ignoring your filter — for when you are debugging a pane rather than working in it.
-- Choose which kinds of event appear in **F1 → Settings → Notifications**, or via [`[notification.events]`](configuration.md#notificationevents). Hiding a group never hides it from MCP agents.
+- Each card is titled by its **tab** when that tab holds a single pane — the name you gave the work — and by the pane otherwise. Choose which kinds of event appear in **F1 → Settings → Notifications**, or via [`[notification.events]`](configuration.md#notificationevents). Hiding a group never hides it from MCP agents.
 
 Hook-driven events flow:
 
