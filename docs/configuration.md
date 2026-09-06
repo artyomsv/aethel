@@ -75,6 +75,18 @@ blocked = true                  # toast when a pane parks waiting on you
 done = true                     # toast when a turn finishes while you are away
 cooldown = "5s"                 # per-pane floor against a runaway loop
 
+[notification.events]
+agent_turn = true               # "Working on…" / "Reply ready"
+agent_blocked = true            # permission prompts, "waiting for your input", bell
+agent_subagent = true           # subagent and task start/stop
+agent_session = true            # session end, compaction
+process = true                  # a process exited or failed
+pane = true                     # a pane was closed, pinned, or marked for deletion
+mcp = true                      # an MCP agent drove a pane
+system = true                   # input blocked, worktree ready, unrecognised events
+commands = false                # every shell command (OSC 133)
+idle = false                    # a pane went quiet
+
 [overlay]
 idle_timeout_minutes = 5        # destroy a hidden lazygit overlay after this long; 0 disables
 max_live = 5                    # cap live overlays across all tabs; 0 disables
@@ -215,7 +227,7 @@ Operating-system toasts raised from the same attention states the project sideba
 
 There is no `require_blur` key. An earlier build had one gating toasts on the whole terminal being unfocused; it made the feature silent for exactly its main case, and because `config.Save` writes the whole struct it persisted to disk where it disabled toasts with no error and no log. If your `config.toml` still carries the line it is now ignored and can be deleted.
 
-Also editable at **F1 → Settings** ("Desktop notifications"), which applies immediately — no restart. That row reports registration *state* rather than the flag, so it reads `on (run notify setup)` on a machine where the flag is on but nothing is registered.
+All three are editable at **F1 → Settings → Notifications**, which applies immediately — no restart. `enabled` reports registration *state* rather than the flag, so it reads `on (run notify setup)` on a machine where the flag is on but nothing is registered. `blocked` and `done` used to be reachable only by editing this file.
 
 **Setup is explicit and reversible.** `quil notify setup` writes exactly two things, both user-scope with no admin rights, and prints them:
 
@@ -229,6 +241,46 @@ Dev builds use a separate namespace throughout (`quil-dev://`, AUMID `artyomsv.q
 `quil notify setup` displays a verification toast and reports whether it actually appeared, so success is observed rather than assumed.
 
 **Clicking a toast can only move your cursor.** The `quil://` handler parses the URI, validates the pane id, and writes it to a per-PID named pipe that the running TUI reads — there is deliberately no path from a registered URI to spawning a pane, sending input, or running a command, because a registered scheme is invokable by any local process. Inline toast action buttons are refused for that reason rather than merely deferred.
+
+### `[notification.events]`
+
+Selects which kinds of event the sidebar shows. Every key is a boolean, and all
+of them are editable at **F1 → Settings → Notifications**, which applies each
+change immediately.
+
+| Key | Default | What it covers |
+|---|---|---|
+| `agent_turn` | `true` | `Working on: …`, `Reply ready`, a turn killed by an API error, OpenCode's session idle/error |
+| `agent_blocked` | `true` | Permission prompts, "Claude is waiting for your input", the terminal bell |
+| `agent_subagent` | `true` | Subagent and task start/stop. Its own group because a run with five parallel subagents produces ten cards |
+| `agent_session` | `true` | Session end, compaction start and finish |
+| `process` | `true` | A process exited or failed |
+| `pane` | `true` | A pane was closed, pinned for attention, or marked for deletion |
+| `mcp` | `true` | An MCP agent typed into or restarted a pane. One card per pane per 30 s |
+| `system` | `true` | Input blocked, worktree ready — **and every event type this build does not recognise** |
+| `commands` | `false` | Every shell command you run (needs shell integration) |
+| `idle` | `false` | A pane went quiet |
+
+**Why `commands` and `idle` default off.** Both describe machine state rather
+than news. `idle` fires for every quiet pane every 30 seconds for as long as the
+pane exists; `commands` fires on every shell command. The event queue merges
+repeats and moves the merged card back to the top, so left on, these two
+permanently occupy the handful of rows the sidebar can draw and push real events
+below the fold. A production workspace showed eight of twelve visible cards as
+`Output idle`, with repeat counts past 2400.
+
+**Hiding a group does not stop the event.** MCP agents reading
+`get_notifications` and `watch_notifications` still receive everything — an
+agent polling for "has this pane gone quiet" wants exactly the events a human
+does not. The filter is a display preference on your client alone.
+
+**Unrecognised types are shown, not hidden.** They are treated as `system`, so a
+newer daemon paired with an older client surfaces its new events rather than
+dropping them silently. That matters because one client attaches to remote
+daemons whose version it does not control.
+
+Press `a` in the focused sidebar to reveal everything for a moment without
+changing any of these.
 
 ## `[overlay]`
 

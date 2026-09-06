@@ -2610,6 +2610,9 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 		if payload.RemoveWorktree {
 			worktrees = ownedWorktreePaths([]*Pane{pane})
 		}
+		// Same window, same reason: the card needs the pane's name, which is
+		// gone once DestroyPane runs.
+		d.notifyPaneDestroyed(pane, "user")
 	}
 	log.Printf("pane destroy: %s (tab=%s)", payload.PaneID, tabID)
 
@@ -2726,6 +2729,18 @@ func (d *Daemon) handlePaneInput(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	out := d.paneInputOutcome(payload)
+	// Surfaced from HERE rather than from paneInputOutcome, which does the
+	// pane lookup but takes no conn — and conn is what carries the client's
+	// role. One extra map read on a path already doing IPC work, in exchange
+	// for not widening that function's signature.
+	//
+	// Gated on Delivered so a card can never claim an agent typed into a pane
+	// whose input the daemon refused (no such pane, no process, a worktree
+	// still preparing, or a full queue). paneInputOutcome has released
+	// PluginMu by now, so notifyMCPControl taking it again is safe.
+	if out.Delivered && d.hellos.roleOf(conn) == "bridge" {
+		d.notifyMCPControl(d.session.Pane(payload.PaneID), "MCP agent typed here")
+	}
 	// ONLY an id-bearing request is answered. The TUI sets no ID and sends one
 	// of these per keystroke, so it is untouched — a response per keystroke
 	// would be a frame per keystroke on that client's 64-slot must-deliver
@@ -2809,6 +2824,153 @@ func (d *Daemon) notifyInputBlocked(pane *Pane) {
 		Message:   "The process stopped reading its input — keystrokes are being dropped. Restart the pane if it stays stuck.",
 		Severity:  "warning",
 		Timestamp: time.Now(),
+	})
+}
+
+// mcpControlCooldown is how long one pane stays quiet after an mcp_control
+// card. An agent driving a pane sends many messages per turn; the card says
+// "an agent is on this pane", which is a state rather than a per-message fact.
+const mcpControlCooldown = 30 * time.Second
+
+// notifyMCPControl surfaces an MCP agent acting on a pane.
+//
+// Cooldown bookkeeping happens under PluginMu; the emit happens AFTER the
+// unlock. emitEvent re-locks this pane's PluginMu for its mute check and Go
+// mutexes are not reentrant, so emitting while holding the lock self-deadlocks
+// the calling goroutine and everything queued behind that pane — the
+// daemon-wide freeze of 2026-06-12. notifyInputBlocked above is shaped the
+// same way for the same reason.
+func (d *Daemon) notifyMCPControl(pane *Pane, title string) {
+	if pane == nil {
+		return
+	}
+	pane.PluginMu.Lock()
+	// Keyed by TITLE. One timestamp per pane would drop "restarted this pane"
+	// whenever the agent had typed into it in the previous 30 s — which is the
+	// ordinary sequence, so the more consequential card would almost never
+	// appear.
+	if last, ok := pane.LastMCPEventAt[title]; ok && time.Since(last) < mcpControlCooldown {
+		pane.PluginMu.Unlock()
+		return
+	}
+	if pane.LastMCPEventAt == nil {
+		pane.LastMCPEventAt = make(map[string]time.Time, 2)
+	}
+	pane.LastMCPEventAt[title] = time.Now()
+	tabID, name := pane.TabID, pane.Name
+	pane.PluginMu.Unlock()
+
+	// Logged as well as carded, for the reason notifyInputBlocked logs: the
+	// sidebar card is dismissable and rate-limited, so without this an agent's
+	// action can leave no durable record anywhere. The card is an awareness
+	// signal, not an audit trail — the role it keys on is self-declared.
+	log.Printf("pane %s: %s", pane.ID, title)
+
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     tabID,
+		PaneName:  name,
+		Type:      "mcp_control",
+		Title:     title,
+		Severity:  "info",
+		Timestamp: time.Now(),
+	})
+}
+
+// notifyPaneMark surfaces a pin or deletion mark the user set by hand.
+//
+// Four explicit event types rather than two carrying a boolean in Data: the
+// sidebar title then needs no branching, and the queue's (PaneID, Title)
+// aggregation cannot merge a pin with an unpin into one card wearing the wrong
+// label.
+//
+// No cooldown — these are deliberate single acts, not a stream.
+func (d *Daemon) notifyPaneMark(pane *Pane, eventType, title string) {
+	if pane == nil {
+		return
+	}
+	pane.PluginMu.Lock()
+	tabID, name := pane.TabID, pane.Name
+	pane.PluginMu.Unlock()
+
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     tabID,
+		PaneName:  name,
+		Type:      eventType,
+		Title:     title,
+		Severity:  "info",
+		Timestamp: time.Now(),
+	})
+}
+
+// notifyPaneDestroyed records a pane closing, and who closed it.
+//
+// The two destroy paths do not share a funnel — handleDestroyPane serves the
+// TUI and takes no conn, handleDestroyPaneReq serves MCP and does — so this is
+// called from both rather than from one common point that does not exist.
+//
+// It MUST run before session.DestroyPane: that call removes the pane from the
+// session maps, and the name and tab id go with it.
+//
+// Overlay panes are skipped. They are auto-destroyed on exit by onPaneExit as
+// ordinary lifecycle, so a card per Alt+G toggle would be exactly the telemetry
+// the event filter exists to remove.
+func (d *Daemon) notifyPaneDestroyed(pane *Pane, by string) {
+	if pane == nil {
+		return
+	}
+	pane.PluginMu.Lock()
+	isOverlay := pane.Overlay
+	tabID, name := pane.TabID, pane.Name
+	pane.PluginMu.Unlock()
+	if isOverlay {
+		return
+	}
+
+	title := "Pane closed"
+	if by == "mcp" {
+		title = "Pane closed by MCP agent"
+	}
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     tabID,
+		PaneName:  name,
+		Type:      "pane_destroyed",
+		Title:     title,
+		Severity:  "info",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"by": by},
+	})
+}
+
+// notifyWorktreeReady says a git worktree finished preparing and its pane is
+// live.
+//
+// Emitted only on the success path: a failed add already surfaces as SpawnError
+// inside the placeholder pane, and a second telling of the same failure in the
+// sidebar adds nothing.
+func (d *Daemon) notifyWorktreeReady(pane *Pane, branch string) {
+	if pane == nil {
+		return
+	}
+	pane.PluginMu.Lock()
+	tabID, name := pane.TabID, pane.Name
+	pane.PluginMu.Unlock()
+
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     tabID,
+		PaneName:  name,
+		Type:      "worktree_ready",
+		Title:     "Worktree ready: " + branch,
+		Severity:  "info",
+		Timestamp: time.Now(),
+		Data:      map[string]string{"branch": branch},
 	})
 }
 
@@ -2951,7 +3113,20 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	if payload.Name != "" {
-		pane.Name = payload.Name
+		// Under PluginMu, and BOUNDED.
+		//
+		// The lock is required rather than tidy: the name is now read under
+		// PluginMu by five event emitters, and CI runs the race detector.
+		//
+		// The bound matches the one every self-reported hello string already
+		// takes (procreport.go's truncateField). This value is copied verbatim
+		// into PaneEvent.PaneName by every emitter, and the per-event wire caps
+		// in event.go bound Message and Data values but NOT PaneName — so an
+		// unbounded name is retained across up to maxEvents queued events and
+		// re-broadcast in every frame to every attached client.
+		pane.PluginMu.Lock()
+		pane.Name = truncateField(payload.Name, maxPaneNameField)
+		pane.PluginMu.Unlock()
 	}
 	if payload.CWD != "" {
 		// Defense-in-depth: skip UNC/device paths (\\host\share, //host/share,
@@ -2995,6 +3170,10 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 	// and therefore winning.
 	if payload.PinnedAttention != nil {
 		pane.PluginMu.Lock()
+		// Captured inside the lock, beside the write it is about: these fields
+		// are PluginMu-guarded, and reading one outside to compute "did it
+		// change" is a data race CI's -race run fails on.
+		changed := pane.PinnedAttention != *payload.PinnedAttention
 		pane.PinnedAttention = *payload.PinnedAttention
 		cleared := false
 		if *payload.PinnedAttention {
@@ -3010,9 +3189,28 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		if cleared {
 			log.Printf("pane %s: marked_for_deletion cleared by the attention pin", pane.ID)
 		}
+		// AFTER the unlock: notifyPaneMark takes PluginMu itself, and Go
+		// mutexes are not reentrant.
+		//
+		// Only on a real CHANGE — a client may re-send a mark it already
+		// holds, and a card per re-send is the repeat telemetry this feature
+		// exists to remove.
+		//
+		// The implicit clear of the OPPOSITE mark gets no second card. A pane
+		// can hold at most one of the two, so "Pane pinned for attention"
+		// already says the deletion mark is gone; a second card would describe
+		// one act twice. The log line above remains the audit trail.
+		if changed {
+			if *payload.PinnedAttention {
+				d.notifyPaneMark(pane, "pane_pinned", "Pane pinned for attention")
+			} else {
+				d.notifyPaneMark(pane, "pane_unpinned", "Pane attention cleared")
+			}
+		}
 	}
 	if payload.MarkedForDeletion != nil {
 		pane.PluginMu.Lock()
+		changed := pane.MarkedForDeletion != *payload.MarkedForDeletion
 		pane.MarkedForDeletion = *payload.MarkedForDeletion
 		cleared := false
 		if *payload.MarkedForDeletion {
@@ -3023,6 +3221,13 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		log.Printf("pane %s: marked_for_deletion=%v", pane.ID, *payload.MarkedForDeletion)
 		if cleared {
 			log.Printf("pane %s: pinned_attention cleared by the deletion mark", pane.ID)
+		}
+		if changed {
+			if *payload.MarkedForDeletion {
+				d.notifyPaneMark(pane, "pane_marked_deletion", "Pane marked for deletion")
+			} else {
+				d.notifyPaneMark(pane, "pane_unmarked_deletion", "Pane deletion mark cleared")
+			}
 		}
 	}
 	if payload.Unseen != nil {
@@ -5689,6 +5894,17 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		}
 	}
 
+	// AFTER the outcome is known, and only on success.
+	//
+	// Emitting before the spawn put a card claiming "MCP agent restarted this
+	// pane" on the timeline for a restart that then answered Success:false —
+	// a missing worktree, or a spawn that failed. The card outlives the
+	// response and is the only durable trace, so it must not be the one that
+	// lies. Same ordering the destroy paths take.
+	if success && d.hellos.roleOf(conn) == "bridge" {
+		d.notifyMCPControl(pane, "MCP agent restarted this pane")
+	}
+
 	d.broadcastState()
 	d.requestSnapshot()
 
@@ -5836,6 +6052,21 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.highlightPane(pane.ID)
 
+	// Captured BEFORE DestroyPane, which takes the pane out of the session
+	// maps, but emitted only AFTER it succeeds: this handler answers
+	// Success:false on the error path below, and a card claiming a pane closed
+	// when it did not is worse than no card. notifyPaneDestroyed reads the name
+	// itself, so the fact is captured by holding the pointer.
+	//
+	// The actor comes from the connection's declared role, not from which
+	// handler ran. Any IPC client can send MsgDestroyPaneReq, so labelling
+	// every caller of this handler "mcp" would put an agent's name on a close
+	// the agent did not perform — handlePaneInput already resolves it this way.
+	closedBy := "user"
+	if d.hellos.roleOf(conn) == "bridge" {
+		closedBy = "mcp"
+	}
+
 	// Same cleanup as handleDestroyPane: spool file, ingester state, and
 	// persisted session-id files before the pane disappears.
 	d.cleanupPaneArtifacts(req.PaneID)
@@ -5846,6 +6077,7 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
 		return
 	}
+	d.notifyPaneDestroyed(pane, closedBy)
 
 	// Auto-create replacement if the last normal pane in the tab was
 	// destroyed. Delegates to ensureTabNotEmpty (shared with handleDestroyPane)

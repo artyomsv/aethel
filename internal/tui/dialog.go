@@ -203,6 +203,11 @@ type settingsField struct {
 	// the row that needs it is the row that declares it, and renaming a
 	// label cannot silently drop the resize.
 	relayout bool
+	// submenu marks a row that OPENS ANOTHER SCREEN instead of editing a
+	// value. get supplies the right-hand hint; set is never called. A flag
+	// for the same reason relayout is one — the row that needs the behaviour
+	// declares it, so renaming a label cannot silently break it.
+	submenu bool
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -442,17 +447,18 @@ func settingsFields() []settingsField {
 			// toggle is exactly the auto-register behaviour this design
 			// rejected; it names the command instead.
 			//
-			// Applies LIVE, unlike most rows here: raiseAttentionToast reads
-			// m.cfg.Notification.Desktop on every edge, so there is no apply
-			// step. An on/off switch that did nothing until relaunch would read
-			// as a broken dialog — the same reason Sidebar width is live.
-			label: "Desktop notifications",
-			get:   func(m *Model) string { return m.desktopState().label() },
-			set: func(m *Model, _ string) {
-				m.cfg.Notification.Desktop.Enabled = !m.cfg.Notification.Desktop.Enabled
-				m.configChanged = true
-			},
-			isBool: true,
+			// Opens the Notifications screen, which holds the desktop-toast
+			// toggles this row used to carry — Enabled, and the Blocked/Done
+			// pair that was previously reachable only by hand-editing
+			// config.toml — plus the ten sidebar event groups.
+			//
+			// Promoted to a submenu because renderSettingsDialog paints every
+			// row unwindowed and unscrolled: thirteen more rows here would push
+			// the box off the bottom of an ordinary terminal.
+			label:   "Notifications",
+			get:     func(m *Model) string { return "…" },
+			set:     func(m *Model, _ string) {},
+			submenu: true,
 		},
 		{
 			label: "Max live overlays",
@@ -677,7 +683,30 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return updated, cmd
 	}
 	next.promptNextUpgrade()
-	return next, cmd
+	// A dialog closing swaps a centred box for the whole frame, and the box is
+	// almost never the width of what replaces it — the create-pane setup step
+	// floors at 70, the split step is dialogWidth 60, processes 92, shortcuts
+	// 100. Bubble Tea v2's cell diff leaves the box's border columns standing on
+	// rows the new frame paints identically, until something else forces a full
+	// repaint. That is the same rule the About sub-dialogs already follow on the
+	// way IN; this is the way out.
+	//
+	// It shows up on the notification sidebar first, because the sidebar is NOT
+	// drawn while a dialog is open (sidebarOverlayWidth returns 0 for a
+	// non-None dialog) — so its columns are exactly the ones making the
+	// transition, and the leftover border lands on its edge.
+	//
+	// Here rather than in each arm: this is the one place that sees the
+	// open→closed edge, which is why promptNextUpgrade already lives here. Two
+	// arms had remembered the clear (submitSetupDialog, the disconnect confirm)
+	// and the one that actually closes the create-pane flow —
+	// handleCreatePaneSplit — had not. A per-arm rule is a rule the next dialog
+	// will miss. Batching a second ClearScreen onto an arm that already returns
+	// one is harmless.
+	//
+	// Cost is one full repaint per dialog close, which is user-initiated and
+	// never on a timer.
+	return next, tea.Batch(tea.ClearScreen, cmd)
 }
 
 // dispatchDialogKey is handleDialogKey's switch, split out so the drain above
@@ -688,6 +717,8 @@ func (m Model) dispatchDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleAboutKey(msg)
 	case dialogSettings:
 		return m.handleSettingsKey(msg)
+	case dialogNotifySettings:
+		return m.handleNotifySettingsKey(msg)
 	case dialogShortcuts:
 		return m.handleShortcutsKey(msg)
 	case dialogConfirm:
@@ -981,9 +1012,21 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter", " ":
 		f := fields[m.dialogCursor]
-		if f.isBool {
+		switch {
+		case f.submenu:
+			m.dialog = dialogNotifySettings
+			m.dialogCursor = firstNotifyRow(notifySettingsRows())
+			// Reset on the way IN as well as on Esc: Esc is not the only exit,
+			// and any other left a stale origin for the next open — the same
+			// reason the Shortcuts cursor is reset at both ends.
+			m.notifyScroll = 0
+			// The taller box's rows land on cells the frame diff considers
+			// unchanged, so without this the shorter Settings box stays
+			// painted around it — the rule the Shortcuts row already follows.
+			return m, tea.ClearScreen
+		case f.isBool:
 			f.set(&m, "")
-		} else {
+		default:
 			m.dialogEdit = true
 			m.dialogInput = f.get(&m)
 		}
@@ -1398,6 +1441,8 @@ func (m Model) renderDialog() string {
 		content = m.renderAboutDialog()
 	case dialogSettings:
 		content = m.renderSettingsDialog()
+	case dialogNotifySettings:
+		content = m.renderNotifySettingsDialog()
 	case dialogShortcuts:
 		content = m.renderShortcutsDialog()
 	case dialogConfirm:

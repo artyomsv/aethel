@@ -75,7 +75,7 @@ func TestNotificationCenter_View_SanitizesHostileTitles(t *testing.T) {
 			})
 			nc.visible = true
 
-			out := nc.View(24)
+			out := nc.View(24, nil)
 			if strings.Contains(out, tt.mustNot) {
 				t.Errorf("rendered card still carries %s (%q)", tt.whatFor, tt.mustNot)
 			}
@@ -99,7 +99,7 @@ func TestNotificationCenter_View_KeepsOrdinaryTitleText(t *testing.T) {
 	})
 	nc.visible = true
 
-	out := nc.View(24)
+	out := nc.View(24, nil)
 	if !strings.Contains(out, "API Error 500") {
 		t.Errorf("sanitising must not drop ordinary title text; got:\n%s", out)
 	}

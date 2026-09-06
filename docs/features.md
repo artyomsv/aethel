@@ -398,14 +398,24 @@ directory sits in — so the directory the pane spawns in is what scopes it.
 
 ### Notification center
 
-A non-modal sidebar (drawn as an overlay on the right edge — panes keep their size, so opening it never makes a running TUI re-wrap its output) surfaces:
+A non-modal sidebar (drawn as an overlay on the right edge — panes keep their size, so opening it never makes a running TUI re-wrap its output) shows a **timeline of work**, newest first, across every project and every destination:
 
+- **Hook-driven events from Claude Code, OpenCode and Codex** — structured events forwarded directly from the AI tool (`Working on: …`, `Reply ready`, permission requests, session errors) instead of guessed from the PTY byte stream. See `[notification.hooks]` in [configuration.md](configuration.md#notificationhooks) for the tier knob.
 - Process exits (any pane)
-- OSC 133 command-completion events (shell panes)
-- Bell characters (30 s cooldown to avoid storming)
-- Smart-idle pattern matches (per-plugin `[[idle_handlers]]` regex)
 - **"Pane not accepting input"** — the pane's process stopped reading its stdin (e.g. an AI tool wedged after a context compaction), so the daemon drops the keystrokes instead of letting one stuck pane freeze the app. Recover with `Alt+R` (restart the pane in place — AI sessions resume)
-- **Hook-driven events from Claude Code, OpenCode and Codex** — structured events forwarded directly from the AI tool (permission requests, "reply ready", session errors, file edits, etc.) instead of guessed from the PTY byte stream. See `[notification.hooks]` in [configuration.md](configuration.md#notificationhooks) for the tier knob.
+- Pane lifecycle: closed, pinned for attention, marked for deletion
+- **An MCP agent taking a pane** — one card per pane per 30 s, so you can see which panes an agent is driving
+- Worktree ready, when a `git worktree` checkout finishes
+- Bell characters (30 s cooldown to avoid storming)
+- Off by default: OSC 133 command completions, and smart-idle pattern matches (per-plugin `[[idle_handlers]]` regex)
+
+**Working with the list:**
+
+- **Click a card** to jump to its pane. Each card names the project and tab it will take you to, and a card whose pane has since closed reads `(closed)` and does not jump.
+- **Scroll with the mouse wheel**, or `↑`/`↓` once the sidebar is focused (`F3`).
+- **Right-click a card** to dismiss it; `d` dismisses the selected one, `D` dismisses all.
+- **`a`** reveals every event for a moment, ignoring your filter — for when you are debugging a pane rather than working in it.
+- Each card is titled by its **tab** when that tab holds a single pane — the name you gave the work — and by the pane otherwise. Choose which kinds of event appear in **F1 → Settings → Notifications**, or via [`[notification.events]`](configuration.md#notificationevents). Hiding a group never hides it from MCP agents.
 
 Hook-driven events flow:
 
@@ -463,7 +473,7 @@ quil notify test            # send one self-labelled canary toast
 quil notify setup --remove  # a true inverse
 ```
 
-Toggle it live at **F1 → Settings → Desktop notifications**, or via [`[notification.desktop]`](configuration.md#notificationdesktop). The Settings row reports registration *state* rather than the flag — it reads `on (run notify setup)` when the flag is on but nothing is registered, which is the default on a fresh install.
+Toggle it live at **F1 → Settings → Notifications** (which also holds the `blocked` and `done` switches), or via [`[notification.desktop]`](configuration.md#notificationdesktop). The `Enabled` row reports registration *state* rather than the flag — it reads `on (run notify setup)` when the flag is on but nothing is registered, which is the default on a fresh install.
 
 `quil notify setup` shows a verification toast and reports whether it actually appeared, so you find out immediately rather than the next time an agent blocks.
 

@@ -422,3 +422,46 @@ Implemented in v0.12.0. Key differences from the original PRD:
 - Event expiry: no auto-expire; bounded queue (50) drops oldest
 - Go-back scope: only notification navigation (not all pane switches)
 - Dismissed events: disappear permanently (no history view)
+
+## Phase 4 — Timeline (done)
+
+The sidebar became a user-filtered timeline of work rather than a stream of
+daemon telemetry.
+
+**Why.** Two producers made almost every card. `output_idle` fires for every
+pane quiet for 5 s, every 30 s, forever; `command_complete` fires on every shell
+command. The queue merges repeats by `(PaneID, Title)` and re-prepends the
+merged entry, so a constant-title repeat jumps back to position 1 each time —
+meaning the two of them permanently occupied the ~10 rows the sidebar could
+draw. A production workspace showed eight of twelve visible cards as
+`Output idle`, with repeat counts past 2400. The feature went unused.
+
+**What shipped.**
+
+- **Ten event groups** (`internal/tui/notification_class.go`), each a boolean in
+  `[notification.events]`. `commands` and `idle` default off. An unrecognised
+  event type maps to `system`, which defaults on — a wrong extra card is visible
+  and silenceable, a wrong hidden card is not.
+- **`F1 → Settings → Notifications`** (`dialogNotifySettings`), which also
+  re-homes the three desktop-toast toggles; `blocked` and `done` were previously
+  reachable only by hand-editing `config.toml`.
+- **Mouse**: left-click a card to jump to its pane, right-click to dismiss,
+  wheel to scroll. All three gestures were previously swallowed and discarded.
+- **Line-based scrolling and variable card height**, through one pure geometry
+  function shared by the renderer and the hit test. Cards carry a project · tab
+  line, and a card whose pane has closed renders dim and refuses the jump.
+- **Four new daemon events**: `mcp_control`, the pin/deletion-mark pair,
+  `pane_destroyed` (carrying who closed it), and `worktree_ready`.
+
+**Deliberately unchanged.** The daemon event queue, its bound, its aggregation,
+the attach replay, and the three MCP tools. One queue serves both an agent
+polling for machine state and a human reading a timeline, and only the client
+knows which it is — so the filter is client-side and MCP consumers still receive
+everything a human has hidden.
+
+**Deferred.** Per-event-type overrides (types are internal strings that change
+whenever an upstream tool adds a hook, so a config keyed on them would rot) and
+per-pane-type filtering.
+
+Design: `docs/superpowers/specs/2026-09-06-notification-timeline-design.md`.
+Plan: `docs/superpowers/plans/2026-09-06-notification-timeline.md`.

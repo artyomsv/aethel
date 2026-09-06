@@ -8,15 +8,21 @@ import (
 	"github.com/artyomsv/quil/internal/notify"
 )
 
-func desktopRow(t *testing.T) settingsField {
+// desktopRow returns the desktop-toast on/off row.
+//
+// It moved out of the top-level Settings list into F1 -> Settings ->
+// Notifications, alongside the Blocked/Done pair it used to hide and the ten
+// sidebar event groups. Every assertion below is about the ROW's behaviour, so
+// they follow it rather than being deleted.
+func desktopRow(t *testing.T) notifyToggle {
 	t.Helper()
-	for _, f := range settingsFields() {
-		if f.label == "Desktop notifications" {
-			return f
+	for _, r := range notifySettingsRows() {
+		if r.label == "Enabled" && !r.heading {
+			return r
 		}
 	}
-	t.Fatal("no 'Desktop notifications' row in settingsFields()")
-	return settingsField{}
+	t.Fatal("no 'Enabled' desktop-toast row in notifySettingsRows()")
+	return notifyToggle{}
 }
 
 func TestSettingsDesktopRow_TogglesAndPersists(t *testing.T) {
@@ -26,11 +32,11 @@ func TestSettingsDesktopRow_TogglesAndPersists(t *testing.T) {
 	m.configChanged = false
 
 	row := desktopRow(t)
-	if !row.isBool {
-		t.Error("the row must be a bool toggle, not a text field")
+	if row.heading {
+		t.Error("the row must be a toggle, not an inert heading")
 	}
 
-	row.set(&m, "")
+	row.set(&m)
 	if m.cfg.Notification.Desktop.Enabled {
 		t.Error("set() did not flip Enabled")
 	}
@@ -40,7 +46,7 @@ func TestSettingsDesktopRow_TogglesAndPersists(t *testing.T) {
 		t.Error("set() must mark configChanged so the value reaches config.toml")
 	}
 
-	row.set(&m, "")
+	row.set(&m)
 	if !m.cfg.Notification.Desktop.Enabled {
 		t.Error("set() is not a toggle — a second call did not flip it back")
 	}

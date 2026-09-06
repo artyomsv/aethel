@@ -50,7 +50,7 @@ func TestNotificationCenter_View_RendersCountBadge(t *testing.T) {
 		Data:    map[string]string{"count": "7"},
 	})
 
-	rendered := nc.View(20)
+	rendered := nc.View(20, nil)
 	if !strings.Contains(rendered, "×7") {
 		t.Errorf("View must render ×N badge when count > 1; output:\n%s", rendered)
 	}
@@ -68,7 +68,7 @@ func TestNotificationCenter_View_NoBadgeWhenCountOne(t *testing.T) {
 		Title: "Output idle",
 	})
 
-	rendered := nc.View(20)
+	rendered := nc.View(20, nil)
 	if strings.Contains(rendered, "×") {
 		t.Errorf("View must NOT render ×N for a single un-aggregated event; output:\n%s", rendered)
 	}

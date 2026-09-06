@@ -208,6 +208,10 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		resp.Swapped = swapped
 		return resp
 	}
+	// The one success return. A checkout can take minutes on a monorepo, which
+	// is long enough to have moved on to another pane — so the sidebar says
+	// when the tree is ready and which branch it holds.
+	d.notifyWorktreeReady(pane, spec.Branch)
 	return ipc.CreatePaneRespPayload{PaneID: pane.ID, TabID: p.TabID, Worktree: spec, Swapped: swapped}
 }
 

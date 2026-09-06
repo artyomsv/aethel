@@ -303,3 +303,50 @@ unsampled set stays unknown rather than partial: there is no number to qualify,
 so the marker never appears beside an em dash. Same rule one field over:
 `formatQuilMem` treats a zero RSS as unknown, because a live process cannot
 occupy zero bytes.
+
+## F1 → Settings → Notifications
+
+`dialogNotifySettings` (`internal/tui/dialog_notifysettings.go`) holds three
+desktop-toast toggles and ten sidebar event groups. Reached from a
+`settingsField` carrying `submenu: true` — a flag rather than a label
+comparison at the call site, for the reason `relayout` is one: the row that
+needs the behaviour declares it, so renaming a label cannot silently break it.
+
+The screen is WINDOWED (`notifyVisibleRows` + the shared `historyWindow`),
+because its own 15 content rows still needed a 26-row terminal and 24 is an
+ordinary size. `notifyScroll` is reset on the way IN as well as on Esc — Esc is
+not the only exit, and any other left a stale origin for the next open.
+
+It is a separate screen because `renderSettingsDialog` paints every row
+unwindowed and unscrolled. Thirteen more rows in the top-level list would push
+the box off the bottom of an ordinary terminal.
+
+**The new screen is subject to the same limit it was created to dodge, and hit
+it once already.** `renderDialog` clamps WIDTH to the terminal and never height,
+and `lipgloss.Place` does not clip — the rule this file states for the history
+list, the processes list and the session picker. A first version gave every
+toggle its own hint line and rendered 35 content rows, which draws straight off
+the bottom of a 30-row terminal with no scroll and no window to recover it. The
+hint is therefore INLINE, budgeted against what the row has already spent
+(`inner - lipgloss.Width(row) - 2`) rather than against a fixed value column —
+`on (run notify setup)` is 21 cells where `on` is 2, so a fixed column either
+truncates the value or wastes the line. `TestRenderNotifySettingsDialog_
+FitsASmallTerminal` pins the row budget; adding rows means shortening something
+else, not letting it grow.
+
+Its rows are a different type from `settingsField`: `notifyToggle` has no edit
+mode and its `set` takes no value, because every row is a plain on/off switch.
+Heading rows are inert and the cursor steps over them in BOTH directions, so
+`Enter` can never land on one — and the opening cursor is `firstNotifyRow`, not
+0, for the same reason.
+
+**Every sidebar-event setter re-projects the config onto the live filter**
+(`m.notifications.SetGroups(groupFilterFrom(m.cfg.Notification.Events))`). A
+visible control that did nothing until relaunch reads as a broken dialog — the
+same rule the `Sidebar width` row states. The toast toggles apply live for free,
+since `raiseAttentionToast` reads `m.cfg` on every edge.
+
+The desktop-toast row reports registration STATE, not the flag, and does NOT
+perform registration: writing a Start Menu shortcut and an HKCU key as a side
+effect of a config toggle is the auto-register behaviour the notify design
+rejected. It names `quil notify setup` instead.

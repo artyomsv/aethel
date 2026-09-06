@@ -257,7 +257,7 @@ type helloRegistry struct {
 	// actually populated -- a seam that nothing verifies at the call site is
 	// how a passing unit test hides a broken one.
 	openedAtOf func(*ipc.Conn) time.Time
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	byConn     map[*ipc.Conn]helloRecord
 	nowFunc    func() time.Time
 }
@@ -277,6 +277,28 @@ func (r *helloRegistry) put(conn *ipc.Conn, p ipc.ClientHelloPayload) {
 	r.mu.Lock()
 	r.byConn[conn] = helloRecord{payload: p, received: r.nowFunc()}
 	r.mu.Unlock()
+}
+
+// roleOf returns a connection's self-declared role ("tui" or "bridge"), or ""
+// when it never said hello.
+//
+// This is the honest way to tell an MCP bridge from the TUI. The tempting
+// alternative — treating an id-bearing request as an agent — is wrong:
+// Message.ID is a request-response correlation id, so any future
+// request-response caller would be misreported as an agent.
+// It takes a READ lock, and that is why the registry's mutex is an RWMutex:
+// this now runs on the per-keystroke input path (handlePaneInput calls it for
+// every delivered pane_input, TUI keystrokes included), and `describe` holds
+// the same lock across a loop over every connection. Nothing blocks under
+// either, so the contention is microseconds — but the input path is the one
+// this daemon has twice frozen, and a read lock costs nothing.
+func (r *helloRegistry) roleOf(conn *ipc.Conn) string {
+	if conn == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.byConn[conn].payload.Role
 }
 
 // putStat records a client's latest self-measurement.
@@ -710,6 +732,16 @@ func (c *procCollector) CPUSupported() bool {
 // filename — 64 bytes is generous for all three, and none of them is a value
 // the user typed.
 const maxHelloField = 64
+
+// maxPaneNameField bounds a pane name at the IPC boundary.
+//
+// Unlike the hello fields this IS a value the user typed (F2 / Alt+F2 rename),
+// so it is roomier — but it still has to be bounded, because every PaneEvent
+// copies it into PaneName and the per-event wire caps in event.go cover
+// Message and Data values only. Without this an unbounded name is retained
+// across the whole event queue and re-broadcast in every frame to every
+// attached client. 256 bytes is far past any name that fits a tab label.
+const maxPaneNameField = 256
 
 // truncateField caps a string at n bytes on a rune boundary.
 func truncateField(s string, n int) string {

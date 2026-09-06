@@ -432,6 +432,42 @@ func (m *Model) toastTitle(pane *PaneModel, proj *ProjectModel) string {
 	return out
 }
 
+// paneLocator returns the notification sidebar's "where does this pane live"
+// callback.
+//
+// Resolved through findPaneAndTab, so a pane in ANY project on ANY destination
+// is found — the sidebar carries events from all of them, and a card that named
+// only the pane would not say which machine's tab a click is about to open.
+//
+// The false return is also the sidebar's liveness answer: the sidebar carries
+// events that outlive their pane (pane_destroyed is one), and such a card is
+// rendered dim and does not offer a jump.
+func (m *Model) paneLocator() paneLocator {
+	return func(paneID string) paneSource {
+		pane, proj, idx := m.findPaneAndTab(paneID)
+		if pane == nil || proj == nil || idx < 0 || idx >= len(proj.tabs) {
+			return paneSource{}
+		}
+		tab := proj.tabs[idx]
+
+		// A tab holding ONE pane is named by its tab: that is the name the user
+		// typed for this piece of work, and the pane below it has usually never
+		// been named at all — "pane-fd2d33b" identifies nothing. With several
+		// panes the tab name no longer picks one out, so the pane's own name
+		// (or its id) is the only thing that does.
+		name := pane.Name
+		label := proj.Name + " · " + tab.Name
+		if len(tab.Leaves()) == 1 {
+			name = tab.Name
+			// The tab has been promoted to the card's title, so the label drops
+			// it: two adjacent lines both reading "Test" look like a rendering
+			// fault, and the project alone is the part the title is missing.
+			label = proj.Name
+		}
+		return paneSource{Name: name, Label: label, Alive: true}
+	}
+}
+
 // ownerTabOfPane returns the project owning a pane and the index of the tab
 // holding it, or (nil, -1). A thin wrapper over findPaneAndTab that drops the
 // pane, so a caller wanting only the location cannot accidentally index one
