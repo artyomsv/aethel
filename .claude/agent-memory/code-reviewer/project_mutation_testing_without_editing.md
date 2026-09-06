@@ -27,6 +27,18 @@ needs the `/c/...` form for tar and the `C:/...` form for the docker `-v` mount.
 `scripts/dev.sh test` takes ONE package argument (`go test "$(pkg_target "${2:-}")"`) — passing three
 paths silently runs only the first and prints one `ok` line that reads like all three passed.
 
+**Faster variant when the code under review is a stdlib-only subset of a package** (e.g.
+`internal/hookevents`: `ingest.go` + `types.go` import only stdlib — `spool.go` is the one that
+pulls `internal/logger`). Copy just those files plus the package's `*_test.go` into a scratchpad
+dir, drop in a bare `go.mod` (`module probe` / `go 1.25`), keep the original `package` clause, and
+run `MSYS_NO_PATHCONV=1 docker run --rm -v "C:/…/dir":/w -w /w golang:1.25 go test -count=1 -race ./...`.
+No `quil-gomod` volume, no 80 MB copy, `-race` finishes in seconds, and a probe file in the SAME
+package can reach unexported fields (`ing.mu`, `ing.order`, `pending[k].timer`) to force an exact
+concurrency interleaving that a real-timer test can only reach by luck. `go vet ./...` first tells
+you whether the trimmed file set still compiles the tests. This is how the 2026-09-04 `Ingester`
+Cancel-strands-a-due-key stall was demonstrated deterministically, and how the candidate fix was
+verified against the repo's own tests before the finding was written.
+
 **Why:** review tasks here forbid editing files, and there is no local Go toolchain, so the only
 way to distinguish "the test asserts this" from "the test happens to pass" is a throwaway copy.
 Mutations have found both real gaps and false alarms — e.g. the `markDead` must-not-close-raw

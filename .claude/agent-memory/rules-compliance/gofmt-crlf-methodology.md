@@ -63,3 +63,23 @@ structs (`PaneInfo`, `Model`). See sibling agent memory
 `.claude/agent-memory/code-reviewer/project_gofmt_crlf_check.md`, which
 documents the same pattern independently — that one is code-reviewer's copy,
 this is rules-compliance's copy (separate memory stores, same finding).
+
+**Second confirmed instance, different package — this is a repo-wide pattern,
+not a `model.go` quirk.** PR #178 (`fix/claudesessions-fallback-gaps`, commit
+that touched `transcriptLine`) added `IsMeta bool` and `ToolUseResult
+json.RawMessage` — each with its own preceding doc comment — between the
+existing `AiTitle` field and the `Timestamp`/`Message` pair in
+`internal/claudesessions/claudesessions.go` (~line 300-330). `ToolUseResult`
+and `Timestamp` got correctly re-aligned to each other (both now in the same
+post-comment alignment run), but `Message   struct {` right below `Timestamp`
+— no comment between it and `Timestamp`, so it's in the SAME run — was left at
+its old 3-space padding instead of widening to match. `gofmt -d` (Docker
+`golang:1.25`, via the scratch/mount procedure above, not raw `-l` on the CRLF
+checkout) confirms a clean one-line fix: `Message   struct {` →
+`Message       struct {`. Lesson for future reviews: whenever a diff inserts a
+commented field ABOVE an existing multi-field run (rather than at the very end
+of the struct), check whether the LAST field of that run is a struct/interface
+literal opener (`Message struct {`, `Foo interface {`) — those are easy for a
+human editor to eyeball as "unrelated, didn't touch it" and skip re-aligning,
+because the line looks structurally different from the plain `Name Type
+`tag`` lines around it.
