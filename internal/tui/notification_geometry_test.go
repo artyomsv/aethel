@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -114,6 +115,60 @@ func TestNotificationLines_NilLocatorRenders(t *testing.T) {
 	}
 	if strings.Contains(joined, "(closed)") {
 		t.Errorf("nil locator marked a live pane closed:\n%s", joined)
+	}
+}
+
+// Every rendered line must fit the sidebar in CELLS, not runes.
+//
+// This is a correctness requirement rather than a cosmetic one, and it is new
+// with this feature. lipgloss WRAPS rather than clips, so one over-wide line
+// becomes two screen rows — and eventIndexAtRow maps a screen row to a card by
+// indexing the logical line list, assuming one screen row per line. A single
+// wrapped line therefore shifts every card below it, and a click selects,
+// navigates to, or dismisses a different notification than the one under the
+// pointer. While the sidebar was keyboard-only an over-wide line was merely
+// ugly; now the display IS the decision.
+//
+// 构建 is 2 runes and 4 cells, so a rune-counting cut passes twice the budget.
+func TestNotificationLines_WideGlyphsStayWithinTheWidth(t *testing.T) {
+	const innerW = 28
+	wide := ipc.PaneEventPayload{
+		ID:       "TEST-1",
+		PaneID:   "pane-TEST-1",
+		PaneName: "构建构建构建构建构建构建构建构建构建构建",
+		Type:     "process_exit",
+		Title:    "进程已退出进程已退出进程已退出进程已退出进程已退出",
+		Message:  "最后一行输出最后一行输出最后一行输出最后一行输出",
+		Severity: "error",
+		Data:     map[string]string{"count": "12"},
+	}
+	wideLoc := func(string) (string, bool) {
+		return "项目名称项目名称项目名称 · 标签页标签页标签页", true
+	}
+
+	for _, l := range notificationLines([]ipc.PaneEventPayload{wide}, innerW, 0, true, wideLoc) {
+		if w := lipgloss.Width(l.text); w > innerW {
+			t.Errorf("line %q is %d cells wide, want at most %d — lipgloss will wrap it and desync the hit test",
+				ansi.Strip(l.text), w, innerW)
+		}
+	}
+}
+
+// The name/age row pads the gap between them, so both operands must be
+// measured in cells too, or the padding overshoots by the wide runes' extra
+// columns.
+func TestNotificationLines_WideNameKeepsTheAgeOnTheSameRow(t *testing.T) {
+	const innerW = 24
+	lines := notificationLines([]ipc.PaneEventPayload{{
+		ID: "TEST-1", PaneID: "pane-TEST-1",
+		PaneName: "构建构建构建构建构建构建",
+		Type:     "process_exit", Title: "t", Severity: "info",
+	}}, innerW, 0, false, liveLoc)
+
+	for _, l := range lines {
+		if w := lipgloss.Width(l.text); w > innerW {
+			t.Errorf("line %q is %d cells, want at most %d", ansi.Strip(l.text), w, innerW)
+		}
 	}
 }
 

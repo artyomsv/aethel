@@ -301,7 +301,7 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 		return nil
 	}
 	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	separator := sepStyle.Render(truncateRunes(strings.Repeat("·", innerW), innerW))
+	separator := sepStyle.Render(truncateCells(strings.Repeat("·", innerW), innerW))
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 
 	var out []renderedLine
@@ -324,7 +324,6 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 				name = name[:12]
 			}
 		}
-		name = truncateRunes(sanitizeRemoteText(name), innerW)
 		nameStyle := severityNameStyle(e.Severity)
 		if !alive {
 			// A card that cannot be jumped to must not wear an urgency colour.
@@ -333,8 +332,16 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 		if selected {
 			nameStyle = nameStyle.Bold(true).Reverse(true)
 		}
+		// The age is fixed-cost and the name is the part that gives way, so
+		// the name is budgeted against what is left AFTER the age and its
+		// one-cell separator. Truncating the name to the full inner width and
+		// then appending the age overflows the row by `1 + len(age)` cells for
+		// any long pane name — reachable with plain ASCII, no wide glyph
+		// needed.
 		age := relativeTime(time.UnixMilli(e.Timestamp))
-		gap := innerW - len([]rune(name)) - len([]rune(age))
+		ageW := lipgloss.Width(age)
+		name = truncateCells(sanitizeRemoteText(name), innerW-ageW-1)
+		gap := innerW - lipgloss.Width(name) - ageW
 		if gap < 1 {
 			gap = 1
 		}
@@ -346,7 +353,7 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 		// Line 2: title + optional ×N aggregation badge.
 		//
 		// sanitizeRemoteText runs BEFORE truncation, and that order is
-		// load-bearing: truncateRunes slices runes with no idea what an escape
+		// load-bearing: truncateCells cuts by display width with no idea what an escape
 		// is, so sanitising afterwards would leave a cut sequence swallowing
 		// the styling bytes that follow it. A title comes from a pane's own
 		// child via the hook spool and reaches the terminal with no VT
@@ -358,7 +365,7 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 				titleBody += "  ×" + e.Data["count"]
 			}
 		}
-		titleText := truncateRunes(titleBody, innerW)
+		titleText := truncateCells(titleBody, innerW)
 		if selected {
 			titleText = lipgloss.NewStyle().Reverse(true).Render(titleText)
 		} else {
@@ -379,7 +386,7 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 			locStyle = dim.Reverse(true)
 		}
 		out = append(out, renderedLine{
-			text:     locStyle.Render(truncateRunes(locText, innerW)),
+			text:     locStyle.Render(truncateCells(locText, innerW)),
 			eventIdx: i,
 		})
 
@@ -389,7 +396,7 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 		// scrolling removes that constraint, and dropping the blank line is
 		// most of the extra events now on screen.
 		if e.Message != "" {
-			preview := truncateRunes("  "+sanitizeRemoteText(firstNonEmptyLine(e.Message)), innerW)
+			preview := truncateCells("  "+sanitizeRemoteText(firstNonEmptyLine(e.Message)), innerW)
 			st := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 			if selected {
 				st = st.Reverse(true)
@@ -508,13 +515,13 @@ func (nc *NotificationCenter) View(height int, loc paneLocator) string {
 
 	out := make([]string, 0, innerH)
 	out = append(out, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).
-		Render(truncateRunes(" Notifications ", innerW)))
+		Render(truncateCells(" Notifications ", innerW)))
 
 	lines := notificationLines(nc.visibleEvents(), innerW, nc.cursor, nc.focused, loc)
 
 	if len(lines) == 0 {
 		out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("238")).
-			Render(truncateRunes(strings.Repeat("·", innerW), innerW)))
+			Render(truncateCells(strings.Repeat("·", innerW), innerW)))
 		// Naming the override matters only when something is actually being
 		// hidden: on an unfiltered center there is nothing for it to reveal.
 		empty := "No notifications"
@@ -522,7 +529,7 @@ func (nc *NotificationCenter) View(height int, loc paneLocator) string {
 			empty = "None shown (a: show all)"
 		}
 		out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("243")).
-			Render(truncateRunes(empty, innerW)))
+			Render(truncateCells(empty, innerW)))
 	} else {
 		nc.clampScroll(height, loc)
 		vh := notifyViewportHeight(height)
@@ -543,7 +550,7 @@ func (nc *NotificationCenter) View(height int, loc paneLocator) string {
 		hints = "SHOWING ALL  a:filter"
 	}
 	out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("243")).
-		Render(truncateRunes(hints, innerW)))
+		Render(truncateCells(hints, innerW)))
 
 	borderColor := lipgloss.Color("63")
 	if nc.focused {
@@ -577,6 +584,20 @@ func truncateRunes(s string, maxWidth int) string {
 	}
 	return string(runes[:maxWidth])
 }
+
+// Every line of a card is cut with sidebar.go's truncateCells, which measures
+// DISPLAY CELLS on grapheme-cluster boundaries — not runes.
+//
+// That is a correctness requirement here, not a cosmetic one, and the project
+// sidebar's own comment on that helper describes this exact failure: lipgloss
+// is the sole width authority and its closing .Width() WRAPS the excess onto a
+// new painted line rather than cutting it, shifting every row below while the
+// hit test still maps screen row y to the logical row at y — so the user clicks
+// one card and acts on another. 构建 is 2 runes and 4 cells.
+//
+// While this sidebar was keyboard-only an over-wide line was merely ugly. Now
+// the display IS the decision, and pane names, titles and excerpts all arrive
+// from a pane's own child or from a remote daemon.
 
 // severityNameStyle returns a style for the pane name colored by severity.
 func severityNameStyle(severity string) lipgloss.Style {

@@ -432,10 +432,6 @@ func (m *Model) toastTitle(pane *PaneModel, proj *ProjectModel) string {
 	return out
 }
 
-// ownerTabOfPane returns the project owning a pane and the index of the tab
-// holding it, or (nil, -1). A thin wrapper over findPaneAndTab that drops the
-// pane, so a caller wanting only the location cannot accidentally index one
-// project's tabs with another's index.
 // paneLocator returns the notification sidebar's "where does this pane live"
 // callback.
 //
@@ -456,6 +452,10 @@ func (m *Model) paneLocator() paneLocator {
 	}
 }
 
+// ownerTabOfPane returns the project owning a pane and the index of the tab
+// holding it, or (nil, -1). A thin wrapper over findPaneAndTab that drops the
+// pane, so a caller wanting only the location cannot accidentally index one
+// project's tabs with another's index.
 func (m *Model) ownerTabOfPane(paneID string) (*ProjectModel, int) {
 	_, proj, idx := m.findPaneAndTab(paneID)
 	if proj == nil || idx < 0 || idx >= len(proj.tabs) {

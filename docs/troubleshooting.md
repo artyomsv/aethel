@@ -256,7 +256,7 @@ quil notify setup
 
 **7. The cooldown.** One toast per pane per 5 s, shared across both kinds. This is a floor against a runaway agent, not a batching window — if you are testing with rapid turns you can still outrun it. Tune with `cooldown` in `[notification.desktop]`.
 
-**8. Check the Settings row.** `F1 → Settings → Desktop notifications` reports state, not the flag: `on` means registered and working, `on (run notify setup)` means the flag is on but nothing is registered, `unsupported` means you are not on Windows.
+**8. Check the Settings row.** `F1 → Settings → Notifications → Enabled` reports state, not the flag: `on` means registered and working, `on (run notify setup)` means the flag is on but nothing is registered, `unsupported` means you are not on Windows.
 
 ## Clicking a toast switches panes but does not bring the window forward
 

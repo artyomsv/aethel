@@ -473,7 +473,7 @@ quil notify test            # send one self-labelled canary toast
 quil notify setup --remove  # a true inverse
 ```
 
-Toggle it live at **F1 → Settings → Desktop notifications**, or via [`[notification.desktop]`](configuration.md#notificationdesktop). The Settings row reports registration *state* rather than the flag — it reads `on (run notify setup)` when the flag is on but nothing is registered, which is the default on a fresh install.
+Toggle it live at **F1 → Settings → Notifications** (which also holds the `blocked` and `done` switches), or via [`[notification.desktop]`](configuration.md#notificationdesktop). The `Enabled` row reports registration *state* rather than the flag — it reads `on (run notify setup)` when the flag is on but nothing is registered, which is the default on a fresh install.
 
 `quil notify setup` shows a verification toast and reports whether it actually appeared, so you find out immediately rather than the next time an agent blocks.
 
