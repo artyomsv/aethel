@@ -312,6 +312,11 @@ desktop-toast toggles and ten sidebar event groups. Reached from a
 comparison at the call site, for the reason `relayout` is one: the row that
 needs the behaviour declares it, so renaming a label cannot silently break it.
 
+The screen is WINDOWED (`notifyVisibleRows` + the shared `historyWindow`),
+because its own 15 content rows still needed a 26-row terminal and 24 is an
+ordinary size. `notifyScroll` is reset on the way IN as well as on Esc — Esc is
+not the only exit, and any other left a stale origin for the next open.
+
 It is a separate screen because `renderSettingsDialog` paints every row
 unwindowed and unscrolled. Thirteen more rows in the top-level list would push
 the box off the bottom of an ordinary terminal.

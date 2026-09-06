@@ -5743,11 +5743,6 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
 		return
 	}
-	// Placed AFTER the refusals above, so a restart the daemon declined does
-	// not produce a card claiming an agent restarted the pane.
-	if d.hellos.roleOf(conn) == "bridge" {
-		d.notifyMCPControl(pane, "MCP agent restarted this pane")
-	}
 	// Clear any deferred state first so the restart below operates on a normal
 	// live pane (Pending=false) rather than racing the lazy-spawn guard.
 	d.ensurePaneSpawned(pane)
@@ -5821,6 +5816,17 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 			log.Printf("handleRestartPaneReq: spawn: %v", err)
 			success = false
 		}
+	}
+
+	// AFTER the outcome is known, and only on success.
+	//
+	// Emitting before the spawn put a card claiming "MCP agent restarted this
+	// pane" on the timeline for a restart that then answered Success:false —
+	// a missing worktree, or a spawn that failed. The card outlives the
+	// response and is the only durable trace, so it must not be the one that
+	// lies. Same ordering the destroy paths take.
+	if success && d.hellos.roleOf(conn) == "bridge" {
+		d.notifyMCPControl(pane, "MCP agent restarted this pane")
 	}
 
 	d.broadcastState()

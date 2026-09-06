@@ -347,22 +347,96 @@ func TestScrollBy_ClampsAtBothEnds(t *testing.T) {
 	}
 }
 
-// Reading history is impossible on a busy workspace if every arriving event
-// yanks the viewport back to the top.
-func TestAddEvent_DoesNotResetScroll(t *testing.T) {
-	nc := NewNotificationCenter(30, 50)
-	for i := 0; i < 20; i++ {
-		nc.AddEvent(geomEvent("TEST-"+string(rune('a'+i)), "title", "excerpt"))
+// Reading history is impossible on a busy workspace if the text slides out from
+// under the reader on every arrival.
+//
+// An UNCHANGED scroll offset is not the contract, and asserting it was wrong:
+// nc.scroll indexes a list that grows from the TOP, so a new five-line card
+// inserted above leaves the same number naming content five lines newer. What
+// must hold is that the same CARD stays at the top of the viewport — so the
+// offset has to move by exactly the height of what was inserted.
+//
+// The wheel scrolls without moving the cursor, so "cursor 0, scrolled deep into
+// history" is the ordinary state of someone reading back, and it is the case a
+// cursor-only fix misses.
+func TestAddEvent_KeepsTheViewportOnTheSameCard(t *testing.T) {
+	for _, cursor := range []int{0, 3} {
+		nc := NewNotificationCenter(30, 50)
+		for i := 0; i < 20; i++ {
+			nc.AddEvent(geomEvent("TEST-"+string(rune('a'+i)), "title", "excerpt"))
+		}
+		nc.cursor = cursor
+		nc.ScrollBy(6, 20)
+		if nc.scroll == 0 {
+			t.Fatalf("cursor=%d: fixture did not scroll; the test proves nothing", cursor)
+		}
+
+		before := ownerAtLine(nc, nc.scroll)
+		if before == "" {
+			t.Fatalf("cursor=%d: no card at the viewport top", cursor)
+		}
+
+		nc.AddEvent(geomEvent("TEST-new", "arriving", "excerpt"))
+
+		if after := ownerAtLine(nc, nc.scroll); after != before {
+			t.Errorf("cursor=%d: viewport top was %q, is now %q — the list shifted under the reader",
+				cursor, before, after)
+		}
 	}
+}
+
+// ownerAtLine returns the id of the card occupying a viewport line, or "".
+func ownerAtLine(nc *NotificationCenter, line int) string {
+	vis := nc.visibleEvents()
+	owners := notificationLineOwners(vis)
+	for i := line; i < len(owners); i++ {
+		if idx := owners[i]; idx >= 0 && idx < len(vis) {
+			return vis[idx].ID
+		}
+	}
+	return ""
+}
+
+// Revealing a hidden group inserts cards above the viewport too.
+func TestSetGroups_KeepsTheViewportOnTheSameCard(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	nc.SetGroups(showOnly(groupProcess))
+	for i := 0; i < 20; i++ {
+		nc.AddEvent(geomEvent("TEST-v"+string(rune('a'+i)), "title", "excerpt"))
+	}
+	// A hidden card that will appear ABOVE the viewport when its group is on.
+	nc.AddEvent(ipc.PaneEventPayload{
+		ID: "TEST-hidden", PaneID: "pane-h", PaneName: "shell",
+		Type: "output_idle", Title: "Output idle", Message: "x", Severity: "info",
+	})
 	nc.ScrollBy(6, 20)
-	before := nc.scroll
-	if before == 0 {
-		t.Fatal("fixture did not scroll; the test cannot detect a reset")
+	before := ownerAtLine(nc, nc.scroll)
+	if before == "" {
+		t.Fatal("fixture: no card at the viewport top")
 	}
 
-	nc.AddEvent(geomEvent("TEST-new", "arriving", "excerpt"))
-	if nc.scroll != before {
-		t.Errorf("scroll after a new event: got %d, want %d (unchanged)", nc.scroll, before)
+	nc.SetGroups(showOnly(groupProcess, groupIdle))
+
+	if after := ownerAtLine(nc, nc.scroll); after != before {
+		t.Errorf("viewport top was %q, is now %q — revealing a group shifted the list",
+			before, after)
+	}
+}
+
+// At the newest edge the viewport FOLLOWS the top, rather than being anchored:
+// scroll 0 means "show the newest", and a new event landing there is what the
+// user wants to see.
+func TestAddEvent_AtTheTopTheViewportFollows(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	nc.AddEvent(geomEvent("TEST-1", "title", "excerpt"))
+
+	nc.AddEvent(geomEvent("TEST-2", "arriving", "excerpt"))
+
+	if nc.scroll != 0 {
+		t.Errorf("scroll at the newest edge: got %d, want 0", nc.scroll)
+	}
+	if got := ownerAtLine(nc, 0); got != "TEST-2" {
+		t.Errorf("top card: got %q, want the newest (TEST-2)", got)
 	}
 }
 

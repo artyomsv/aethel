@@ -114,6 +114,26 @@ func notifySettingsRows() []notifyToggle {
 	}
 }
 
+// notifyChromeRows is every row the screen spends outside the row list: the
+// rounded border (2), dialogBorder's Padding(1,2) top and bottom (2), the
+// title, the "changes persist" subtitle, the blank line under it, the blank
+// line above the footer, the two footer lines, and one spare so the centred box
+// never sits flush against the terminal edge.
+const notifyChromeRows = 11
+
+// notifyMinRows is 1 for the reason historyMinRows is: lipgloss.Place does not
+// clip, so any floor above the height actually available MANUFACTURES the
+// overflow it looks like it prevents.
+const notifyMinRows = 1
+
+// notifyVisibleRows is how many row lines the list may draw.
+func (m Model) notifyVisibleRows() int {
+	if n := m.height - notifyChromeRows; n > notifyMinRows {
+		return n
+	}
+	return notifyMinRows
+}
+
 // firstNotifyRow is the index the cursor starts on: the first non-heading row.
 func firstNotifyRow(rows []notifyToggle) int {
 	for i, r := range rows {
@@ -135,6 +155,16 @@ func settingsSubmenuIndex() int {
 		}
 	}
 	return 0
+}
+
+// syncNotifyScroll keeps the cursor inside the drawn window after a move.
+//
+// A pointer receiver, and the scroll is stored on the Model rather than
+// recomputed: historyWindow re-derives the origin from the cursor on every
+// render, so this only has to carry the user's position between frames.
+func (m *Model) syncNotifyScroll(total int) {
+	start, _ := historyWindow(total, m.dialogCursor, m.notifyScroll, m.notifyVisibleRows())
+	m.notifyScroll = start
 }
 
 // handleNotifySettingsKey drives the screen.
@@ -159,6 +189,7 @@ func (m Model) handleNotifySettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 				break
 			}
 		}
+		m.syncNotifyScroll(len(rows))
 	case "down", "j":
 		for i := m.dialogCursor + 1; i < len(rows); i++ {
 			if !rows[i].heading {
@@ -166,6 +197,7 @@ func (m Model) handleNotifySettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 				break
 			}
 		}
+		m.syncNotifyScroll(len(rows))
 	case "enter", " ":
 		if m.dialogCursor >= 0 && m.dialogCursor < len(rows) && !rows[m.dialogCursor].heading {
 			rows[m.dialogCursor].set(&m)
@@ -182,15 +214,28 @@ func (m Model) renderNotifySettingsDialog() string {
 	b.WriteString(dialogSubtle.Render("  changes persist to config.toml"))
 	b.WriteString("\n")
 
-	// One line per row, hint INLINE. A hint on its own line would put the
-	// screen at 35 content rows, and renderDialog clamps width but never
-	// height — there is no window and no scroll, so a box taller than the
-	// terminal is drawn straight off the bottom edge. That is the exact
-	// overflow this submenu exists to prevent.
+	// One line per row, hint INLINE, and the list is WINDOWED.
+	//
+	// Both are required. renderDialog clamps width but never height, and
+	// lipgloss.Place does not clip, so a box taller than the terminal is drawn
+	// straight off the bottom edge with no scroll to recover it — the cursor
+	// then moves into rows nobody can see. A hint on its own line put the
+	// screen at 35 content rows; inline it is 15, which still needs a 26-row
+	// terminal, and 24 is an ordinary size.
+	//
+	// historyWindow is the shared shape: pure, and called by the renderer
+	// rather than depending on Update having run, because a WindowSizeMsg can
+	// change the row budget between them.
 	inner := dialogInnerWidth(m.width, dialogWidth)
-	for i, r := range notifySettingsRows() {
+	rows := notifySettingsRows()
+	start, end := historyWindow(len(rows), m.dialogCursor, m.notifyScroll, m.notifyVisibleRows())
+	for i := start; i < end; i++ {
+		r := rows[i]
 		if r.heading {
-			b.WriteString("\n  " + dialogTitle.Render(r.label) + "\n")
+			// No leading blank inside a window: it is a row of the budget like
+			// any other, and spending one on whitespace at the top of a short
+			// terminal costs a toggle the user could otherwise see.
+			b.WriteString("  " + dialogTitle.Render(r.label) + "\n")
 			continue
 		}
 		cursor := "    "

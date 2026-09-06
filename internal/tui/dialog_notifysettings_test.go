@@ -198,14 +198,49 @@ func TestSettings_DesktopNotificationsRowRemoved(t *testing.T) {
 // Padding(1,2) top and bottom, so the content must fit a 30-row terminal — a
 // small but entirely ordinary window — with room to spare.
 func TestRenderNotifySettingsDialog_FitsASmallTerminal(t *testing.T) {
-	m := newModelForDialogTest(t)
-	m.width, m.height = 100, 30
+	// 24 is an ordinary terminal, and 14 is well under anything comfortable —
+	// both must fit, because lipgloss.Place does not clip and a box drawn past
+	// the bottom edge takes its footer and its lower toggles with it while the
+	// cursor still moves into them.
+	for _, height := range []int{40, 30, 24, 18, 14, 12} {
+		m := newModelForDialogTest(t)
+		m.width, m.height = 100, height
 
-	got := len(strings.Split(m.renderNotifySettingsDialog(), "\n"))
-	const budget = 24
-	if got > budget {
-		t.Errorf("dialog content is %d rows, want at most %d — it would overflow a %d-row terminal",
-			got, budget, m.height)
+		got := len(strings.Split(m.renderNotifySettingsDialog(), "\n"))
+		// The box adds 2 border rows and dialogBorder's Padding(1,2) top and
+		// bottom, so the content must leave four rows spare.
+		budget := height - 4
+		if got > budget {
+			t.Errorf("at height %d the dialog content is %d rows, want at most %d — it overflows",
+				height, got, budget)
+		}
+	}
+}
+
+// The window has to follow the cursor, or moving down past the fold selects
+// rows that were never drawn.
+func TestNotifySettings_WindowFollowsTheCursor(t *testing.T) {
+	m := newModelForDialogTest(t)
+	m.width, m.height = 100, 20
+	m.dialog = dialogNotifySettings
+	m.dialogCursor = firstNotifyRow(notifySettingsRows())
+
+	rows := notifySettingsRows()
+	updated := tea.Model(m)
+	for i := 0; i < len(rows); i++ {
+		updated, _ = updated.(Model).Update(keyDown)
+	}
+	nm := updated.(Model)
+
+	start, end := historyWindow(len(rows), nm.dialogCursor, nm.notifyScroll, nm.notifyVisibleRows())
+	if nm.dialogCursor < start || nm.dialogCursor >= end {
+		t.Errorf("cursor %d is outside the drawn window [%d, %d) — it moved into rows nobody can see",
+			nm.dialogCursor, start, end)
+	}
+	// And the last toggle really is reachable.
+	if rows[nm.dialogCursor].label != "Idle" {
+		t.Errorf("cursor landed on %q after walking the list, want the last toggle %q",
+			rows[nm.dialogCursor].label, "Idle")
 	}
 }
 

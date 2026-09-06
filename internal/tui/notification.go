@@ -77,7 +77,10 @@ func (nc *NotificationCenter) preserveSelection(fn func()) {
 	if vis := nc.visibleEvents(); nc.cursor >= 0 && nc.cursor < len(vis) {
 		id = vis[nc.cursor].ID
 	}
+	anchorID, anchorOff := nc.viewportAnchor()
+
 	fn()
+
 	if id != "" {
 		for i, e := range nc.visibleEvents() {
 			if e.ID == id {
@@ -87,6 +90,65 @@ func (nc *NotificationCenter) preserveSelection(fn func()) {
 		}
 	}
 	nc.clampCursor()
+	nc.restoreViewportAnchor(anchorID, anchorOff)
+}
+
+// viewportAnchor records WHAT the viewport is showing, as an event id plus the
+// line offset into that event's card, rather than as the bare line number.
+//
+// nc.scroll is an index into a list that the mutation is about to resize from
+// the TOP: a new card is five lines, and inserting them above a scrolled
+// viewport leaves the same number naming content five lines newer. The user is
+// reading history and the text slides out from under them on every arrival.
+//
+// An empty id means "anchored at the newest edge" — scroll 0 follows the top,
+// the same contract the cursor has.
+func (nc *NotificationCenter) viewportAnchor() (id string, offset int) {
+	if nc.scroll <= 0 {
+		return "", 0
+	}
+	vis := nc.visibleEvents()
+	owners := notificationLineOwners(vis)
+	// The anchored line may be a separator, which belongs to no card. Walk
+	// forward to the first line that has an owner and measure back to it, so
+	// the offset can legitimately be negative by one.
+	for i := nc.scroll; i < len(owners); i++ {
+		idx := owners[i]
+		if idx < 0 || idx >= len(vis) {
+			continue
+		}
+		first := i
+		for first > 0 && owners[first-1] == idx {
+			first--
+		}
+		return vis[idx].ID, nc.scroll - first
+	}
+	return "", 0
+}
+
+// restoreViewportAnchor puts the recorded card back at the top of the viewport.
+func (nc *NotificationCenter) restoreViewportAnchor(id string, offset int) {
+	if id == "" {
+		nc.scroll = 0
+		return
+	}
+	vis := nc.visibleEvents()
+	owners := notificationLineOwners(vis)
+	for i, idx := range owners {
+		if idx < 0 || idx >= len(vis) || vis[idx].ID != id {
+			continue
+		}
+		if i > 0 && owners[i-1] == idx {
+			continue // not the card's first line
+		}
+		nc.scroll = i + offset
+		if nc.scroll < 0 {
+			nc.scroll = 0
+		}
+		return
+	}
+	// The anchored card is gone (dismissed, or its group was just hidden).
+	// Leave the offset where it is and let the next clamp bound it.
 }
 
 // visibleEvents returns the events the configured groups allow, newest first.
@@ -161,8 +223,15 @@ func (nc *NotificationCenter) AddEvent(e ipc.PaneEventPayload) {
 	// the selection one card further from the one they are reading with every
 	// arrival. On a busy workspace that is continuous drift.
 	if nc.cursor == 0 {
+		// The CURSOR follows the newest here, but the VIEWPORT must not: the
+		// wheel scrolls without moving the cursor, so "cursor 0, scrolled deep
+		// into history" is the ordinary state of someone reading back through
+		// the list. Letting the lines insert above an unchanged offset slides
+		// the text out from under them on every arrival.
+		anchorID, anchorOff := nc.viewportAnchor()
 		prepend()
 		nc.clampCursor()
+		nc.restoreViewportAnchor(anchorID, anchorOff)
 		return
 	}
 	nc.preserveSelection(prepend)

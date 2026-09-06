@@ -1016,6 +1016,10 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case f.submenu:
 			m.dialog = dialogNotifySettings
 			m.dialogCursor = firstNotifyRow(notifySettingsRows())
+			// Reset on the way IN as well as on Esc: Esc is not the only exit,
+			// and any other left a stale origin for the next open — the same
+			// reason the Shortcuts cursor is reset at both ends.
+			m.notifyScroll = 0
 			// The taller box's rows land on cells the frame diff considers
 			// unchanged, so without this the shorter Settings box stays
 			// painted around it — the rule the Shortcuts row already follows.

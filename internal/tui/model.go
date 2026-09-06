@@ -447,6 +447,7 @@ type Model struct {
 	dialogCursor       int                    // highlighted item in dialog
 	shortcutsCursor    int                    // scroll position in the Shortcuts list
 	shortcutsScroll    int                    // window origin for the Shortcuts list
+	notifyScroll       int                    // window origin for the F1 → Settings → Notifications list
 	logViewerReturn    dialogScreen           // dialog to return to when the read-only log/text viewer closes (default About)
 	dialogEdit         bool                   // editing a settings value
 	dialogInput        string                 // text input buffer for editing
