@@ -3,3 +3,4 @@
 - [remote daemon string taint](project_remote_daemon_taint.md) — every workspace_state string is attacker-controlled when the daemon is remote; sanitizeRemoteText is opt-in per render site; width checks are neither sanitisers nor length bounds
 - [Semgrep in a git worktree](project_semgrep_worktree_scan.md) — scans 0 files and still reports success; copy changed files to a scratch dir, run from PowerShell, check paths.scanned
 - [project_uintptrescapes_com_helper.md](project_uintptrescapes_com_helper.md) — a hand-rolled COM vtable call helper needs //go:uintptrescapes; x/sys's own Call has it, yours does not
+- [log injection escaped by slog](project_log_injection_escaped_by_slog.md) — `%s` of an attacker string is NOT injectable (slog TextHandler quotes the whole msg); flag length-bounds + rate-limits instead, and the initLogging-returns-nil raw-stderr path
