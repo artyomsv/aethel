@@ -17,10 +17,18 @@ So a seam like `var readRuntimeSample = func() runtimeSample { ... }`
 `listFilesystemRoots` ("a package-var seam because the Unix arm always reports
 complete").
 
-The carve-out is narrow: it says **function** vars. A plain mutable value var
-that tests write (e.g. `var reproPaneCountOverride int` in
-`internal/tui/frame_state_sweep_test.go`) is still outside the exception and
-still worth flagging — prefer a parameter.
+The carve-out is narrow: it says **function** vars. A plain mutable VALUE var
+that tests write is still outside the exception and still worth flagging —
+prefer a parameter.
+
+That distinction was worth making on PR #205: a test helper briefly carried a
+`var reproPaneCountOverride int` that one file wrote and another read, and it
+was replaced with a plain `panes int` parameter on `buildReproModel`. **The var
+no longer exists** — do not cite it as a live example; cite the shape instead.
+The neighbouring precedent for when a value var genuinely must stay global is
+`explicitScrollback` in `internal/tui/pane.go`, which is an ATOMIC for exactly
+this reason ("a plain int makes every parallel test in the package racy against
+any other that builds a pane").
 
 **Why:** the global rule `~/.claude/rules/go-conventions.md` says "no global
 mutable state" flatly. Project CLAUDE.md / CONTRIBUTING outranks the personal
