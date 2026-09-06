@@ -2492,8 +2492,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case sidebarTickMsg:
-		// Re-render sidebar to update relative timestamps; schedule next tick if still visible
-		if m.notifications.visible && m.notifications.Count() > 0 {
+		// Re-render sidebar to update relative timestamps; schedule next tick if still visible.
+		//
+		// Gated on the STORED count, not Count(), which is now filtered: with
+		// every group hidden the chain would stop, and then pressing `a` to
+		// reveal the history would show ages frozen at whatever they were when
+		// the last event arrived.
+		if m.notifications.visible && len(m.notifications.events) > 0 {
 			return m, m.sidebarTick() // chain continues; running flag stays set
 		}
 		m.sidebarTickRunning = false

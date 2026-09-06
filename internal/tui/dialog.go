@@ -993,6 +993,10 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case f.submenu:
 			m.dialog = dialogNotifySettings
 			m.dialogCursor = firstNotifyRow(notifySettingsRows())
+			// The taller box's rows land on cells the frame diff considers
+			// unchanged, so without this the shorter Settings box stays
+			// painted around it — the rule the Shortcuts row already follows.
+			return m, tea.ClearScreen
 		case f.isBool:
 			f.set(&m, "")
 		default:

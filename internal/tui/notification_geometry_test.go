@@ -172,6 +172,68 @@ func TestNotificationLines_WideNameKeepsTheAgeOnTheSameRow(t *testing.T) {
 	}
 }
 
+// The cheap arithmetic pass and the styling renderer must produce the same
+// shape, or a click resolves against a layout that was never drawn.
+//
+// Asserted against a FIXED expected list, not by comparing the two functions to
+// each other — a self-comparison passes on any geometry, including a broken
+// one. The fixture mixes a card with an excerpt and one without, which is the
+// only thing that varies a card's height.
+func TestNotificationLineOwners_MatchesTheRenderer(t *testing.T) {
+	events := []ipc.PaneEventPayload{
+		geomEvent("TEST-1", "first", "an excerpt"),
+		geomEvent("TEST-2", "second", ""),
+	}
+
+	// separator, name, title, location, excerpt | separator, name, title,
+	// location | trailing separator.
+	want := []int{-1, 0, 0, 0, 0, -1, 1, 1, 1, -1}
+	got := notificationLineOwners(events)
+
+	if len(got) != len(want) {
+		t.Fatalf("owners length: got %d %v, want %d %v", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("owners[%d]: got %d, want %d (full: %v)", i, got[i], want[i], got)
+		}
+	}
+
+	// And the renderer agrees with that same fixed shape.
+	lines := notificationLines(events, 28, 0, false, liveLoc)
+	if len(lines) != len(want) {
+		t.Fatalf("renderer produced %d lines, owners %d — the two passes disagree",
+			len(lines), len(want))
+	}
+	for i := range want {
+		if lines[i].eventIdx != want[i] {
+			t.Errorf("renderer line %d owner: got %d, want %d", i, lines[i].eventIdx, want[i])
+		}
+	}
+}
+
+func TestNotificationLineOwners_Empty(t *testing.T) {
+	if got := notificationLineOwners(nil); len(got) != 0 {
+		t.Errorf("owners for an empty list: got %v, want none", got)
+	}
+}
+
+// Shrinking the terminal below the draw threshold leaves an undrawn strip. A
+// click there must resolve to nothing, or it selects and dismisses a card the
+// user cannot see.
+func TestEventIndexAtRow_RefusesWhenTheSidebarIsNotDrawn(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	for i := 0; i < 10; i++ {
+		nc.AddEvent(geomEvent("TEST-"+string(rune('a'+i)), "title", "excerpt"))
+	}
+	nc.ScrollBy(5, 20)
+
+	// height 4 => innerH 2, below View's `innerH < 3` refusal.
+	if got := nc.eventIndexAtRow(4, 4, liveLoc); got != -1 {
+		t.Errorf("eventIndexAtRow on an undrawn sidebar: got %d, want -1", got)
+	}
+}
+
 func TestScrollBy_ClampsAtBothEnds(t *testing.T) {
 	nc := NewNotificationCenter(30, 50)
 	for i := 0; i < 20; i++ {

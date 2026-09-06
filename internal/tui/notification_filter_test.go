@@ -158,6 +158,117 @@ func TestNotificationCenter_Aggregation_KeepsCursorOnSameVisibleEvent(t *testing
 	}
 }
 
+// The case the earlier aggregation test missed: the event that moves is
+// VISIBLE, so the visible order really does change under the cursor.
+func TestNotificationCenter_Aggregation_VisibleEventMovingKeepsSelection(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	nc.SetGroups(showOnly(groupProcess))
+
+	// Visible, newest-first: v3, v2, v1.
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v1", Type: "process_exit"})
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v2", Type: "process_exit"})
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v3", Type: "process_exit"})
+
+	nc.cursor = 2 // the user is reading TEST-v1, the oldest
+	if e := nc.SelectedEvent(); e == nil || e.ID != "TEST-v1" {
+		t.Fatalf("fixture: SelectedEvent = %+v, want TEST-v1", e)
+	}
+
+	// The MIDDLE visible event aggregates and jumps to the front, so TEST-v1
+	// is still last but everything above it reordered.
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v2", Type: "process_exit", Title: "again"})
+
+	if e := nc.SelectedEvent(); e == nil || e.ID != "TEST-v1" {
+		t.Errorf("SelectedEvent after a visible event moved: got %+v, want TEST-v1", e)
+	}
+}
+
+// `a` changes the size of the list the cursor indexes, so without chasing the
+// event by ID the selection lands on an unrelated card.
+func TestNotificationCenter_ShowAll_KeepsSelection(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	nc.SetGroups(showOnly(groupProcess))
+
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v1", Type: "process_exit"})
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-h1", Type: "output_idle"})
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-h2", Type: "output_idle"})
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v2", Type: "process_exit"})
+
+	nc.cursor = 1 // TEST-v1, the second visible event
+	nc.HandleKey("a")
+
+	if e := nc.SelectedEvent(); e == nil || e.ID != "TEST-v1" {
+		t.Errorf("SelectedEvent after 'a': got %+v, want TEST-v1", e)
+	}
+}
+
+// Revealing a group inserts events ABOVE the selection, which is the same
+// index-shift hazard.
+func TestNotificationCenter_SetGroups_KeepsSelection(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	nc.SetGroups(showOnly(groupProcess))
+
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v1", Type: "process_exit"})
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-h1", Type: "output_idle"})
+	nc.cursor = 0 // TEST-v1 is the only visible event
+
+	nc.SetGroups(showOnly(groupProcess, groupIdle))
+
+	if e := nc.SelectedEvent(); e == nil || e.ID != "TEST-v1" {
+		t.Errorf("SelectedEvent after revealing idle: got %+v, want TEST-v1", e)
+	}
+}
+
+// A new event arriving must not walk the selection away from the card the user
+// is reading — cursor 0 is the one position that follows the list instead.
+func TestNotificationCenter_Prepend_DoesNotDriftSelection(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-1", Type: "process_exit"})
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-2", Type: "process_exit"})
+	nc.cursor = 1 // reading TEST-1
+
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-3", Type: "process_exit"})
+
+	if e := nc.SelectedEvent(); e == nil || e.ID != "TEST-1" {
+		t.Errorf("SelectedEvent after a new event arrived: got %+v, want TEST-1", e)
+	}
+}
+
+func TestNotificationCenter_Prepend_CursorZeroFollowsTheNewest(t *testing.T) {
+	nc := NewNotificationCenter(30, 50)
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-1", Type: "process_exit"})
+	nc.cursor = 0
+
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-2", Type: "process_exit"})
+
+	if e := nc.SelectedEvent(); e == nil || e.ID != "TEST-2" {
+		t.Errorf("SelectedEvent at cursor 0: got %+v, want the newest (TEST-2)", e)
+	}
+}
+
+// The store is unfiltered and bounded, so hidden events compete for slots with
+// the ones the user asked to see. command_complete never aggregates, so an
+// ordinary shell session would otherwise evict every agent notification.
+func TestNotificationCenter_EvictsHiddenEventsFirst(t *testing.T) {
+	nc := NewNotificationCenter(30, 4)
+	nc.SetGroups(showOnly(groupProcess))
+
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v1", Type: "process_exit"})
+	nc.AddEvent(ipc.PaneEventPayload{ID: "TEST-v2", Type: "process_exit"})
+	for i := 0; i < 6; i++ {
+		nc.AddEvent(ipc.PaneEventPayload{
+			ID: "TEST-h" + string(rune('a'+i)), Type: "command_complete",
+		})
+	}
+
+	if len(nc.events) != 4 {
+		t.Fatalf("stored events: got %d, want 4 (the cap)", len(nc.events))
+	}
+	if nc.Count() != 2 {
+		t.Errorf("visible events: got %d, want 2 — hidden events evicted the visible ones", nc.Count())
+	}
+}
+
 // Cursor navigation must be bounded by the VISIBLE list, not the stored one.
 func TestNotificationCenter_CursorBoundedByVisible(t *testing.T) {
 	nc := NewNotificationCenter(30, 50)

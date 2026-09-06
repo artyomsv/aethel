@@ -137,6 +137,41 @@ func TestRightClickOnChrome_DismissesNothing(t *testing.T) {
 	}
 }
 
+// The fixtures above have no projects, so handleNotificationKey's navigate
+// branch returns early in all of them — they prove the click is ROUTED, not
+// that it lands. This one gives the newest card a real pane in a second
+// project, so the jump has somewhere to go.
+func TestClickOnCard_JumpsToThePane(t *testing.T) {
+	m := mouseTestModel(t)
+
+	// The newest event is the last one AddEvent saw: "TEST-h".
+	target := NewPaneModel("pane-test-h", 1024)
+	m.projects = []*ProjectModel{
+		{ID: "proj-a", Name: "A", tabs: []*TabModel{tabWith(NewPaneModel("pane-other", 1024))}},
+		{ID: "proj-b", Name: "B", tabs: []*TabModel{tabWith(target)}},
+	}
+	m.activeProject = 0
+
+	next, _ := m.Update(tea.MouseClickMsg{X: sidebarX(m), Y: 4, Button: tea.MouseLeft})
+	nm := next.(Model)
+
+	if nm.activeProject != 1 {
+		t.Errorf("activeProject: got %d, want 1 — the jump must cross a project boundary",
+			nm.activeProject)
+	}
+	if tab := nm.activeTabModel(); tab == nil || tab.ActivePane != "pane-test-h" {
+		t.Errorf("active pane after the click: got %+v, want pane-test-h", tab)
+	}
+	// History is pushed so Alt+Backspace returns to where the user was.
+	if len(nm.paneHistory) == 0 {
+		t.Error("paneHistory did not grow; there is no way back from the jump")
+	}
+	// The jump takes focus away from the sidebar and back to the pane.
+	if nm.sidebarFocused {
+		t.Error("sidebar still focused after a successful jump")
+	}
+}
+
 // A click on a card whose pane no longer exists must not navigate, and must
 // not push navigation history for a jump that never happened.
 func TestClickOnCard_DeadPaneDoesNotNavigate(t *testing.T) {

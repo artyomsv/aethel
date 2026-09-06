@@ -58,7 +58,34 @@ func NewNotificationCenter(width, maxEvents int) *NotificationCenter {
 // The cursor is clamped rather than reset: hiding a group must not throw away
 // a selection that is still visible.
 func (nc *NotificationCenter) SetGroups(f eventGroupFilter) {
-	nc.groups = f
+	nc.preserveSelection(func() { nc.groups = f })
+}
+
+// preserveSelection runs fn and then puts the cursor back on the same LOGICAL
+// event it was on, found by ID.
+//
+// Every mutation that can resize or reorder the visible list goes through this.
+// The cursor is an INDEX into a list whose contents just changed, so clamping
+// alone leaves it naming a different card — and the next Enter or `d` then acts
+// on that one. Revealing a hidden group, hiding the group the cursor was in,
+// pressing `a`, and a new event prepending are all that shape.
+//
+// When the event is gone (its group was hidden, it was dismissed) the cursor
+// clamps and the selection legitimately moves — there is nothing to keep.
+func (nc *NotificationCenter) preserveSelection(fn func()) {
+	var id string
+	if vis := nc.visibleEvents(); nc.cursor >= 0 && nc.cursor < len(vis) {
+		id = vis[nc.cursor].ID
+	}
+	fn()
+	if id != "" {
+		for i, e := range nc.visibleEvents() {
+			if e.ID == id {
+				nc.cursor = i
+				break
+			}
+		}
+	}
 	nc.clampCursor()
 }
 
@@ -108,50 +135,68 @@ func (nc *NotificationCenter) AddEvent(e ipc.PaneEventPayload) {
 		if existing.ID != e.ID {
 			continue
 		}
-		// Capture the cursor's current event ID so we can chase it through
-		// the move-to-front. The aggregated event itself is allowed to move
-		// — what we protect is selection of OTHER events.
-		//
-		// Read from and written back to the VISIBLE list, because that is what
-		// the cursor indexes. Using the stored slice on either side was
-		// correct only while the two lists were the same one, and would now
-		// silently jump the selection to an unrelated card whenever anything
-		// is hidden.
-		var cursorID string
-		if vis := nc.visibleEvents(); nc.cursor >= 0 && nc.cursor < len(vis) {
-			cursorID = vis[nc.cursor].ID
-		}
+		// The aggregated event itself is allowed to move to the front — what is
+		// protected is the selection of OTHER events. preserveSelection chases
+		// it through the VISIBLE list, which is what the cursor indexes.
+		idx := i
+		nc.preserveSelection(func() {
+			nc.events = append(nc.events[:idx], nc.events[idx+1:]...)
+			nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
+		})
+		return
+	}
 
-		nc.events = append(nc.events[:i], nc.events[i+1:]...)
+	prepend := func() {
 		nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
+		nc.evictOverCap()
+	}
 
-		// Restore cursor onto the same logical event. When the aggregated
-		// event WAS the cursor, follow it to its new position (the visual
-		// equivalent of "stay on the card you were looking at"). When the
-		// cursor was on a different event, find its new index.
-		if cursorID != "" {
-			for j, ev := range nc.visibleEvents() {
-				if ev.ID == cursorID {
-					nc.cursor = j
-					break
-				}
-			}
-		}
+	// Cursor 0 is the one position that follows the LIST rather than an event:
+	// the legacy contract is "cursor 0 = newest", so a fresh event landing at
+	// index 0 becomes the selection. That is also what a user who has not
+	// navigated expects.
+	//
+	// Anywhere else the cursor names a card the user chose, and a visible event
+	// prepending shifts every index by one — so leaving the cursor alone walks
+	// the selection one card further from the one they are reading with every
+	// arrival. On a busy workspace that is continuous drift.
+	if nc.cursor == 0 {
+		prepend()
 		nc.clampCursor()
 		return
 	}
-	nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
-	if len(nc.events) > nc.maxEvents {
-		nc.events = nc.events[:nc.maxEvents]
+	nc.preserveSelection(prepend)
+}
+
+// evictOverCap trims the store to maxEvents, dropping HIDDEN events first.
+//
+// The store is unfiltered and bounded, so hidden events compete for slots with
+// the ones the user asked to see. That is not theoretical: command_complete
+// carries a distinct title per command, so it never aggregates and takes a
+// fresh slot every time — an ordinary shell session would evict the agent
+// notifications the user actually wants, and pressing `a` would then reveal a
+// history made entirely of events they chose never to see.
+//
+// Oldest-first within each class, so the newest hidden event still outlives the
+// oldest hidden one and turning a group back on shows something recent.
+func (nc *NotificationCenter) evictOverCap() {
+	if len(nc.events) <= nc.maxEvents {
+		return
 	}
-	// The eviction above can drop the event the cursor was on, and with a
-	// filter installed the visible list can shrink by more than one.
-	nc.clampCursor()
-	// Deliberately do NOT shift the cursor on a fresh prepend. The legacy
-	// contract is "cursor 0 = newest event"; a fresh event landing at index
-	// 0 should become the new selection by default. Only the aggregation
-	// move-to-front above chases the logical event by ID, because that's the
-	// case where the user is actively reading a card that's about to bump.
+	for len(nc.events) > nc.maxEvents {
+		drop := -1
+		for i := len(nc.events) - 1; i >= 0; i-- {
+			if nc.groups != nil && !nc.showAll && !nc.groups.shows(nc.events[i].Type) {
+				drop = i
+				break
+			}
+		}
+		if drop < 0 {
+			// Nothing hidden left to give up: fall back to the oldest event.
+			drop = len(nc.events) - 1
+		}
+		nc.events = append(nc.events[:drop], nc.events[drop+1:]...)
+	}
 }
 
 // DismissSelected removes the selected event and returns its ID.
@@ -227,8 +272,11 @@ func (nc *NotificationCenter) HandleKey(key string) (action, eventID, paneID str
 		// as long as the user wants it. Not persisted: F1 -> Settings ->
 		// Notifications is where a lasting choice is made, and this is the
 		// affordance for looking at what the filter is currently hiding.
-		nc.showAll = !nc.showAll
-		nc.clampCursor()
+		//
+		// Through preserveSelection because the list it indexes changes size
+		// under it — the card the user was reading must still be the selection
+		// afterwards, or the next Enter jumps somewhere they did not choose.
+		nc.preserveSelection(func() { nc.showAll = !nc.showAll })
 		return "none", "", ""
 	case "enter":
 		if e := nc.SelectedEvent(); e != nil {
@@ -410,6 +458,42 @@ func notificationLines(events []ipc.PaneEventPayload, innerW, cursor int, focuse
 	return out
 }
 
+// cardLineCount is how many viewport lines one card occupies, INCLUDING its
+// leading separator: separator + name + title + location, plus an excerpt when
+// the event carries a message.
+//
+// It is the arithmetic model of notificationLines' loop, and the two must agree
+// exactly — TestNotificationLineOwners_MatchesTheRenderer pins that against a
+// fixture rather than by comparing the two functions to each other.
+func cardLineCount(e ipc.PaneEventPayload) int {
+	if e.Message != "" {
+		return 5
+	}
+	return 4
+}
+
+// notificationLineOwners is notificationLines' geometry without its styling:
+// one entry per viewport line, holding the index of the card that owns it, or
+// -1 for a separator.
+//
+// It exists because three callers need only the shape — clampScroll,
+// revealCursor and eventIndexAtRow — and the renderer styles every stored
+// event. With max_events at 200 that was four full styling passes per frame,
+// roughly 1600 lipgloss.Render calls, to put ~25 lines on screen.
+func notificationLineOwners(events []ipc.PaneEventPayload) []int {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(events)*5+1)
+	for i, e := range events {
+		out = append(out, -1) // separator
+		for n := cardLineCount(e) - 1; n > 0; n-- {
+			out = append(out, i)
+		}
+	}
+	return append(out, -1) // trailing separator
+}
+
 // notifyViewportHeight is how many card lines fit: the box interior less the
 // title row and the hints row.
 func notifyViewportHeight(height int) int {
@@ -435,7 +519,7 @@ func (nc *NotificationCenter) ScrollBy(delta, height int) {
 // loc may be nil: the locator changes a line's TEXT, never how many lines a
 // card occupies, so the line count is the same either way.
 func (nc *NotificationCenter) clampScroll(height int, loc paneLocator) {
-	total := len(notificationLines(nc.visibleEvents(), nc.width-2, nc.cursor, nc.focused, loc))
+	total := len(notificationLineOwners(nc.visibleEvents()))
 	maxScroll := total - notifyViewportHeight(height)
 	if maxScroll < 0 {
 		maxScroll = 0
@@ -451,16 +535,22 @@ func (nc *NotificationCenter) clampScroll(height int, loc paneLocator) {
 // eventIndexAtRow maps a screen row to the index (into visibleEvents()) of the
 // card drawn there, or -1 for chrome and out-of-range rows.
 func (nc *NotificationCenter) eventIndexAtRow(y, height int, loc paneLocator) int {
+	// The same refusal View makes. Without it, shrinking the terminal below the
+	// draw threshold leaves a non-zero scroll and an undrawn strip that still
+	// resolves clicks — so a click on nothing selects, jumps, or dismisses.
+	if nc.width-2 < 5 || height-2 < 3 {
+		return -1
+	}
 	vy := y - notifyViewportOffset
 	if vy < 0 || vy >= notifyViewportHeight(height) {
 		return -1
 	}
-	lines := notificationLines(nc.visibleEvents(), nc.width-2, nc.cursor, nc.focused, loc)
+	owners := notificationLineOwners(nc.visibleEvents())
 	idx := vy + nc.scroll
-	if idx < 0 || idx >= len(lines) {
+	if idx < 0 || idx >= len(owners) {
 		return -1
 	}
-	return lines[idx].eventIdx
+	return owners[idx]
 }
 
 // SelectIndex moves the cursor to a visible-list index and brings it into view.
@@ -479,10 +569,10 @@ func (nc *NotificationCenter) SelectIndex(i, height int) {
 // arrives: a new event landing at index 0 must not yank a user reading history
 // back to the top.
 func (nc *NotificationCenter) revealCursor(height int) {
-	lines := notificationLines(nc.visibleEvents(), nc.width-2, nc.cursor, nc.focused, nil)
+	owners := notificationLineOwners(nc.visibleEvents())
 	first, last := -1, -1
-	for i, l := range lines {
-		if l.eventIdx != nc.cursor {
+	for i, owner := range owners {
+		if owner != nc.cursor {
 			continue
 		}
 		if first < 0 {
@@ -520,8 +610,14 @@ func (nc *NotificationCenter) View(height int, loc paneLocator) string {
 	lines := notificationLines(nc.visibleEvents(), innerW, nc.cursor, nc.focused, loc)
 
 	if len(lines) == 0 {
-		out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("238")).
-			Render(truncateCells(strings.Repeat("·", innerW), innerW)))
+		// The separator is dropped at the minimum height. The title, this line,
+		// the message and the hints are four rows, and innerH-1 is the budget
+		// before the hints — at innerH == 3 the box would render one row taller
+		// than it declares, and lipgloss does not clip.
+		if innerH > 3 {
+			out = append(out, lipgloss.NewStyle().Foreground(lipgloss.Color("238")).
+				Render(truncateCells(strings.Repeat("·", innerW), innerW)))
+		}
 		// Naming the override matters only when something is actually being
 		// hidden: on an unfiltered center there is nothing for it to reveal.
 		empty := "No notifications"

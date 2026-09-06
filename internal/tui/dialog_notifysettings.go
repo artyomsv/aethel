@@ -124,13 +124,34 @@ func firstNotifyRow(rows []notifyToggle) int {
 	return 0
 }
 
+// settingsSubmenuIndex is where Esc puts the cursor on the way back — the
+// Settings row that opens this screen, found by its flag rather than by its
+// label or a literal index, so inserting a row above it cannot silently send
+// the user somewhere else.
+func settingsSubmenuIndex() int {
+	for i, f := range settingsFields() {
+		if f.submenu {
+			return i
+		}
+	}
+	return 0
+}
+
 // handleNotifySettingsKey drives the screen.
 func (m Model) handleNotifySettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	rows := notifySettingsRows()
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogSettings
-		m.dialogCursor = 0
+		// Back to the row that opened this screen, not to the top. Esc is
+		// back-navigation, and dropping the user at "Snapshot interval" makes
+		// them hunt for where they were.
+		m.dialogCursor = settingsSubmenuIndex()
+		// Both boxes are centred by lipgloss.Place and this one is markedly
+		// taller, so the tall box's own rows land on cells Bubble Tea's diff
+		// considers unchanged — the debris stays painted until something else
+		// forces a full frame. Same reason handleShortcutsKey clears.
+		return m, tea.ClearScreen
 	case "up", "k":
 		for i := m.dialogCursor - 1; i >= 0; i-- {
 			if !rows[i].heading {
