@@ -2809,13 +2809,26 @@ func (d *Daemon) notifyMCPControl(pane *Pane, title string) {
 		return
 	}
 	pane.PluginMu.Lock()
-	if !pane.LastMCPEventAt.IsZero() && time.Since(pane.LastMCPEventAt) < mcpControlCooldown {
+	// Keyed by TITLE. One timestamp per pane would drop "restarted this pane"
+	// whenever the agent had typed into it in the previous 30 s — which is the
+	// ordinary sequence, so the more consequential card would almost never
+	// appear.
+	if last, ok := pane.LastMCPEventAt[title]; ok && time.Since(last) < mcpControlCooldown {
 		pane.PluginMu.Unlock()
 		return
 	}
-	pane.LastMCPEventAt = time.Now()
+	if pane.LastMCPEventAt == nil {
+		pane.LastMCPEventAt = make(map[string]time.Time, 2)
+	}
+	pane.LastMCPEventAt[title] = time.Now()
 	tabID, name := pane.TabID, pane.Name
 	pane.PluginMu.Unlock()
+
+	// Logged as well as carded, for the reason notifyInputBlocked logs: the
+	// sidebar card is dismissable and rate-limited, so without this an agent's
+	// action can leave no durable record anywhere. The card is an awareness
+	// signal, not an audit trail — the role it keys on is self-declared.
+	log.Printf("pane %s: %s", pane.ID, title)
 
 	d.emitEvent(PaneEvent{
 		ID:        uuid.New().String(),
@@ -3024,7 +3037,20 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	if payload.Name != "" {
-		pane.Name = payload.Name
+		// Under PluginMu, and BOUNDED.
+		//
+		// The lock is required rather than tidy: the name is now read under
+		// PluginMu by five event emitters, and CI runs the race detector.
+		//
+		// The bound matches the one every self-reported hello string already
+		// takes (procreport.go's truncateField). This value is copied verbatim
+		// into PaneEvent.PaneName by every emitter, and the per-event wire caps
+		// in event.go bound Message and Data values but NOT PaneName — so an
+		// unbounded name is retained across up to maxEvents queued events and
+		// re-broadcast in every frame to every attached client.
+		pane.PluginMu.Lock()
+		pane.Name = truncateField(payload.Name, maxPaneNameField)
+		pane.PluginMu.Unlock()
 	}
 	if payload.CWD != "" {
 		// Defense-in-depth: skip UNC/device paths (\\host\share, //host/share,
@@ -5944,8 +5970,20 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.highlightPane(pane.ID)
 
-	// Before DestroyPane, which takes the pane's name out of the session maps.
-	d.notifyPaneDestroyed(pane, "mcp")
+	// Captured BEFORE DestroyPane, which takes the pane out of the session
+	// maps, but emitted only AFTER it succeeds: this handler answers
+	// Success:false on the error path below, and a card claiming a pane closed
+	// when it did not is worse than no card. notifyPaneDestroyed reads the name
+	// itself, so the fact is captured by holding the pointer.
+	//
+	// The actor comes from the connection's declared role, not from which
+	// handler ran. Any IPC client can send MsgDestroyPaneReq, so labelling
+	// every caller of this handler "mcp" would put an agent's name on a close
+	// the agent did not perform — handlePaneInput already resolves it this way.
+	closedBy := "user"
+	if d.hellos.roleOf(conn) == "bridge" {
+		closedBy = "mcp"
+	}
 
 	// Same cleanup as handleDestroyPane: spool file, ingester state, and
 	// persisted session-id files before the pane disappears.
@@ -5957,6 +5995,7 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
 		return
 	}
+	d.notifyPaneDestroyed(pane, closedBy)
 
 	// Auto-create replacement if the last normal pane in the tab was
 	// destroyed. Delegates to ensureTabNotEmpty (shared with handleDestroyPane)

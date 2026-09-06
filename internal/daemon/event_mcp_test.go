@@ -65,7 +65,7 @@ func TestNotifyMCPControl_EmitsOncePerCooldown(t *testing.T) {
 	// (PaneID, Title) and reuses the prior ID, so the observable difference is
 	// the count in Data, not the queue length.
 	pane.PluginMu.Lock()
-	pane.LastMCPEventAt = time.Now().Add(-mcpControlCooldown - time.Second)
+	pane.LastMCPEventAt["MCP agent typed here"] = time.Now().Add(-mcpControlCooldown - time.Second)
 	pane.PluginMu.Unlock()
 
 	d.notifyMCPControl(pane, "MCP agent typed here")
@@ -84,20 +84,41 @@ func TestNotifyMCPControl_EmitsOncePerCooldown(t *testing.T) {
 	}
 }
 
-// A restart is a different act from typing, so it carries a different title —
-// and because the queue aggregates by (PaneID, Title), a different title is
-// also what keeps the two from collapsing into one card.
-func TestNotifyMCPControl_DistinctTitlesDoNotAggregate(t *testing.T) {
+// The cooldown is keyed BY TITLE, and this is the case that forced it.
+//
+// An agent typically types into a pane and then restarts it, both well inside
+// 30 s. With one timestamp per pane the restart — the rarer and more
+// consequential act — was dropped every time, because the chatty one got there
+// first. Nothing here resets the cooldown: the two calls are back to back,
+// exactly as the production call sites make them.
+func TestNotifyMCPControl_RestartIsNotSwallowedByARecentType(t *testing.T) {
 	d := newNotifyTestDaemon(t)
 	pane := &Pane{ID: "pane-test-1", TabID: "tab-test-1", Name: "shell"}
 
 	d.notifyMCPControl(pane, "MCP agent typed here")
-	pane.PluginMu.Lock()
-	pane.LastMCPEventAt = time.Time{}
-	pane.PluginMu.Unlock()
 	d.notifyMCPControl(pane, "MCP agent restarted this pane")
 
-	if got := d.events.Count(); got != 2 {
-		t.Errorf("events for two different acts: got %d, want 2", got)
+	evs := d.events.Events()
+	if len(evs) != 2 {
+		t.Fatalf("events for a type followed by a restart: got %d, want 2", len(evs))
+	}
+	titles := map[string]bool{evs[0].Title: true, evs[1].Title: true}
+	if !titles["MCP agent typed here"] || !titles["MCP agent restarted this pane"] {
+		t.Errorf("titles: got %v, want both acts represented", titles)
+	}
+}
+
+// The same title inside the window is still suppressed — the cooldown is
+// per-title, not abolished.
+func TestNotifyMCPControl_SameTitleStillCoolsDown(t *testing.T) {
+	d := newNotifyTestDaemon(t)
+	pane := &Pane{ID: "pane-test-1", TabID: "tab-test-1", Name: "shell"}
+
+	d.notifyMCPControl(pane, "MCP agent typed here")
+	d.notifyMCPControl(pane, "MCP agent typed here")
+	d.notifyMCPControl(pane, "MCP agent typed here")
+
+	if got := d.events.Count(); got != 1 {
+		t.Errorf("events for three identical acts inside the window: got %d, want 1", got)
 	}
 }

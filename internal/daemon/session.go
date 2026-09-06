@@ -136,9 +136,14 @@ type Pane struct {
 	IdleNotified    bool      // Prevents re-firing for same idle period
 	LastIdleEventAt time.Time // Cooldown: last time a idle event was emitted
 	LastBellEventAt time.Time // Cooldown: last time a bell event was emitted
-	// LastMCPEventAt is the cooldown for the mcp_control card. Read and
+	// LastMCPEventAt is the mcp_control cooldown, keyed BY TITLE. Read and
 	// written under PluginMu, like the two beside it.
-	LastMCPEventAt time.Time
+	//
+	// Per title rather than per pane: an agent typically types into a pane and
+	// then restarts it, so one shared timestamp drops the restart — the rarer
+	// and more consequential act — every time, because the chatty one got there
+	// first.
+	LastMCPEventAt map[string]time.Time
 	// LastInputBlockedAt: cooldown for the input_blocked event emitted when
 	// the input queue overflows (child stopped reading stdin). Under PluginMu.
 	LastInputBlockedAt time.Time
