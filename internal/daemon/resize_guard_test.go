@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
+	"log"
+	"strings"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/ipc"
@@ -213,21 +216,38 @@ func TestHandleResizePane_DegenerateSize_IsRefused(t *testing.T) {
 // The refusal log runs once per pane per cooldown window. The client this floor
 // exists for re-sends every pane's size on every broadcast, so an unthrottled
 // line would rotate quild.log away — taking with it the history that explains
-// the flood.
-func TestNotifyDegenerateResize_LogsOncePerCooldownWindow(t *testing.T) {
-	d := &Daemon{session: NewSessionManager(4096)}
-	pane := &Pane{ID: "p1"}
+// the flood. That log line is the ONLY signal an operator gets that an old
+// client is doing this, since the refusal itself is silent by design.
+//
+// Driven through handleResizePane and asserted on the LOG OUTPUT, not on
+// LastDegenerateResizeAt: the timestamp is bookkeeping one step removed from
+// the effect, so a stamp-but-always-log version satisfies it, and so does
+// deleting the notify call from the handler or the Printf from inside it.
+// Those are three separate mutations that a timestamp assertion cannot see.
+func TestHandleResizePane_DegenerateResize_LogsOncePerCooldownWindow(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
 
-	d.notifyDegenerateResize(pane, 1, 1)
-	first := pane.LastDegenerateResizeAt
-	if first.IsZero() {
-		t.Fatal("the first refusal did not stamp the cooldown")
+	d := &Daemon{session: NewSessionManager(4096)}
+	d.session.panes["pane-1"] = &Pane{
+		ID: "pane-1", PTY: &fakeSession{},
+		appliedCols: 200, appliedRows: 50,
 	}
 
-	d.notifyDegenerateResize(pane, 1, 1)
-	if !pane.LastDegenerateResizeAt.Equal(first) {
-		t.Error("a refusal inside the cooldown window restamped it; the log " +
-			"would run once per pane per broadcast")
+	d.handleResizePane(resizeMsg(t, "pane-1", 1, 1))
+	d.handleResizePane(resizeMsg(t, "pane-1", 1, 1))
+
+	got := strings.Count(buf.String(), "refusing degenerate resize")
+	if got != 1 {
+		t.Fatalf("logged the refusal %d times, want exactly 1 — a client old "+
+			"enough to send 1x1 re-sends every pane's size on every broadcast\n%s",
+			got, buf.String())
+	}
+	if !strings.Contains(buf.String(), "pane-1") {
+		t.Errorf("the refusal log does not name the pane:\n%s", buf.String())
 	}
 }
 
@@ -238,8 +258,8 @@ func TestNotifyDegenerateResize_LogsOncePerCooldownWindow(t *testing.T) {
 // apty.NewWithSize floors only NON-POSITIVE values, so 1x1 survives it.
 func TestNewRestoredPTY_DegenerateStoredSizeFallsBackToTheDefault(t *testing.T) {
 	for _, tt := range []struct {
-		name             string
-		cols, rows       int
+		name               string
+		cols, rows         int
 		wantCols, wantRows int
 	}{
 		{"poisoned by the 1x1 bug", 1, 1, 0, 0},
