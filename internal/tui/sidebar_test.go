@@ -197,6 +197,12 @@ func TestSwitchProjectNotifiesDaemonAndResyncsGeometry(t *testing.T) {
 	fake := newFakeConn()
 	m := Model{
 		client: fake,
+		// A real geometry, because Model.terminalPaintable now gates every
+		// resize fan-out: the zero value is a terminal View() refuses to paint,
+		// and switchProject is only reachable from a key or a click, which
+		// cannot happen before a size has been reported.
+		width:  172,
+		height: 48,
 		projects: []*ProjectModel{
 			{ID: "proj-a", Dest: ""},
 			{ID: "proj-b", Dest: "gpu01", tabs: []*TabModel{tabWithPane("tab-9", "pane-9")}},
