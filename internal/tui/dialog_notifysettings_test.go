@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -184,6 +185,40 @@ func TestSettings_DesktopNotificationsRowRemoved(t *testing.T) {
 	for _, f := range settingsFields() {
 		if f.label == "Desktop notifications" {
 			t.Error(`"Desktop notifications" is still a top-level Settings row`)
+		}
+	}
+}
+
+// renderDialog clamps WIDTH to the terminal but never HEIGHT — there is no
+// window and no scroll. A screen taller than the terminal is drawn straight off
+// the bottom edge, which is the exact overflow this submenu exists to prevent,
+// so its own height is a hard constraint rather than a style preference.
+//
+// 24 rows is the budget: the box costs 2 border rows plus dialogBorder's
+// Padding(1,2) top and bottom, so the content must fit a 30-row terminal — a
+// small but entirely ordinary window — with room to spare.
+func TestRenderNotifySettingsDialog_FitsASmallTerminal(t *testing.T) {
+	m := newModelForDialogTest(t)
+	m.width, m.height = 100, 30
+
+	got := len(strings.Split(m.renderNotifySettingsDialog(), "\n"))
+	const budget = 24
+	if got > budget {
+		t.Errorf("dialog content is %d rows, want at most %d — it would overflow a %d-row terminal",
+			got, budget, m.height)
+	}
+}
+
+// Each row's hint has to survive the width clamp, or the row renders as a
+// truncated label with no value.
+func TestRenderNotifySettingsDialog_RowsFitTheBoxWidth(t *testing.T) {
+	m := newModelForDialogTest(t)
+	m.width, m.height = 100, 40
+
+	limit := dialogInnerWidth(m.width, dialogWidth)
+	for _, line := range strings.Split(m.renderNotifySettingsDialog(), "\n") {
+		if w := lipgloss.Width(line); w > limit {
+			t.Errorf("row %q is %d cells wide, want at most %d", ansi.Strip(line), w, limit)
 		}
 	}
 }

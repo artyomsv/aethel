@@ -65,7 +65,7 @@ func notifySettingsRows() []notifyToggle {
 			// toggle is the auto-register behaviour this design rejected. It
 			// names the command instead.
 			label: "Enabled",
-			hint:  "quil notify setup registers them",
+			hint:  "needs notify setup",
 			get:   func(m *Model) string { return m.desktopState().label() },
 			set: func(m *Model) {
 				m.cfg.Notification.Desktop.Enabled = !m.cfg.Notification.Desktop.Enabled
@@ -74,7 +74,7 @@ func notifySettingsRows() []notifyToggle {
 		},
 		{
 			label: "On blocked",
-			hint:  "a pane is waiting for you",
+			hint:  "waiting on you",
 			get:   func(m *Model) string { return boolStr(m.cfg.Notification.Desktop.Blocked) },
 			set: func(m *Model) {
 				m.cfg.Notification.Desktop.Blocked = !m.cfg.Notification.Desktop.Blocked
@@ -83,7 +83,7 @@ func notifySettingsRows() []notifyToggle {
 		},
 		{
 			label: "On done",
-			hint:  "a turn finished while you were away",
+			hint:  "finished while away",
 			get:   func(m *Model) string { return boolStr(m.cfg.Notification.Desktop.Done) },
 			set: func(m *Model) {
 				m.cfg.Notification.Desktop.Done = !m.cfg.Notification.Desktop.Done
@@ -91,21 +91,21 @@ func notifySettingsRows() []notifyToggle {
 			},
 		},
 		{label: "Sidebar events", heading: true},
-		group("Agent turns", "Working on… / Reply ready",
+		group("Agent turns", "start + reply ready",
 			func(c *config.EventGroupsConfig) *bool { return &c.AgentTurn }),
-		group("Agent blocked", "permission, waiting for you",
+		group("Agent blocked", "permission prompts",
 			func(c *config.EventGroupsConfig) *bool { return &c.AgentBlocked }),
-		group("Agent subagents", "subagent + task start/stop",
+		group("Agent subagents", "subagent start/stop",
 			func(c *config.EventGroupsConfig) *bool { return &c.AgentSubagent }),
-		group("Agent session", "session end, compaction",
+		group("Agent session", "end, compaction",
 			func(c *config.EventGroupsConfig) *bool { return &c.AgentSession }),
 		group("Process", "exited / failed",
 			func(c *config.EventGroupsConfig) *bool { return &c.Process }),
 		group("Pane", "closed, pinned, marked",
 			func(c *config.EventGroupsConfig) *bool { return &c.Pane }),
-		group("MCP", "an agent drove a pane",
+		group("MCP", "agent drove a pane",
 			func(c *config.EventGroupsConfig) *bool { return &c.MCP }),
-		group("System", "input blocked, worktree, unknown",
+		group("System", "blocked, worktree",
 			func(c *config.EventGroupsConfig) *bool { return &c.System }),
 		group("Commands", "every shell command",
 			func(c *config.EventGroupsConfig) *bool { return &c.Commands }),
@@ -161,6 +161,12 @@ func (m Model) renderNotifySettingsDialog() string {
 	b.WriteString(dialogSubtle.Render("  changes persist to config.toml"))
 	b.WriteString("\n")
 
+	// One line per row, hint INLINE. A hint on its own line would put the
+	// screen at 35 content rows, and renderDialog clamps width but never
+	// height — there is no window and no scroll, so a box taller than the
+	// terminal is drawn straight off the bottom edge. That is the exact
+	// overflow this submenu exists to prevent.
+	inner := dialogInnerWidth(m.width, dialogWidth)
 	for i, r := range notifySettingsRows() {
 		if r.heading {
 			b.WriteString("\n  " + dialogTitle.Render(r.label) + "\n")
@@ -172,11 +178,16 @@ func (m Model) renderNotifySettingsDialog() string {
 			cursor = "  > "
 			labelStyle = labelStyle.Foreground(lipgloss.Color("230")).Bold(true)
 		}
-		b.WriteString(cursor + labelStyle.Render(r.label) + dialogValStyle.Render(r.get(&m)) + "\n")
+		row := cursor + labelStyle.Render(r.label) + dialogValStyle.Render(r.get(&m))
 		if r.hint != "" {
-			b.WriteString(dialogSubtle.Render("      " + r.hint))
-			b.WriteByte('\n')
+			// Budgeted against what the row has ALREADY spent, because the
+			// value column is not fixed: "on (run notify setup)" is 21 cells
+			// where "on" is 2. The hint is the part that gives way.
+			if room := inner - lipgloss.Width(row) - 2; room > 3 {
+				row += "  " + dialogSubtle.Render(truncateRunes(r.hint, room))
+			}
 		}
+		b.WriteString(row + "\n")
 	}
 
 	b.WriteByte('\n')

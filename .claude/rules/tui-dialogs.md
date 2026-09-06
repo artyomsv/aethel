@@ -316,6 +316,19 @@ It is a separate screen because `renderSettingsDialog` paints every row
 unwindowed and unscrolled. Thirteen more rows in the top-level list would push
 the box off the bottom of an ordinary terminal.
 
+**The new screen is subject to the same limit it was created to dodge, and hit
+it once already.** `renderDialog` clamps WIDTH to the terminal and never height,
+and `lipgloss.Place` does not clip — the rule this file states for the history
+list, the processes list and the session picker. A first version gave every
+toggle its own hint line and rendered 35 content rows, which draws straight off
+the bottom of a 30-row terminal with no scroll and no window to recover it. The
+hint is therefore INLINE, budgeted against what the row has already spent
+(`inner - lipgloss.Width(row) - 2`) rather than against a fixed value column —
+`on (run notify setup)` is 21 cells where `on` is 2, so a fixed column either
+truncates the value or wastes the line. `TestRenderNotifySettingsDialog_
+FitsASmallTerminal` pins the row budget; adding rows means shortening something
+else, not letting it grow.
+
 Its rows are a different type from `settingsField`: `notifyToggle` has no edit
 mode and its `set` takes no value, because every row is a plain on/off switch.
 Heading rows are inert and the cursor steps over them in BOTH directions, so
