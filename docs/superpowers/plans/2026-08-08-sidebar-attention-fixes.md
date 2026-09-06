@@ -330,6 +330,23 @@ git commit -m "fix(tui): keep the spinner running while a pane is parked"
 
 ### Task 3: focusing a pane clears its blocked mark
 
+> **SUPERSEDED — do not implement this task as written.** The behaviour below
+> was reversed during the same effort and never shipped. On master, focusing a
+> pane clears `unseen` ONLY; `blockedSince` and `blockedReason` survive focus,
+> and `paneRow` suppresses the glyph for the focused pane instead. Real input
+> (`answerBlockedByInput`) is what clears the blocked state.
+>
+> Why the reversal: `ackFocusedPane` runs before Update's switch on EVERY
+> message, and the 1 s size poll guarantees one — so clearing the mark on focus
+> erased it roughly one tick after it was set, which is indistinguishable from
+> a mark that was never set at all. It also withdrew the desktop toast raised
+> on that mark's rising edge before the user could act on it.
+>
+> See `internal/tui/pane.go:136` (the `blockedSince` field comment),
+> `Model.ackFocusedPane` in `internal/tui/model.go`, and
+> `internal/tui/ctxmenu.go:140`. Kept below as the historical record of what
+> was planned, not as an instruction.
+
 Item 6.2.
 
 **Files:**
