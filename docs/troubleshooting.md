@@ -299,6 +299,42 @@ quil notify setup --remove
 
 Dev builds register separately (`quil-dev://`, `Quil (dev).lnk`), so `quil-dev.exe notify setup --remove` will not touch a production registration.
 
+## Borders look broken next to a pane that prints emoji
+
+**Symptom.** A pane border, or the notification sidebar's edge, is drawn one
+column off on some rows. The affected rows are the ones where the program in the
+pane printed an emoji that your terminal font does not have — codex's
+`✨ Update available!` banner is the usual one, and the tell is that the glyph
+renders as an empty box or a question mark.
+
+**Cause: your font, not Quil.** An emoji like U+2728 is defined as
+double-width, and Quil allots it two columns — its terminal emulator and its
+frame measurement agree exactly on that, which is pinned by
+`TestPaneRow_EmojiWidthAgreesBetweenEmulatorAndMeasurer`. When the font has no
+glyph for it, the terminal substitutes a **single-column** replacement box. The
+row is then one column shorter on screen than Quil built it, so everything to the
+right of the glyph — the pane's border, and the sidebar composited after it —
+shifts left by one. The reverse also happens: a font that falls back to a colour
+emoji face draws about two columns for a glyph Unicode calls single-width.
+
+Quil cannot detect this. It knows what Unicode says a glyph measures; it cannot
+know what your font will actually draw.
+
+**Fixes, best first.**
+
+1. **Use a font with emoji coverage.** Cascadia Code, JetBrains Mono and the
+   Nerd Font variants all cover the glyphs the AI tools print. This is a real
+   fix — the artifact stops happening.
+2. **`Alt+Shift+L`** forces a full repaint and clears the debris. It comes back
+   the next time the pane reprints that line, so it is a hatch rather than a fix.
+3. Silence the source. Codex's banner appears once per session; upgrading codex
+   stops it until the next release.
+
+The debris persists rather than healing on its own because the terminal's real
+state has diverged from what Bubble Tea believes it painted, so its cell diff
+sees nothing to rewrite. That is also why an unrelated action — switching tabs,
+opening a dialog — often clears it.
+
 ## Log files — where to look
 
 | File | What's in it |
