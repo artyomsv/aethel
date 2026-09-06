@@ -6,3 +6,4 @@
 - [Race hides throughput flakes](project_race_hides_throughput_flakes.md) — green `-race` does NOT clear an ipc producer/consumer test; instrumentation slows the producer. Run plain, repeatedly, vs the pre-change file
 - [verify claims in container](project_verify_claims_in_container.md) — throwaway `zz_probe_test.go` + raw docker `go test -v -run`; `dev.sh test` passes neither flag
 - [bubbletea key decoding](reference_bubbletea_key_decoding.md) — the parser is in `ultraviolet/decoder.go`, not bubbletea; ESC-prefix Meta yields `alt+M` (case in Code, no ModShift)
+- [Go /cpu/classes/* is GC-stale](reference_go_cpu_class_metrics_stale.md) — those metrics advance only at GC mark termination; a no-GC window deltas to 0s. `/gc/cycles` + `/gc/pauses` are live; use GetProcessTimes/Getrusage for real CPU
