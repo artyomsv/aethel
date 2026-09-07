@@ -132,6 +132,12 @@ func Mounts(m Mapping) []mount {
 		// The pane's own subtree: hook spool, Claude config, object store.
 		mount{m.HostPaneRoot, ContainerQuil, false},
 	)
+	if m.HostQuild != "" {
+		// Read-only: the hook binary is Quil's own, and nothing inside the
+		// container has any business rewriting the program the host asked it
+		// to run.
+		ms = append(ms, mount{m.HostQuild, ContainerQuild, true})
+	}
 	return ms
 }
 

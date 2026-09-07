@@ -5015,7 +5015,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		if ok, why := d.sandboxAvailable(context.Background()); !ok {
 			return fmt.Errorf("sandbox unavailable: %s", why)
 		}
-		m, err := d.prepareSandbox(context.Background(), pane, sandboxImage)
+		m, err := d.prepareSandbox(context.Background(), pane, p.Name, sandboxImage)
 		if err != nil {
 			return err
 		}

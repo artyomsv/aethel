@@ -72,13 +72,23 @@ func sandboxEmptyDir(quilDir string) string { return filepath.Join(sandboxRoot(q
 // container keeps seeing the old content — and a container that commits before
 // the alternates line exists leaves the host answering "fatal: bad object
 // HEAD" for that worktree until it does.
-func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, image string) (sandbox.Mapping, error) {
+func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, image string) (sandbox.Mapping, error) {
 	quilDir := config.QuilDir()
 
 	m, err := sandbox.NewMapping(ctx, quilDir, pane.CWD, pane.ID)
 	if err != nil {
 		return sandbox.Mapping{}, err
 	}
+
+	// The hook binary. Resolved BEFORE anything is created, because a
+	// claude-code pane refuses to spawn without one and there is no point
+	// laying out a tree for a pane that will not start.
+	arch := d.sandboxCap.get(ctx).Arch
+	quild, err := d.linuxQuildForPane(ctx, pluginName, arch)
+	if err != nil {
+		return sandbox.Mapping{}, err
+	}
+	m.HostQuild = quild
 
 	// The per-pane tree. Every directory the hook writes into lives under
 	// this one root, which is why the hook binary needs no change: it derives
@@ -252,18 +262,32 @@ func hostHookPaths(quilDir string) hookPaths {
 
 // containerHookPaths writes into the pane's own tree and names it as the
 // container sees it.
+//
+// ExePath stays empty when no hook binary was mounted, and the preps then
+// disable hooks for the pane — which is the honest outcome. Naming a path
+// nothing mounted would have claude invoke a file that is not there on every
+// hook event.
 func containerHookPaths(m sandbox.Mapping) hookPaths {
-	return hookPaths{
+	hp := hookPaths{
 		HostDir: m.HostPaneRoot,
 		RefDir:  sandbox.ContainerQuil,
-		ExePath: sandbox.ContainerQuild,
 	}
+	if m.HostQuild != "" {
+		hp.ExePath = sandbox.ContainerQuild
+	}
+	return hp
 }
 
 // exe resolves the quild path the hook command should invoke.
 func (hp hookPaths) exe() (string, error) {
 	if hp.ExePath != "" {
 		return hp.ExePath, nil
+	}
+	if hp.RefDir != hp.HostDir {
+		// A container with no mounted quild. Answering the HOST executable
+		// here would register a hook command naming a path that does not
+		// exist inside the container.
+		return "", fmt.Errorf("no linux hook binary is mounted for this pane")
 	}
 	return quildExeFn()
 }

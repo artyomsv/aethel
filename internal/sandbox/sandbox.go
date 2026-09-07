@@ -111,6 +111,12 @@ type Mapping struct {
 
 	// Slug is the container working-directory name under /work.
 	Slug string
+
+	// HostQuild is the Linux quild the container's hooks invoke, on the host.
+	// Empty means this pane runs without hooks — legal for opencode and
+	// codex, refused for claude-code, where a missing session record turns
+	// the NEXT restart into an exit-129 crash rather than a degraded pane.
+	HostQuild string
 }
 
 // ContainerWorkdir is where the checkout is mounted.

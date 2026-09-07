@@ -492,7 +492,22 @@ type Model struct {
 	// pluginAvailableFor would read it from another goroutine — no caller does,
 	// and none should start: resolve the answer in Update and capture the bool.
 	// disconnectDest drops a destination's entry with the rest of its tables.
-	destAvail        map[string]map[string]bool
+	destAvail map[string]map[string]bool
+	// destSandbox files each daemon's "can I run a container" answer under
+	// its OWN destination, for the same reason destAvail does — the answer
+	// describes the machine that sent it. Same goroutine discipline: written
+	// and read only in Update and View.
+	destSandbox map[string]ipc.SandboxCapRespPayload
+	// sandboxDialogAvail pins the answer the create dialog OPENED with.
+	//
+	// The capability is answered asynchronously and the daemon re-probes on a
+	// timer, so an answer landing mid-dialog would change the field count and
+	// kind under a live cursor and shift the dialog's own chrome height. The
+	// destination is pinned at open for the same reason.
+	sandboxDialogAvail bool
+	// sandboxOn and sandboxImage are the create dialog's own row state.
+	sandboxOn    bool
+	sandboxImage string
 	lastWidth        int        // last known window width (for persistence)
 	lastHeight       int        // last known window height (for persistence)
 	createPaneStep   int        // 0=category, 1=plugin, 2=instance form, 3=split direction
@@ -2653,6 +2668,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// MUST re-arm the listen loop, like every other IPC response branch.
 		cmd := m.applyPluginList(msg.Dest, msg.Resp)
 		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case sandboxCapMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch.
+		// The dialog's own copy of the answer is NOT updated here: it is
+		// pinned at open, so a late answer cannot move the fields under a
+		// live cursor.
+		m.applySandboxCap(msg.Dest, msg.Resp)
+		return m, m.listenForMessages()
 
 	case browseDirMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch —
@@ -6979,6 +7002,18 @@ func (m Model) listenForMessages() tea.Cmd {
 			// daemon — which is the wrong-machine bug this RPC exists to
 			// remove, wearing a different hat.
 			return pluginListMsg{Resp: payload, Dest: msg.Origin}
+
+		case ipc.MsgSandboxCapResp:
+			var payload ipc.SandboxCapRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode sandbox_cap_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			// Stamped, for the same reason the plugin list is: the answer
+			// describes the daemon that sent it, and an unstamped one files
+			// under "" — the local daemon — which would have a remote host's
+			// Docker engine decide whether the LOCAL project can sandbox.
+			return sandboxCapMsg{Resp: payload, Dest: msg.Origin}
 
 		case ipc.MsgBrowseDirResp:
 			var payload ipc.BrowseDirRespPayload
