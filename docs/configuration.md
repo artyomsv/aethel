@@ -478,3 +478,31 @@ sequence_timeout = "0"
 **Layering.** Bindings resolve in three layers, lowest first: Quil's shipped defaults, then the selected preset, then your `[bindings]` table. Each layer *replaces* the one below per action — it does not merge alternatives. An action nobody mentions keeps the default; `""` explicitly unbinds.
 
 Action IDs are listed in **F1 → Shortcuts** alongside their current keys. Key spec syntax — sequences, alternatives, `${prefix}` — is documented in [Keybindings](keybindings.md#key-sequences).
+
+## `[sandbox]`
+
+Controls AI panes that run inside a Docker container. Full guide:
+[Sandbox panes](sandbox-panes.md).
+
+```toml
+[sandbox]
+# "" (default) — sign in inside the container, once per pane.
+# "token"      — forward CLAUDE_CODE_OAUTH_TOKEN from the daemon's own
+#                environment. Recommended with more than one sandbox pane: with
+#                no credential file to share, a per-pane config directory costs
+#                nothing. The pane gives up Remote Control and claude.ai
+#                connectors. Quil never reads, copies, stores or refreshes a
+#                credential in either mode, and the token never reaches a
+#                command line or a log.
+auth = ""
+
+# One Claude config directory for every sandbox pane, so you sign in once.
+# It also merges them into ONE trust domain: that directory holds hooks and MCP
+# server definitions, so any sandbox pane can then write something every other
+# sandbox pane's claude executes inside its own container.
+shared_claude_config = false
+
+# Pre-fills the dialog's image field. Ships empty and has no built-in fallback —
+# Quil publishes no image.
+default_image = ""
+```

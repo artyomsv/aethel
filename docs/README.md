@@ -27,6 +27,7 @@
 | Doc | What's in it |
 |---|---|
 | [Plugin reference](plugin-reference.md) | Author your own pane types in TOML — every field, every strategy, every example |
+| [Sandbox panes](sandbox-panes.md) | Run an AI pane inside a Docker container — image requirements, sign-in, what the sandbox does and does not bound |
 
 ## Project
 

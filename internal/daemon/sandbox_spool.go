@@ -69,8 +69,22 @@ func (f *spoolForwarder) forget(paneID string) {
 // Whole lines only. A hook append that is still in flight leaves a partial
 // trailing line, and forwarding it would hand the daemon's parser a truncated
 // JSON object — the same reason Spool itself stops at the last complete "\n".
-func (f *spoolForwarder) forward(srcPath, dstPath, paneID string) (int64, error) {
-	src, err := os.Open(srcPath)
+// The source is opened through an os.Root over the pane's own tree, which
+// refuses symlink and ".." escapes. The file is written by a process inside
+// the container, and on a Linux host a symlink planted there resolves on the
+// HOST when the daemon follows it — so an unrooted open would read whatever
+// the agent pointed the spool at and forward it into the notification sidebar.
+func (f *spoolForwarder) forward(rootDir, srcRel, dstPath, paneID string) (int64, error) {
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil // no sandbox tree for this pane
+		}
+		return 0, err
+	}
+	defer root.Close()
+
+	src, err := root.Open(srcRel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil // the pane has produced no events yet
@@ -166,9 +180,9 @@ func lastNewline(b []byte) int {
 func (d *Daemon) forwardSandboxSpools() {
 	quilDir := config.QuilDir()
 	for _, paneID := range d.sandboxPaneIDs() {
-		src := filepath.Join(sandboxRoot(quilDir), "panes", paneID, "events", paneID+".jsonl")
+		paneRoot := filepath.Join(sandboxRoot(quilDir), "panes", paneID)
 		dst := filepath.Join(quilDir, "events", paneID+".jsonl")
-		n, err := d.spoolFwd.forward(src, dst, paneID)
+		n, err := d.spoolFwd.forward(paneRoot, "events/"+paneID+".jsonl", dst, paneID)
 		if err != nil {
 			log.Printf("sandbox: pane %s: forward events: %v", paneID, err)
 			continue

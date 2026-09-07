@@ -489,3 +489,52 @@ quil
 ```
 
 Your `~/.quil/plugins/*.toml` files are part of "state" — if you customized them, back up the directory before nuking.
+
+## Sandbox panes
+
+### The "Run in a Docker container" row is missing
+
+Quil asks the machine the *daemon* runs on, not the machine you are typing on.
+The row appears only when that machine has Docker running **linux** containers.
+Docker Desktop in Windows-containers mode answers a probe and then fails every
+linux image, so it counts as unavailable.
+
+Check with `docker info` on the daemon's machine. The answer is cached for 30
+seconds, so start Docker and reopen the dialog.
+
+### The pane dies immediately
+
+- `exec: "claude": executable file not found in $PATH` — the image has no agent
+  binary. See [Sandbox panes](sandbox-panes.md) for what the image must provide.
+- A pull is not a hang. `docker run` streams progress into the pane the first
+  time it fetches an image.
+- The container's logs survive the pane: `docker logs quil-<pane-id>`.
+
+### Every git command in a repository errors
+
+```
+error: object directory …/sandbox/panes/<id>/objects does not exist;
+       check .git/objects/info/alternates
+```
+
+A sandbox pane's object store was removed while its reference remained. Quil
+repairs this at daemon start, unless `$QUIL_HOME` itself was wiped — which also
+removes the record of where to look.
+
+Manual fix: delete the offending line from
+`<repo>/.git/objects/info/alternates`, or the file if it is the only line.
+
+### A claude pane refuses to start with "hook binary unavailable"
+
+Quil fetches a Linux `quild` matching its own version and mounts it in, so the
+container's hooks can write notifications and session records. A claude pane
+refuses to run without one: with no session record, its *next* restart fails
+with `Session ID … is already in use`.
+
+On a development build there is no published release to fetch from — point
+`QUIL_SANDBOX_QUILD` at a locally built linux `quild`.
+
+### The agent says its edits had no effect
+
+File watchers do not see changes across a Docker Desktop bind mount on Windows.
+Run them in polling mode (`CHOKIDAR_USEPOLLING=1`, `--watch-poll`).

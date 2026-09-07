@@ -104,16 +104,17 @@ func TestClaudeConfigDirForPane(t *testing.T) {
 func forwardFixture(t *testing.T) (*spoolForwarder, string, string) {
 	t.Helper()
 	dir := t.TempDir()
-	return newSpoolForwarder(), filepath.Join(dir, "src.jsonl"), filepath.Join(dir, "dst.jsonl")
+	return newSpoolForwarder(), dir, filepath.Join(dir, "dst.jsonl")
 }
 
 func TestSpoolForwarder_ForwardsWholeLinesOnly(t *testing.T) {
-	f, src, dst := forwardFixture(t)
+	f, root, dst := forwardFixture(t)
+	src := filepath.Join(root, "src.jsonl")
 	// The second line is still being written: no trailing newline.
 	if err := os.WriteFile(src, []byte(`{"a":1}`+"\n"+`{"b":2`), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := f.forward(src, dst, "p1"); err != nil {
+	if _, err := f.forward(root, "src.jsonl", dst, "p1"); err != nil {
 		t.Fatalf("forward: %v", err)
 	}
 	body, err := os.ReadFile(dst)
@@ -128,14 +129,15 @@ func TestSpoolForwarder_ForwardsWholeLinesOnly(t *testing.T) {
 // The offset must advance, or every pass re-forwards everything and the
 // sidebar fills with duplicates.
 func TestSpoolForwarder_DoesNotResend(t *testing.T) {
-	f, src, dst := forwardFixture(t)
+	f, root, dst := forwardFixture(t)
+	src := filepath.Join(root, "src.jsonl")
 	if err := os.WriteFile(src, []byte("a\nb\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := f.forward(src, dst, "p1"); err != nil {
+	if _, err := f.forward(root, "src.jsonl", dst, "p1"); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	n, err := f.forward(src, dst, "p1")
+	n, err := f.forward(root, "src.jsonl", dst, "p1")
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -148,17 +150,18 @@ func TestSpoolForwarder_DoesNotResend(t *testing.T) {
 // the forwarder. Seeking past the end would silently forward nothing for the
 // life of the pane.
 func TestSpoolForwarder_RecoversFromTruncation(t *testing.T) {
-	f, src, dst := forwardFixture(t)
+	f, root, dst := forwardFixture(t)
+	src := filepath.Join(root, "src.jsonl")
 	if err := os.WriteFile(src, []byte("aaaa\nbbbb\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := f.forward(src, dst, "p1"); err != nil {
+	if _, err := f.forward(root, "src.jsonl", dst, "p1"); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	if err := os.WriteFile(src, []byte("c\n"), 0o600); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
-	n, err := f.forward(src, dst, "p1")
+	n, err := f.forward(root, "src.jsonl", dst, "p1")
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -170,7 +173,8 @@ func TestSpoolForwarder_RecoversFromTruncation(t *testing.T) {
 // Spool caps a line but not a file. Without a cap here, an agent writing a
 // gigabyte would have it copied onto the host's disk at copy speed.
 func TestSpoolForwarder_CapsOnePass(t *testing.T) {
-	f, src, dst := forwardFixture(t)
+	f, root, dst := forwardFixture(t)
+	src := filepath.Join(root, "src.jsonl")
 	line := strings.Repeat("x", 1023) + "\n"
 	var b strings.Builder
 	for b.Len() < sandboxForwardCap*2 {
@@ -179,7 +183,7 @@ func TestSpoolForwarder_CapsOnePass(t *testing.T) {
 	if err := os.WriteFile(src, []byte(b.String()), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	n, err := f.forward(src, dst, "p1")
+	n, err := f.forward(root, "src.jsonl", dst, "p1")
 	if err != nil {
 		t.Fatalf("forward: %v", err)
 	}
@@ -191,15 +195,16 @@ func TestSpoolForwarder_CapsOnePass(t *testing.T) {
 // A pane id can be reused after a teardown. Carrying the old offset over would
 // have the new pane silently forward nothing until it caught up.
 func TestSpoolForwarder_ForgetResetsTheOffset(t *testing.T) {
-	f, src, dst := forwardFixture(t)
+	f, root, dst := forwardFixture(t)
+	src := filepath.Join(root, "src.jsonl")
 	if err := os.WriteFile(src, []byte("a\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := f.forward(src, dst, "p1"); err != nil {
+	if _, err := f.forward(root, "src.jsonl", dst, "p1"); err != nil {
 		t.Fatalf("forward: %v", err)
 	}
 	f.forget("p1")
-	n, err := f.forward(src, dst, "p1")
+	n, err := f.forward(root, "src.jsonl", dst, "p1")
 	if err != nil {
 		t.Fatalf("after forget: %v", err)
 	}
@@ -209,8 +214,8 @@ func TestSpoolForwarder_ForgetResetsTheOffset(t *testing.T) {
 }
 
 func TestSpoolForwarder_MissingSourceIsNotAnError(t *testing.T) {
-	f, src, dst := forwardFixture(t)
-	if n, err := f.forward(src, dst, "p1"); err != nil || n != 0 {
+	f, root, dst := forwardFixture(t)
+	if n, err := f.forward(root, "src.jsonl", dst, "p1"); err != nil || n != 0 {
 		t.Errorf("forward on a pane with no events = %d, %v; want 0, nil", n, err)
 	}
 }

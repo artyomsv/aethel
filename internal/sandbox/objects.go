@@ -214,9 +214,25 @@ func writeAlternates(path string, lines []string) error {
 //
 // Copies never clobber. Object names are content addresses, so a name already
 // present is the same bytes, and rewriting it would be pure risk.
+// It reads the store through an os.Root, which refuses symlink and ".."
+// escapes. That is not belt-and-braces: the store is written by a process
+// inside the container, and on a Linux host — including the remote-daemon case
+// — a symlink planted there resolves on the HOST when the daemon follows it.
+// Measured: `ln -s /etc/passwd …` inside the container succeeded on the bind
+// mount, and a host-side reader printed the host's own file. On Windows the
+// same link is an inert reparse point, so a Windows-only test never sees it.
 func HarvestObjects(m Mapping) (copied int, err error) {
 	src := m.HostObjects()
 	dst := joinHost(m.HostGitCommon, "objects")
+
+	root, err := os.OpenRoot(src)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("sandbox: open object store: %w", err)
+	}
+	defer root.Close()
 
 	entries, err := os.ReadDir(src)
 	if os.IsNotExist(err) {
@@ -229,13 +245,13 @@ func HarvestObjects(m Mapping) (copied int, err error) {
 		name := e.Name()
 		switch {
 		case e.IsDir() && isShardDir(name):
-			n, err := harvestShard(filepath.Join(src, name), filepath.Join(dst, name))
+			n, err := harvestShard(root, name, filepath.Join(dst, name))
 			copied += n
 			if err != nil {
 				return copied, err
 			}
 		case e.IsDir() && name == "pack":
-			n, err := harvestPack(filepath.Join(src, name), filepath.Join(dst, name))
+			n, err := harvestPack(root, name, filepath.Join(dst, name))
 			copied += n
 			if err != nil {
 				return copied, err
@@ -251,8 +267,11 @@ func HarvestObjects(m Mapping) (copied int, err error) {
 func isShardDir(name string) bool { return len(name) == 2 && isHex(name) }
 
 // harvestShard copies the well-formed loose objects out of one shard.
-func harvestShard(src, dst string) (int, error) {
-	entries, err := os.ReadDir(src)
+//
+// Reads go through the root, so a shard the agent replaced with a symlink to
+// somewhere else on the host resolves to nothing rather than to that place.
+func harvestShard(root *os.Root, shard, dst string) (int, error) {
+	entries, err := readDirIn(root, shard)
 	if err != nil {
 		return 0, fmt.Errorf("sandbox: read shard: %w", err)
 	}
@@ -265,7 +284,7 @@ func harvestShard(src, dst string) (int, error) {
 		if e.IsDir() || !isHex(n) || (len(n) != 38 && len(n) != 62) {
 			continue
 		}
-		ok, err := copyNoClobber(filepath.Join(src, n), filepath.Join(dst, n))
+		ok, err := copyNoClobber(root, shard+"/"+n, filepath.Join(dst, n))
 		if err != nil {
 			return copied, err
 		}
@@ -279,8 +298,8 @@ func harvestShard(src, dst string) (int, error) {
 // harvestPack copies pack files. Container-side `git repack -a -d` succeeds
 // even though `git gc` does not — it takes no gc.pid.lock — so packs are a
 // real case, not a theoretical one.
-func harvestPack(src, dst string) (int, error) {
-	entries, err := os.ReadDir(src)
+func harvestPack(root *os.Root, dir, dst string) (int, error) {
+	entries, err := readDirIn(root, dir)
 	if err != nil {
 		return 0, fmt.Errorf("sandbox: read pack dir: %w", err)
 	}
@@ -293,7 +312,7 @@ func harvestPack(src, dst string) (int, error) {
 		if !strings.HasSuffix(n, ".pack") && !strings.HasSuffix(n, ".idx") && !strings.HasSuffix(n, ".rev") {
 			continue
 		}
-		ok, err := copyNoClobber(filepath.Join(src, n), filepath.Join(dst, n))
+		ok, err := copyNoClobber(root, dir+"/"+n, filepath.Join(dst, n))
 		if err != nil {
 			return copied, err
 		}
@@ -304,21 +323,38 @@ func harvestPack(src, dst string) (int, error) {
 	return copied, nil
 }
 
-// copyNoClobber copies src to dst unless dst exists, reporting whether it
-// wrote. It writes to a temp file and renames, so a harvest interrupted
-// half-way never leaves a truncated object under a name git will trust.
-func copyNoClobber(src, dst string) (bool, error) {
+// readDirIn lists one directory inside the rooted tree.
+func readDirIn(root *os.Root, name string) ([]os.DirEntry, error) {
+	d, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	return d.ReadDir(-1)
+}
+
+// copyNoClobber copies rel (inside root) to dst unless dst exists, reporting
+// whether it wrote. It writes to a temp file and renames, so a harvest
+// interrupted half-way never leaves a truncated object under a name git will
+// trust.
+//
+// The SOURCE is opened through the root and the DESTINATION is not: the source
+// is agent-writable and the destination is the user's own repository, which
+// this process owns.
+func copyNoClobber(root *os.Root, rel, dst string) (bool, error) {
 	if _, err := os.Stat(dst); err == nil {
 		return false, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return false, fmt.Errorf("sandbox: create object dir: %w", err)
 	}
-	in, err := os.Open(src)
+	in, err := root.Open(rel)
 	if err != nil {
 		// The container may have repacked this object away between the
-		// readdir and here. That is not a failure: the pack it went into is
-		// harvested by the same pass.
+		// readdir and here, or replaced it with a link the root refuses.
+		// Neither is a failure worth stopping the pass for: a repacked
+		// object arrives in the pack this same pass harvests, and a refused
+		// link is exactly the outcome the root exists to produce.
 		if os.IsNotExist(err) {
 			return false, nil
 		}
