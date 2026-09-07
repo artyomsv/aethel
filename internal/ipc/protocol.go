@@ -214,6 +214,16 @@ const (
 	MsgDirsExistReq  = "dirs_exist_req"
 	MsgDirsExistResp = "dirs_exist_resp"
 
+	// Docker sandbox capability (pane setup dialog). Asks the daemon whether
+	// IT can run a sandbox pane, because the container runs on the daemon's
+	// machine and the client may be a laptop attached to a remote host.
+	//
+	// Its own single-flight slot, like every other pair here: the dialog
+	// asks this while it is also browsing and listing worktrees, so a shared
+	// guard would make each step fail exactly when it followed another.
+	MsgSandboxCapReq  = "sandbox_cap_req"
+	MsgSandboxCapResp = "sandbox_cap_resp"
+
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
@@ -302,6 +312,39 @@ type CreatePanePayload struct {
 	// grammar before it reaches argv, and never passes --force. The MCP bridge
 	// deliberately does not expose this field.
 	Worktree *WorktreeSpec `json:"worktree,omitempty"`
+	// Sandbox asks the daemon to run this pane's process inside a Docker
+	// container with its checkout bind-mounted, instead of on the host.
+	//
+	// A POINTER for the same reason Worktree is: nil keeps every existing
+	// producer — MCP create_pane, restore, the plugin dialog — on the
+	// unchanged path with no branch anywhere in the daemon, and it says "this
+	// create is different" structurally rather than by a zero value someone
+	// can forget.
+	//
+	// Trust: like Overlay, ResumeSessionID and Worktree, any IPC client can
+	// set this. Image is the only thing the user controls and the daemon
+	// validates it against a conservative grammar before it reaches argv;
+	// nothing else about the container — mounts, flags, environment — is
+	// reachable from the wire. The MCP bridge deliberately does not expose
+	// the field.
+	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
+}
+
+// SandboxSpec asks the daemon to run a pane inside a container.
+//
+// One field, deliberately. Every other property of the container is derived
+// by the daemon from the pane's own checkout, and a wire field for any of them
+// — a mount, a flag, a user — would be a way to reach past the sandbox from
+// the outside, which is the one thing this feature exists to prevent.
+type SandboxSpec struct {
+	// Image is the container image, supplied by the user.
+	//
+	// Quil publishes no image and ships no default: running Claude Code
+	// inside a vendor's own image triggers the Commercial Terms conditions
+	// for "preinstalling or running Claude Code in your products or
+	// services", while a user-supplied image means Quil pre-installs nothing
+	// and that section never applies.
+	Image string `json:"image"`
 }
 
 // WorktreeSpec asks the daemon to create a linked worktree for a new pane.
@@ -426,6 +469,15 @@ type FirstPaneSpec struct {
 	// before either reaches argv.
 	ResumeSessionID string        `json:"resume_session_id,omitempty"`
 	Worktree        *WorktreeSpec `json:"worktree,omitempty"`
+	// Sandbox is here for the same reason Worktree is, and its absence was a
+	// silent isolation failure: the setup dialog's own designed flow — new
+	// tab, worktree chosen, sandbox on — reaches the daemon through THIS
+	// type, and handleCreateTab hand-copies a fixed field list into the
+	// create it builds. A spec that stops at CreatePanePayload therefore
+	// produces a tab whose agent runs on the HOST, in a fresh worktree, with
+	// no container and no error. Any field added here must also be added to
+	// that copy in createFirstPaneWorktree.
+	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
 }
 
 type DestroyTabPayload struct {
@@ -1177,6 +1229,37 @@ type DirsExistReqPayload struct {
 type DirsExistRespPayload struct {
 	Paths []string `json:"paths,omitempty"`
 	Error string   `json:"error,omitempty"`
+}
+
+// SandboxCapReqPayload asks whether the daemon's machine can run a sandbox
+// pane. No fields: the answer describes the daemon, not any particular
+// request.
+type SandboxCapReqPayload struct{}
+
+// SandboxCapRespPayload answers a capability request.
+//
+// Every field describes the DAEMON's Docker engine, which is why the client
+// files the answer against the destination that sent it rather than adopting
+// it globally. One registry serving every destination is what made a remote
+// host without `claude` grey out Claude Code in the local project.
+type SandboxCapRespPayload struct {
+	// Available is the one field a caller should gate on. It requires an
+	// engine that is reachable AND running linux containers: Docker Desktop
+	// in Windows-containers mode answers an info probe perfectly well and
+	// then fails every linux image at `run`, so reachability alone would
+	// offer the user a pane that cannot start.
+	Available bool `json:"available"`
+
+	ServerVersion string `json:"server_version,omitempty"`
+	OSType        string `json:"os_type,omitempty"`
+	// Arch is normalised to Go's spelling (amd64, arm64). Docker reports the
+	// machine form — x86_64, aarch64 — and the only consumer is a release
+	// asset name, which is in Go's.
+	Arch string `json:"arch,omitempty"`
+	// Error explains an unavailable engine in the user's terms. Rendered
+	// through sanitizeRemoteText like every other daemon-supplied string: on
+	// a remote daemon this is text from a machine the user may not control.
+	Error string `json:"error,omitempty"`
 }
 
 // GitReposReqPayload asks the daemon which git repositories are near CWD —
