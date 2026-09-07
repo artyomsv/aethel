@@ -274,6 +274,10 @@ func New(cfg config.Config) *Daemon {
 		snapGens:   make(map[string]uint64),
 	}
 	d.sandboxReg = newSandboxRegistry(config.QuilDir())
+	if cfg.Sandbox.SharedClaudeConfig {
+		// Recorded for the resume path, which has no Daemon to ask.
+		setSharedClaudeRoot(filepath.Join(sandboxRoot(config.QuilDir()), "claude"))
+	}
 	d.spoolFwd = newSpoolForwarder()
 	d.sandboxReg.load()
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)

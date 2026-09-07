@@ -52,6 +52,7 @@ func TestMounts_MainWorkingTreeNeverEntersTheContainer(t *testing.T) {
 		m.HostDotGitOverlay():              true,
 		m.HostAdminGitdirOverlay():         true,
 		m.HostEmptyDir:                     true,
+		m.HostEmptyFile:                    true, // shadows config.worktree
 		m.HostPaneRoot:                     true,
 	}
 	for _, mt := range Mounts(m) {
@@ -400,4 +401,69 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// With extensions.worktreeConfig enabled, git reads per-worktree settings from
+// <admin>/config.worktree — including core.fsmonitor and core.hooksPath, which
+// host git EXECUTES. The admin directory must stay writable for the index and
+// HEAD, so that one file is shadowed.
+func TestMounts_WorktreeConfigIsShadowed(t *testing.T) {
+	m := testMapping(t)
+	target := ContainerGitDir + "/worktrees/" + m.AdminName + "/config.worktree"
+	var seen bool
+	for _, mt := range Mounts(m) {
+		if mt.container != target {
+			continue
+		}
+		seen = true
+		if !mt.readOnly {
+			t.Error("config.worktree is writable: the agent can set core.fsmonitor and " +
+				"host git will execute it")
+		}
+		if mt.host != m.HostEmptyFile {
+			t.Errorf("shadowed by %s, want the always-empty file", mt.host)
+		}
+	}
+	if !seen {
+		t.Error("config.worktree is not shadowed — the writable admin mount includes it")
+	}
+}
+
+// `-v host:container[:mode]` splits on colons, so a legal Linux host path
+// containing one is parsed as extra volume fields and the pane fails to start
+// with a docker error nobody can trace back to Quil. --mount uses named fields.
+func TestRunArgs_UsesMountNotDashV(t *testing.T) {
+	m := testMapping(t)
+	args := RunArgs(Spec{Image: "img"}, m, Identity{}, "linux", nil, "claude", nil)
+	for i, a := range args {
+		if a == "-v" {
+			t.Fatalf("argv uses -v at %d: a host path containing a colon would be mis-split", i)
+		}
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--mount") || !strings.Contains(joined, "type=bind,source=") {
+		t.Error("mounts are not expressed with --mount")
+	}
+	if !strings.Contains(joined, ",readonly") {
+		t.Error("no read-only mount was emitted; the ro flag did not survive the switch")
+	}
+}
+
+// A colon in the host path must pass through untouched now.
+func TestMountArg_PreservesAColonInTheHostPath(t *testing.T) {
+	got := mount{host: "/srv/a:b/wt", container: "/work/x", readOnly: true}.arg()
+	if !strings.Contains(got, "source=/srv/a:b/wt") {
+		t.Errorf("arg = %q, want the colon preserved in the source field", got)
+	}
+}
+
+// A comma cannot be expressed in a --mount source and docker offers no
+// escaping, so it is refused at the boundary rather than mis-split into
+// options nobody chose.
+func TestNewMapping_RefusesACommaInAHostPath(t *testing.T) {
+	stubRealPath(t)
+	stubGit(t, "/projects/a,b/wt", "/projects/main/.git", "/projects/main/.git/worktrees/wt")
+	if _, err := NewMapping(context.Background(), "/home/u/.quil", "/projects/a,b/wt", "p1"); err == nil {
+		t.Fatal("a host path containing a comma was accepted")
+	}
 }

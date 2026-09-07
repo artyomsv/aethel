@@ -53,10 +53,22 @@ type mount struct {
 	readOnly  bool
 }
 
+// arg renders one --mount argument.
+//
+// `--mount`, not `-v`. The short form is `host:container[:mode]`, so a host
+// path containing a colon — legal on Linux and macOS, and reachable through a
+// checkout directory, $QUIL_HOME, or the shared config directory — is parsed
+// as extra volume fields and the pane fails to start with a docker error the
+// user cannot connect to Quil. `--mount` uses named comma-separated fields,
+// which colons pass through untouched.
+//
+// A comma in a host path is the residual, and NewMapping refuses one rather
+// than emitting an argument docker would mis-split: `--mount` has no escaping
+// for it either, so refusing at the boundary is the only honest answer.
 func (mt mount) arg() string {
-	s := mt.host + ":" + mt.container
+	s := "type=bind,source=" + mt.host + ",target=" + mt.container
 	if mt.readOnly {
-		s += ":ro"
+		s += ",readonly"
 	}
 	return s
 }
@@ -91,6 +103,15 @@ func Mounts(m Mapping) []mount {
 			mount{joinHost(m.HostGitCommon, "refs"), ContainerGitDir + "/refs", false},
 			mount{joinHost(m.HostGitCommon, "logs"), ContainerGitDir + "/logs", false},
 			mount{m.HostAdminDir, ContainerGitDir + "/worktrees/" + m.AdminName, false},
+			// …but NOT its config.worktree. With extensions.worktreeConfig
+			// enabled, git reads per-worktree configuration from that file —
+			// including values host git EXECUTES, core.fsmonitor and
+			// core.hooksPath among them. The admin directory has to be
+			// writable for the index and HEAD, so the one executable-config
+			// file inside it is shadowed with an empty read-only file. Same
+			// shape as the objects/info shadows, same reason: a directory the
+			// agent must write, containing one thing it must not.
+			mount{m.HostEmptyFile, ContainerGitDir + "/worktrees/" + m.AdminName + "/config.worktree", true},
 			// The worktree itself.
 			mount{m.HostWorktree, m.ContainerWorkdir(), false},
 			// The two overlays, which make the host's absolute gitdir paths
@@ -258,7 +279,7 @@ func RunArgs(spec Spec, m Mapping, id Identity, hostGOOS string, extraEnv []stri
 		args = append(args, "--user", id.User)
 	}
 	for _, mt := range Mounts(m) {
-		args = append(args, "-v", mt.arg())
+		args = append(args, "--mount", mt.arg())
 	}
 	for _, e := range Env(m, id, hostGOOS) {
 		args = append(args, "-e", e)

@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,12 @@ func TestHostTranscriptPath_RewritesAContainerPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("QUIL_HOME", home)
 	p := sandboxPane(t, "img")
+	// The containment check now resolves symlinks, so the config directory has
+	// to exist — a link planted under an agent-writable tree is what it
+	// defends against, and a path that cannot be resolved at all is refused.
+	if err := os.MkdirAll(sandboxClaudeConfigDir(home, p.ID), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 
 	got := hostTranscriptPath(p, "/quil/claude/projects/-work-wt/abc.jsonl")
 	if got == "" {
@@ -207,5 +214,55 @@ func TestSpoolForwarder_MissingSourceIsNotAnError(t *testing.T) {
 	f, root, dst := forwardFixture(t)
 	if n, err := f.forward(root, "src.jsonl", dst, "p1"); err != nil || n != 0 {
 		t.Errorf("forward on a pane with no events = %d, %v; want 0, nil", n, err)
+	}
+}
+
+// Shared mode mounts one directory over the per-pane one, but the CONTAINER
+// path is /quil/claude either way — so mapping to the per-pane host path
+// regardless classifies every valid shared transcript as missing, and a
+// restored pane takes the fresh --session-id path for a session that already
+// has a transcript: exit 129.
+func TestHostTranscriptPath_FollowsSharedMode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIL_HOME", home)
+	shared := filepath.Join(home, "sandbox", "claude")
+	if err := os.MkdirAll(shared, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	prev := sharedClaudeRoot
+	setSharedClaudeRoot(shared)
+	t.Cleanup(func() { sharedClaudeRoot = prev })
+
+	got := hostTranscriptPath(sandboxPane(t, "img"), "/quil/claude/projects/-w/abc.jsonl")
+	if got == "" {
+		t.Fatal("a valid shared-mode transcript path was rejected")
+	}
+	if !strings.HasPrefix(filepath.ToSlash(got), filepath.ToSlash(shared)) {
+		t.Errorf("hostTranscriptPath = %q, want it under the SHARED config dir %q", got, shared)
+	}
+}
+
+// The container can create symlinks under its own writable /quil/claude, and
+// the accepted path is handed to a host os.Stat — so a link pointing outside
+// the tree is an existence oracle for any host path.
+func TestHostTranscriptPath_RefusesASymlinkOutOfTheTree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a symlink needs privilege on Windows; the hazard is the Linux/remote host")
+	}
+	home := t.TempDir()
+	t.Setenv("QUIL_HOME", home)
+	p := sandboxPane(t, "img")
+
+	cfg := sandboxClaudeConfigDir(home, p.ID)
+	if err := os.MkdirAll(cfg, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(cfg, "projects")); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	if got := hostTranscriptPath(p, "/quil/claude/projects/-w/abc.jsonl"); got != "" {
+		t.Errorf("a symlink escaped the pane's config dir: %q", got)
 	}
 }

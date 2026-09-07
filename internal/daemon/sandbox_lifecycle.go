@@ -209,9 +209,27 @@ func (d *Daemon) teardownSandbox(ctx context.Context, paneID string) {
 		log.Printf("sandbox: pane %s: harvested %d objects at teardown", paneID, n)
 	}
 
-	// 2. Kill the container. Everything below deletes files it may be holding.
+	// 2. Kill the container. Everything below deletes files it may be holding,
+	//    so a FAILED removal stops the teardown rather than merely logging.
+	//
+	//    Continuing would delete the alternates line, the pane tree and the
+	//    overlays out from under a container that is still running — the
+	//    agent then writes into a deleted tree, its commits become unreachable
+	//    (the line naming their object store is gone), and the caller goes on
+	//    to force-remove the worktree while a live process holds it. Leaving
+	//    everything in place is recoverable: the startup sweep reaps the
+	//    container and runs this teardown again.
 	if err := sandboxRemoveFn(ctx, paneID); err != nil {
-		log.Printf("sandbox: pane %s: remove container: %v", paneID, err)
+		log.Printf("sandbox: pane %s: container removal FAILED (%v) — leaving its object store, "+
+			"overlays and alternates entry in place; the next daemon start will reap it", paneID, err)
+		d.emitEvent(PaneEvent{
+			PaneID:   paneID,
+			Type:     "sandbox_teardown_deferred",
+			Title:    "Container could not be removed",
+			Message:  "Its files are left in place so nothing is deleted under a running agent. Quil will clean up on the next start.",
+			Severity: "warning",
+		})
+		return
 	}
 
 	// 3. Remove the line — and ONLY this pane's line. Another sandbox pane on

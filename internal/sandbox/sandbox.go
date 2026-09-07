@@ -108,6 +108,9 @@ type Mapping struct {
 	// objects/info directories read-only. Shared by every pane; nothing ever
 	// writes to it.
 	HostEmptyDir string
+	// HostEmptyFile is a permanently empty FILE, used to shadow individual
+	// executable-config files read-only. Shared by every pane.
+	HostEmptyFile string
 
 	// Slug is the container working-directory name under /work.
 	Slug string
@@ -219,6 +222,7 @@ func NewMapping(ctx context.Context, quilDir, hostCWD, paneID string) (Mapping, 
 		HostPaneRoot:   joinHost(quilDir, "sandbox", "panes", paneID),
 		HostOverlayDir: joinHost(quilDir, "sandbox", "overlays", paneID),
 		HostEmptyDir:   joinHost(quilDir, "sandbox", "empty"),
+		HostEmptyFile:  joinHost(quilDir, "sandbox", "empty-file"),
 	}
 
 	// A linked worktree is exactly "my git dir is not the shared one". The
@@ -259,6 +263,16 @@ func refuse(quilDir string, m Mapping) error {
 		// unguarded: the whole point of the check is that we cannot see
 		// where it really is.
 		return fmt.Errorf("%w: cannot resolve QUIL_HOME %q: %v", ErrUnsafeMapping, quilDir, err)
+	}
+	// A comma in a host path cannot be expressed as a `--mount` source: the
+	// fields are comma-separated and docker offers no escaping. Refused at the
+	// boundary rather than emitted as an argument docker would mis-split into
+	// options nobody chose.
+	for _, p := range []string{m.HostWorktree, m.HostGitCommon, m.HostPaneRoot, m.HostOverlayDir} {
+		if strings.Contains(p, ",") {
+			return fmt.Errorf("%w: %q contains a comma, which a docker --mount source cannot express",
+				ErrUnsafeMapping, p)
+		}
 	}
 	for _, cand := range []struct{ what, path string }{
 		{"the worktree", m.HostWorktree},

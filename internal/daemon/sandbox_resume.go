@@ -46,14 +46,66 @@ func hostTranscriptPath(pane *Pane, recorded string) string {
 	if !strings.HasPrefix(slashed, prefix) {
 		return ""
 	}
-	hostRoot := filepath.Join(sandboxRoot(config.QuilDir()), "panes", pane.ID, "claude")
+	// The container path is the same in both modes — /quil/claude — but what
+	// backs it is not: shared mode mounts one directory over the per-pane one.
+	// Mapping to the per-pane path regardless would classify every valid
+	// SHARED transcript as missing, and a restored pane would take the fresh
+	// --session-id path for a session that already has one: exit 129.
+	hostRoot := sandboxClaudeConfigDir(config.QuilDir(), pane.ID)
+	if sharedClaudeRoot != nil && *sharedClaudeRoot != "" {
+		hostRoot = *sharedClaudeRoot
+	}
 	joined := filepath.Join(hostRoot, filepath.FromSlash(strings.TrimPrefix(slashed, prefix)))
 	// filepath.Join CLEANS a traversal rather than refusing it, so the
 	// containment test has to run on the RESULT, not on the input.
 	if !withinHostDir(hostRoot, joined) {
 		return ""
 	}
+	// And on the REAL path. The container can create symlinks under its own
+	// writable /quil/claude, and the accepted value is handed to a host
+	// os.Stat — so a link pointing outside the tree turns this into an
+	// existence oracle for any host path. Resolving the deepest existing
+	// ancestor is what catches that: the leaf itself frequently does not
+	// exist, which is the whole question being asked.
+	if !realPathWithin(hostRoot, joined) {
+		return ""
+	}
 	return joined
+}
+
+// sharedClaudeRoot is the shared config directory when the user opted into
+// one, and nil otherwise. A package var rather than a config read so the
+// resume path needs no Daemon, which is how every test here drives it.
+var sharedClaudeRoot *string
+
+// setSharedClaudeRoot records the mode for the resume path. Called once at
+// daemon start.
+func setSharedClaudeRoot(dir string) { sharedClaudeRoot = &dir }
+
+// realPathWithin resolves the deepest EXISTING ancestor of child and reports
+// whether it is still inside dir.
+//
+// The leaf usually does not exist — "is this transcript there" is the question
+// — so resolving the full path would answer "no" for every legitimate case.
+// Walking up to the first component that does exist is what makes the check
+// about the LINKS on the way rather than about the target.
+func realPathWithin(dir, child string) bool {
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		// No config directory yet: nothing can be inside it.
+		return false
+	}
+	p := child
+	for {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return withinHostDir(realDir, resolved)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return false
+		}
+		p = parent
+	}
 }
 
 // withinHostDir reports whether child is dir or lives under it, comparing in

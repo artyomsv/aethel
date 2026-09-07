@@ -93,6 +93,17 @@ func splitSandboxType(typ string) (plugin string, sandboxed bool) {
 	return typ, false
 }
 
+// sandboxMappingFn is the seam that makes prepareSandbox drivable without a
+// real git repository.
+//
+// It exists because the alternative was a test that calls writeOverlays
+// directly — which passes even when nothing calls it, and a mutation deleting
+// the call from prepareSandbox stayed green. The overlays are what stop a
+// container-side `git worktree prune` deleting the host's worktree
+// registration with uncommitted work in it, so "nobody proves it is written"
+// is not an acceptable state for them.
+var sandboxMappingFn = sandbox.NewMapping
+
 // sandboxRoot is the directory holding every per-pane sandbox tree.
 func sandboxRoot(quilDir string) string { return filepath.Join(quilDir, "sandbox") }
 
@@ -113,7 +124,7 @@ func sandboxEmptyDir(quilDir string) string { return filepath.Join(sandboxRoot(q
 func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, image string) (sandbox.Mapping, error) {
 	quilDir := config.QuilDir()
 
-	m, err := sandbox.NewMapping(ctx, quilDir, pane.CWD, pane.ID)
+	m, err := sandboxMappingFn(ctx, quilDir, pane.CWD, pane.ID)
 	if err != nil {
 		return sandbox.Mapping{}, err
 	}
@@ -151,6 +162,16 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, ima
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return sandbox.Mapping{}, fmt.Errorf("sandbox: create %s: %w", dir, err)
 		}
+	}
+
+	// The empty FILE used to shadow config.worktree. Created here rather than
+	// in the directory loop above because it is a file, and docker would
+	// otherwise invent a root-owned DIRECTORY for a missing bind source —
+	// which git then refuses to read as a config file.
+	if f, err := os.OpenFile(m.HostEmptyFile, os.O_CREATE|os.O_WRONLY, 0o400); err == nil {
+		f.Close()
+	} else if !os.IsExist(err) {
+		return sandbox.Mapping{}, fmt.Errorf("sandbox: create empty shadow file: %w", err)
 	}
 
 	if err := writeOverlays(m); err != nil {
