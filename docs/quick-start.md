@@ -37,9 +37,9 @@ Don't memorize the [full keymap](keybindings.md) yet. Five keys handle 90% of da
 
 | Key | What it does |
 |---|---|
-| `F1` | About menu → Settings, Plugins, log viewers, Memory |
+| `F1` | About menu → Settings, Shortcuts, Plugins, Processes, log viewers, Update, What's New |
 | `Ctrl+N` | New typed pane (Claude Code, OpenCode, Codex, terminal, …) |
-| `Ctrl+T` | New tab |
+| `Ctrl+T` | New tab — asks which pane it opens with (`Esc` cancels) |
 | `Ctrl+W` | Close active pane |
 | `Ctrl+Q` | Quit (workspace persists — re-launch picks up where you left off) |
 
@@ -49,10 +49,12 @@ You can navigate panes with `Alt+Arrow` (spatial — left/right/up/down focus th
 
 Press `Ctrl+N`. The plugin picker opens with categories:
 
-- **Terminal** — system shell
+- **Terminal** — system shell, plus a variant that keeps its content when the pane is squeezed
 - **AI Assistant** — Claude Code, OpenCode (beta), Codex
 - **Remote** — SSH (POC)
-- **Tools** — Stripe (POC)
+- **Tools** — lazygit, hunk, k9s, lazysql, Stripe (POC)
+
+A tool whose binary is not on your `PATH` is listed greyed out with a link to its project, rather than hidden.
 
 Pick **AI Assistant → Claude Code** (if you have `claude` on your `PATH`). The setup dialog asks for:
 
@@ -100,7 +102,7 @@ Restart the client. Then ask the AI:
 
 You should see a JSON array of every pane with its id, type, tab, and CWD. If you don't, see [MCP → Troubleshooting](mcp.md#troubleshooting).
 
-The full [MCP guide](mcp.md) covers all 17 tools, wiring for Claude Code / Cursor / VS Code, the redaction model for secrets, and example prompts.
+The full [MCP guide](mcp.md) covers all 18 tools, wiring for Claude Code / Cursor / VS Code, the redaction model for secrets, and example prompts.
 
 ## Where to go next
 

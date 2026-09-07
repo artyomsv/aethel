@@ -143,6 +143,22 @@ export const plugins: PluginEntry[] = [
     ],
   },
   {
+    slug: "hunk",
+    name: "hunk",
+    kind: "built-in",
+    description:
+      "A review-first diff viewer backed by [hunk](https://github.com/modem-dev/hunk) — built for reading what an agent just wrote. Open it as an ordinary pane from Ctrl+N → Tools, or toggle it as a full-tab review of the working tree with Alt+D, pointed at the git repository of whatever directory the active pane is in. Offered only when the hunk binary is found on PATH.",
+    spawnExample:
+      '# hunk.toml — relevant fields\n[plugin]\nname = "hunk"\nschema_version = 1\nhomepage = "https://github.com/modem-dev/hunk"\n\n[command]\ncmd = "hunk"\ndetect = "hunk --version"\nargs = ["diff"]           # `hunk` alone prints help; `diff` opens the review UI\nprompts_cwd = true        # hunk has no --path flag: the CWD is what scopes it\ndiscover = "git"          # list nearby repos in the setup dialog\n\n[persistence]\nstrategy = "rerun"\nghost_buffer = false',
+    features: [
+      "Alt+D toggles a per-tab review of the working tree for the repo resolved from the active pane's directory; press it again to hide, and the process keeps running so re-opening is instant.",
+      "Alt+G and Alt+D share one overlay slot per tab: pressing the other tool's key swaps lazygit and hunk rather than stacking them, so the outgoing tool's process ends.",
+      'discover = "git" turns the setup-dialog directory step into a repo picker — the enclosing repository plus one-level subfolders, with a Browse… fallback.',
+      "Deliberately toggle-free: instance args replace the base args at spawn, so any toggle would drop the `diff` subcommand and leave the pane on a help screen. Per-user options belong in hunk's own ~/.config/hunk/config.toml.",
+      "Binary-gated: greyed out in Ctrl+N with a link to the project when hunk is not installed (npm i -g hunkdiff, brew install hunk, or mise use -g hunk).",
+    ],
+  },
+  {
     slug: "k9s",
     name: "k9s",
     kind: "built-in",

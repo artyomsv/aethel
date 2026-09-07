@@ -117,8 +117,8 @@ Output lands in the repository root.
 ## Verify your install
 
 ```bash
-quil --version
-quild --version
+quil version
+quild version
 ```
 
 Both should report the same version. Mismatch is a known footgun — the TUI handshakes with the daemon on attach and refuses to proceed (or auto-restarts the daemon if it's older). See [Features → Client/daemon version handshake](features.md#clientdaemon-version-handshake).

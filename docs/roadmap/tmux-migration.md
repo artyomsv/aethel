@@ -5,8 +5,25 @@
 | Priority | 8 |
 | Effort | Small |
 | Impact | Medium |
-| Status | Proposed |
+| Status | **Partly shipped** — keymap half landed in v1.62.0; session import still proposed |
 | Depends on | — |
+
+> **Superseded in part, v1.62.0.** The keybinding half of this PRD shipped as a
+> *preset* rather than an importer: `preset = "tmux"` in `~/.quil/bindings.toml`
+> selects a tmux-compatible keymap, `prefix = "ctrl+a"` moves the prefix in one
+> line, and `[bindings]` overrides any single action by ID. Quil **does** have a
+> prefix key and multi-key sequences now, so two claims below are stale where
+> they say otherwise — the sketch of `quil import-keybindings` writing to
+> `config.toml`, and the note that "Quil doesn't use a prefix key".
+>
+> A shipped preset is a better fit than reading `~/.tmux.conf`: it is one line
+> the user can read, it survives a Quil default changing, and it needs no parser
+> for tmux's own config grammar. Reading a *customised* `.tmux.conf` on top of
+> the preset is still worth doing and is not built.
+>
+> See [Keybindings → Keymap presets](../keybindings.md#keymap-presets) and
+> [tmux comparison](../tmux-comparison.md). **The session-import half below is
+> untouched and still proposed.**
 
 ## Problem
 

@@ -26,7 +26,7 @@ The five keys you'll use most:
 | Key | Action |
 |---|---|
 | `Alt+Shift+P` | Command palette — fuzzy-find any action or jump to any pane/tab |
-| `F1` | About menu → Settings, Plugins, Processes, log viewers |
+| `F1` | About menu → Settings, Shortcuts, Plugins, Processes, log viewers, Update, What's New |
 | `Ctrl+N` | New typed pane (Claude Code, OpenCode, Codex, terminal, …) |
 | `Ctrl+T` | New tab — asks which pane it opens with (`Esc` cancels, creating nothing) |
 | `Ctrl+W` | Close active pane |
@@ -113,7 +113,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Ctrl+E` | Toggle focus mode (active pane full-screen) |
 | `Alt+Shift+W` | Toggle the active AI pane's preview between left-edge crop (default) and soft-wrap. Only affects `wide_canvas` panes rendered smaller than the window. |
 | `Alt+G` | Toggle lazygit overlay (git repo from active pane's directory) |
-| `Alt+D` | Toggle hunk overlay — diff review for the same repo. Shares the tab's single overlay slot with lazygit, so pressing it while lazygit is on screen swaps tools. Mnemonic: **d**iff. Not `Alt+H`, because plain `Alt+H` is deliberately left unbound so it reaches the running program (see the passthrough note below) and because vim-style layouts rebind it to pane-left — set `toggle_hunk = "alt+h"` if you prefer it there. |
+| `Alt+D` | Toggle hunk overlay — diff review for the same repo. Shares the tab's single overlay slot with lazygit, so pressing it while lazygit is on screen swaps tools. Mnemonic: **d**iff. Not `Alt+H`, because plain `Alt+H` is deliberately left unbound so it reaches the running program (see the passthrough note below) and because vim-style layouts rebind it to pane-left — set `"pane.toggle_hunk" = "alt+h"` in `~/.quil/bindings.toml` if you prefer it there. |
 | `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
 | `Alt+Shift+I` | Open the active pane's input history — one row per prompt you submitted, newest first. `↑/↓` navigate, `PgUp/PgDn/Home/End` jump, `Enter` opens the full text in a soft-wrapped read-only viewer (drag or `Ctrl+A` to select, right-click or `Enter` to copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |
 | `Alt+A` | Open the pane context menu for the active pane (`quick_actions`). Same menu as right-click — see [Mouse: pane context menu](#mouse-pane-context-menu) below. |
@@ -133,7 +133,7 @@ Right-clicking a **pane row in the project sidebar** opens the same menu. It foc
 
 Linear pane cycling (`Tab` / `Shift+Tab`) is **not** bound by default — see [Keys that pass through](#keys-that-pass-through-to-the-pty).
 
-You can bind `next_pane` / `prev_pane` in `config.toml` if you prefer linear cycling alongside the spatial keys.
+You can bind `pane.next` / `pane.prev` in `~/.quil/bindings.toml` if you prefer linear cycling alongside the spatial keys.
 
 ### Word-jump inside a pane (macOS)
 
@@ -151,11 +151,11 @@ Terminal.app has no distinct combo for a multi-word "fast jump" (`Option+Shift+A
 to `Option+Arrow` and `Cmd` is reserved by macOS), so that remains available only on
 Kitty-protocol terminals (Ghostty, WezTerm, iTerm2).
 
-Note: `Alt+A` (`Option+A` under Option-as-Meta) is bound to `quick_actions` — opening the pane
-context menu — so `ESC-a` (emacs `M-a`, backward-sentence) no longer reaches the PTY. This is
-deliberate and consistent with the other single-letter Alt-layer bindings Quil already
-intercepts (`Alt+G`, `Alt+M`, `Alt+N`, `Alt+E`, …); rebind `quick_actions` in `config.toml` if
-you rely on `M-a` in a pane's readline.
+Note: `Alt+A` (`Option+A` under Option-as-Meta) is bound to `pane.quick_actions` — opening the
+pane context menu — so `ESC-a` (emacs `M-a`, backward-sentence) no longer reaches the PTY. This
+is deliberate and consistent with the other single-letter Alt-layer bindings Quil already
+intercepts (`Alt+G`, `Alt+M`, `Alt+N`, `Alt+E`, …); rebind `pane.quick_actions` in
+`~/.quil/bindings.toml` if you rely on `M-a` in a pane's readline.
 
 ## Notes editor
 
@@ -268,14 +268,14 @@ These are deliberately unbound at the TUI level so they reach the running pane p
 - **`Tab` / `Shift+Tab`** — shell tab-completion, Claude Code mode-cycling, opencode picker navigation
 - **Most printable characters** — type into the shell/REPL
 
-Plugins can declare additional pass-through keys via `raw_keys = [...]` in their TOML — see the [plugin reference](plugin-reference.md#raw-keys).
+Plugins can declare additional pass-through keys via `raw_keys = [...]` in their TOML — see the [plugin reference](plugin-reference.md#command-configuration--command).
 
-If you'd rather have `Tab` cycle panes, bind it in `config.toml`:
+If you'd rather have `Tab` cycle panes, bind it in `~/.quil/bindings.toml`:
 
 ```toml
-[keybindings]
-next_pane = "tab"
-prev_pane = "shift+tab"
+[bindings]
+"pane.next" = "tab"
+"pane.prev" = "shift+tab"
 ```
 
 …but you'll lose the PTY tab-completion you usually want.

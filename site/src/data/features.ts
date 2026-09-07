@@ -205,7 +205,7 @@ export const features: Feature[] = [
       "Terminals are not all the same. Quil understands pane types and gives each one context-aware behaviour — including a per-spawn setup dialog with directory browser and runtime checkboxes.",
     category: "interaction",
     detail: [
-      "Ten built-in pane types: Terminal, Terminal (keeps content on squeeze), Claude Code, OpenCode (beta), Codex, SSH, Stripe, lazygit, k9s, lazysql.",
+      "Eleven built-in pane types: Terminal, Terminal (keeps content on squeeze), Claude Code, OpenCode (beta), Codex, SSH, Stripe, lazygit, hunk, k9s, lazysql.",
       "Each type has its own resume strategy, error handler, and status line.",
       "Pane setup dialog (opt-in via plugin TOML): a directory browser pre-filled with the active pane's CWD plus one checkbox per declared `[[command.toggles]]` entry. claude-code uses both — picks up the project's `.claude/` context automatically and offers a `Dangerously skip permissions` toggle for unattended runs.",
       "The directory step remembers where you've been: the last five folders you actually opened a pane in are offered as a one-keystroke quick pick (deleted ones filtered out), and for git-aware pane types the repositories discovered near the active pane take priority. Browse… always drops to the full picker.",

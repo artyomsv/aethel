@@ -69,9 +69,9 @@ Five keys to remember:
 
 | Key | Action |
 |---|---|
-| `F1` | Menu — Settings, Plugins, Memory, log viewers |
+| `F1` | Menu — Settings, Shortcuts, Plugins, Processes, log viewers, Update, What's New |
 | `Ctrl+N` | New typed pane (Claude Code, OpenCode, Codex, shell, …) |
-| `Ctrl+T` | New tab |
+| `Ctrl+T` | New tab — asks which pane it opens with (`Esc` cancels) |
 | `Ctrl+W` | Close active pane |
 | `Ctrl+Q` | Quit (workspace persists) |
 
@@ -191,7 +191,7 @@ Add this to your AI client's MCP config (Claude Desktop, Claude Code, Cursor, VS
 }
 ```
 
-Restart the client. The AI can now `list_panes`, `read_pane_output`, `send_to_pane`, `watch_notifications`, `screenshot_pane`, and 12 more tools. Read the build pane and react to errors without copy-paste.
+Restart the client. The AI can now `list_panes`, `read_pane_output`, `send_to_pane`, `watch_notifications`, `screenshot_pane`, and 13 more tools. Read the build pane and react to errors without copy-paste.
 
 Full guide: [docs/mcp.md](docs/mcp.md).
 
@@ -227,7 +227,7 @@ Define your own pane types in TOML — see the [plugin reference](docs/plugin-re
 | **MCP (AI integration)** | [mcp.md](docs/mcp.md) |
 | **Custom plugins** | [plugin-reference.md](docs/plugin-reference.md) |
 | **Troubleshooting** | [troubleshooting.md](docs/troubleshooting.md) |
-| **Architecture (24 ADRs)** | [architecture.md](docs/architecture.md) |
+| **Architecture (25 ADRs)** | [architecture.md](docs/architecture.md) |
 | **Roadmap** | [roadmap.md](docs/roadmap.md) |
 | **Vision** | [vision.md](docs/vision.md) |
 | **Original PRD** | [prd.md](docs/prd.md) |

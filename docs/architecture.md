@@ -117,34 +117,74 @@ type Session interface {
 
 **Decision:** Pane types are defined as TOML plugin files in `~/.quil/plugins/`. No compiled plugins or scripting engine.
 
-**Plugin schema:**
+**Plugin schema:** six tables, all optional except `[plugin]` and `[command]`.
+The authoritative list of fields is the decode struct in
+`internal/plugin/registry.go`; [plugin-reference.md](plugin-reference.md)
+documents every one of them. A representative plugin:
 
 ```toml
 [plugin]
-name = "ai"
-display_name = "AI Assistant"
+name = "claude-code"
+display_name = "Claude Code"
+category = "ai"                  # terminal | ai | remote | tools
+schema_version = 11              # bumped to raise the migration dialog
 
-[scraper]
-patterns = ['(?P<SessionID>Conversation ID: [a-f0-9-]+)']
+[command]
+cmd = "claude"
+detect = "claude --version"      # decides whether the plugin is offered
+prompts_cwd = true               # ask for a working directory at spawn
+record_history = true            # capture submitted prompts (Alt+Shift+I)
+sessions = "claude"              # offer a resume picker in the setup dialog
 
-[resume]
-command = "claude --resume {{.SessionID}}"
-fallback = "claude"
+[[command.toggles]]              # rendered as checkboxes / radio buttons
+name = "dangerously_skip_permissions"
+label = "Dangerously skip permissions (no confirmations)"
+args_when_on = ["--dangerously-skip-permissions"]
+group = "permission_mode"        # same group = mutually exclusive
+
+[persistence]
+strategy = "preassign_id"        # cwd_only | rerun | preassign_id | session_scrape | none
+start_args = ["--session-id", "{session_id}"]
+resume_args = ["--continue"]
+ghost_buffer = true
+redraw_key = "\f"                # stdin bytes that make this program repaint
+
+[[error_handlers]]               # regex over PTY output → help dialog
+pattern = '(?i)ANTHROPIC_API_KEY.*not set'
+title = "API Key Missing"
+message = "Set ANTHROPIC_API_KEY in your environment or run 'claude auth'."
+action = "dialog"
+
+[[idle_handlers]]                # regex over the last lines when a pane goes quiet
+pattern = '(?i)waiting for (confirmation|input|approval|permission)'
+title = "Needs your approval"
+severity = "warning"
 
 [display]
-border_rules = [
-  { pattern = "Error", color = "red" },
-  { pattern = "Success", color = "green" },
-]
+wide_canvas = true               # PTY stays window-sized; small panes show a preview
 ```
+
+`[[instances]]`, `[[command.form_fields]]` and `[[notification_handlers]]` round
+out the schema — saved presets, a spawn-time form, and extra notification
+patterns respectively.
 
 **Consequences:**
 
 - Users create custom pane types without recompiling
-- Hot-reload — daemon watches plugin directory for changes
+- Hot-reload on save — the registry reloads from `~/.quil/plugins/` and prunes
+  entries whose file was deleted
 - No arbitrary code execution — plugins are declarative config
-- Scraper patterns use Go regex, resume commands use Go `text/template`
-- Ships with 4 built-in plugins: `ai`, `webhook`, `infrastructure`, `build`
+- Patterns are Go regex; `{session_id}` and `{{.Field}}` are the only
+  substitutions
+- Ships with **11 built-in plugins** — two compiled into the binary (`terminal`,
+  `terminal-wide`) and nine embedded TOML defaults written to
+  `~/.quil/plugins/` on first run (`claude-code`, `opencode`, `codex`,
+  `lazygit`, `hunk`, `k9s`, `lazysql`, `ssh`, `stripe`). A user's copy of a file
+  overrides the embedded default; `schema_version` is what raises the migration
+  dialog when the shipped definition moves ahead of the copy on disk
+- Availability is per machine. Each daemon reports what its own host can run, so
+  a remote project greys out what that host lacks rather than what your laptop
+  lacks
 
 ## ADR-7: Workspace State Persistence Strategy
 
@@ -478,6 +518,14 @@ Each init script sources the user's original shell config first, then appends th
 - Any future IPC-protocol change simply bumps the version; the handshake catches mismatches before either side reads a malformed payload
 
 ## ADR-21: Memory Reporting (v1.9.0–v1.9.1)
+
+> **Surfacing superseded in v1.63.0.** The `F1` → Memory dialog was replaced by
+> `F1` → Processes, which shows the real process tree under each pane — the
+> shell or agent Quil started plus everything it went on to spawn — with memory
+> *and* CPU per row, a `K` key to stop a process below the pane's own shell, and
+> a section listing Quil's own processes. The collector, the IPC pair, the
+> status-bar segment and both MCP tools below are unchanged; only the dialog
+> that renders them is different.
 
 **Decision:** A daemon-side 5-second collector (`internal/memreport/`) snapshots per-pane Go-heap (output ring buffer + ghost snapshot + plugin state) and PTY child resident memory; results are surfaced via a `mem <n>` segment in the status bar, an F1 → Memory tree dialog, and two MCP tools.
 

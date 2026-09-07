@@ -6,7 +6,7 @@ Thanks for considering a contribution! This page covers what stays at the projec
 
 Open an issue with:
 
-- Quil version (`quil --version` and `quild --version` — both must match)
+- Quil version (`quil version` and `quild version` — both must match)
 - OS + terminal emulator
 - Steps to reproduce
 - Relevant excerpts from `~/.quil/quil.log` and `~/.quil/quild.log` (see [Troubleshooting → log files](docs/troubleshooting.md#log-files--where-to-look))
@@ -36,7 +36,7 @@ The shortest path:
 - **Tests** — same package, `_test.go` suffix. Table-driven where it earns its keep. Run `go test -race ./...` before submitting.
 - **No global mutable state** — pass dependencies explicitly. The exception: package-level swappable function vars for testability (already established pattern in `internal/daemon/`).
 
-For deeper architectural rationale see [docs/architecture.md](docs/architecture.md) (24 ADRs cover every meaningful decision).
+For deeper architectural rationale see [docs/architecture.md](docs/architecture.md) (25 ADRs cover every meaningful decision).
 
 ## Commit messages
 
@@ -122,7 +122,7 @@ The TLDR architecture map (the `.claude/CLAUDE.md` file at the repo root) is the
 
 | Question | Doc |
 |---|---|
-| How does Quil work internally? | [docs/architecture.md](docs/architecture.md) — 24 ADRs |
+| How does Quil work internally? | [docs/architecture.md](docs/architecture.md) — 25 ADRs |
 | What's planned? | [docs/roadmap.md](docs/roadmap.md) + [docs/roadmap/](docs/roadmap/) |
 | Why does Quil exist? | [docs/vision.md](docs/vision.md) |
 | Versioning policy? | [docs/versioning.md](docs/versioning.md) |
