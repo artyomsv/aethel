@@ -102,6 +102,11 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, image string) (
 	if err := writeOverlays(m); err != nil {
 		return sandbox.Mapping{}, err
 	}
+	// Record which repository this pane's line went into BEFORE writing it.
+	// A crash between the two leaves a registry entry for a line that does
+	// not exist, which the repair pass simply finds nothing to do about; the
+	// reverse — a line with no record — is the state nothing can repair.
+	d.sandboxReg.put(pane.ID, m.HostGitCommon)
 	if err := sandbox.AddAlternate(m); err != nil {
 		return sandbox.Mapping{}, fmt.Errorf("sandbox: register object store: %w", err)
 	}
@@ -109,7 +114,7 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, image string) (
 	// A container left by a crashed daemon holds the --name this one needs,
 	// and docker refuses the run rather than replacing it. Ignoring the
 	// result is correct: a pane with no container is the normal case.
-	if err := sandbox.RemoveForce(ctx, pane.ID); err != nil {
+	if err := sandboxRemoveFn(ctx, pane.ID); err != nil {
 		log.Printf("sandbox: pane %s: pre-run remove: %v", pane.ID, err)
 	}
 	return m, nil

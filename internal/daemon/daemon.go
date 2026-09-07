@@ -201,6 +201,14 @@ type Daemon struct {
 	// fetching. See its own type for why that difference matters.
 	sandboxCap sandboxCap
 
+	// sandboxReg records which repository each sandbox pane wrote its
+	// alternates line into. Teardown and the startup repair both need that
+	// fact and neither can derive it: by teardown the worktree may be gone,
+	// and a stale line makes every git command in the repository fail, so
+	// knowing where to look is what separates a repair from the user editing
+	// a file by hand.
+	sandboxReg *sandboxRegistry
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -259,6 +267,8 @@ func New(cfg config.Config) *Daemon {
 		gitCache:   newGitCache(),
 		snapGens:   make(map[string]uint64),
 	}
+	d.sandboxReg = newSandboxRegistry(config.QuilDir())
+	d.sandboxReg.load()
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
 	d.procReport = newProcCollector(d.session, memreport.ProcRSSBatch)
 	d.hellos = newHelloRegistry()
@@ -332,6 +342,16 @@ func (d *Daemon) Start() error {
 	if d.restored {
 		d.respawnPanes()
 	}
+
+	// Sandbox housekeeping, on a worker so a slow or absent Docker never
+	// delays the socket. Both passes clean up after a daemon that did not
+	// shut down cleanly: the repair strips alternates lines whose object
+	// store is gone — which otherwise makes EVERY git command in that
+	// repository fail — and the sweep reaps containers whose pane no longer
+	// exists. Ordered repair-then-sweep because the sweep's teardown writes
+	// to the same alternates files.
+	go d.sandboxStartupHousekeeping()
+	go d.harvestLoop()
 
 	sockPath := config.SocketPath()
 	d.server = ipc.NewServer(sockPath, d.handleMessage, d.onClientDisconnect)
@@ -518,6 +538,17 @@ func (d *Daemon) Stop() {
 		d.refreshPluginStateFromHooks()
 		log.Print("daemon stopping, writing final snapshot...")
 		d.snapshot()
+		// Sandbox panes, after the snapshot and before the PTY closes: the
+		// harvest puts their commits in the repository while the containers
+		// are still up, and the kill stops agents that would otherwise keep
+		// running — unreachable, unstoppable, and still spending quota —
+		// because killing the docker CLI does not stop its container.
+		if ids := d.sandboxPaneIDs(); len(ids) > 0 {
+			for _, id := range ids {
+				d.harvestSandbox(id)
+			}
+			d.killSandboxContainers(ids)
+		}
 		for _, tab := range d.session.Tabs() {
 			for _, pane := range d.session.Panes(tab.ID) {
 				if pane.PTY != nil {
@@ -2171,9 +2202,32 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	// that may be on a network mount, and this is the requesting client's
 	// dispatch goroutine. Running it before the broadcast would also leave the
 	// tab on screen for the length of the checkout deletion.
-	if len(worktrees) > 0 {
-		go d.removeOwnedWorktrees(worktrees)
+	//
+	// Containers come down FIRST and are waited for, because each holds its
+	// worktree as a bind mount and removeOwnedWorktrees gives up after three
+	// attempts at 250 ms. Teardown harvests each pane's git objects on the
+	// way, so closing a tab never loses commits made inside a container.
+	closing := make([]string, 0, len(panes))
+	for _, p := range panes {
+		closing = append(closing, p.ID)
 	}
+	go func() {
+		// Teardowns run concurrently with each other but ALL of them finish
+		// before the worktrees go: they are independent containers, and a
+		// tab can hold several.
+		var wg sync.WaitGroup
+		for _, id := range closing {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				d.teardownSandbox(context.Background(), id)
+			}(id)
+		}
+		wg.Wait()
+		if len(worktrees) > 0 {
+			d.removeOwnedWorktrees(worktrees)
+		}
+	}()
 }
 
 // recoverEmptyProject re-creates a shell tab for a project that has no tabs
@@ -2650,9 +2704,21 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	// race for the worktree — but a hidden overlay pane in the same tab CAN be
 	// sitting in it, and ensureTabNotEmpty is what destroys those. Removing
 	// before it ran would find the overlay still live and keep the worktree.
+	//
+	// The container comes down FIRST, and in the same goroutine, because it
+	// holds the worktree as a bind mount and removeOwnedWorktrees gives up
+	// after three attempts at 250 ms. Teardown also harvests the pane's git
+	// objects before anything is deleted, so closing a pane never loses
+	// commits made inside the container.
+	closing := payload.PaneID
 	if len(worktrees) > 0 {
-		go d.removeOwnedWorktrees(worktrees)
+		go func() {
+			d.teardownSandbox(context.Background(), closing)
+			d.removeOwnedWorktrees(worktrees)
+		}()
+		return
 	}
+	go d.teardownSandbox(context.Background(), closing)
 }
 
 // ensureTabNotEmpty destroys orphaned overlay panes and spawns a fresh
