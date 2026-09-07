@@ -372,6 +372,17 @@ func (d *Daemon) harvestLoop() {
 	}
 }
 
+// paneInContainer reports whether one pane's process runs inside a container.
+func (d *Daemon) paneInContainer(paneID string) bool {
+	pane := d.session.Pane(paneID)
+	if pane == nil {
+		return false
+	}
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	return pane.SandboxImage != ""
+}
+
 // sandboxPaneIDs lists the live panes that have a sandbox container.
 func (d *Daemon) sandboxPaneIDs() []string {
 	var out []string

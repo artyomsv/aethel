@@ -1084,8 +1084,33 @@ many concurrent agents easy.
 
 ## Must be measured before shipping
 
-**1. Resize propagation through `docker run -it` under ConPTY.** The docker CLI sits
-between quil's ConPTY and claude, and two mechanisms look broken:
+**1. Resize propagation through `docker run -it` under ConPTY — MEASURED, and it
+works.** A throwaway probe (`cmd/sandboxprobe`, deleted after the run) opened a
+real ConPTY through `internal/pty.NewWithSize(100, 30)`, ran
+`docker run -i -t alpine:3 sh -c 'stty size; sleep 2; stty size; sleep 3; stty size'`,
+and resized the PTY to 120x40 between the second and third readings:
+
+```
+  size: 30 rows x 100 cols     ← initial, matches the PTY
+  size: 30 rows x 100 cols     ← before the resize
+  size: 40 rows x 120 cols     ← after the resize
+```
+
+Three facts follow. The docker CLI **does** see a ConPTY as a terminal, so
+`-i -t` is safe — worth knowing because it fails hard otherwise: from a
+non-terminal stdin docker answers `cannot attach stdin to a TTY-enabled
+container because stdin is not a terminal`. The container's initial size is
+correct, so a pane opens at the right geometry. And an ordinary resize reaches
+the container, so no pane is left mis-sized.
+
+The `resizeKick` jiggle worry is therefore about REPAINTING, not about geometry:
+a real resize propagates, so a sandbox pane is always correctly sized even if the
+back-to-back pair is coalesced. That reduces the risk from "the 1x1 class of
+irreversible damage" to "a pane may need a keystroke to repaint after a resize",
+which is cosmetic and self-correcting. Left as a follow-up rather than a blocker;
+if it shows up in use, separate the two `Resize` calls for sandbox panes.
+
+The original concern, kept because the reasoning is still why the kick exists:
 
 - `resizeKick` (`internal/daemon/daemon.go:3333-3345`) makes two `Resize` calls back
   to back with no delay. Windows has no SIGWINCH; a console client learns its size
@@ -1099,12 +1124,12 @@ between quil's ConPTY and claude, and two mechanisms look broken:
 
 This is the one part of the codebase with a documented history of irreversible
 damage — the 1x1 headless-attach incident "permanently re-wrapped every child's
-transcript". Measure `stty size` inside the container against the pane's real size,
-before and after a window resize, under both the bundled OpenConsole and the inbox
-ConPTY host. Confirm `docker run -it` works under ConPTY at all; if stdin is not
-seen as a terminal the failure is hard and immediate. Likely fix: separate the two
-`Resize` calls by ~300 ms for sandbox panes, and re-arm the kick on the first output
-that is not docker's progress stream.
+transcript" — which is why it was treated as blocking until measured.
+
+Still unmeasured, and deliberately not blocking: the same probe under the inbox
+Win10 ConPTY host rather than the bundled OpenConsole. Geometry is carried by the
+same `Resize` call on both, and a wrong answer there would be a repaint nuisance
+rather than a mis-sized pane.
 
 **2. The default in-container sign-in.** Asserted, not measured. Anthropic documents
 the paste-the-code fallback, which should make it work with no published port — but

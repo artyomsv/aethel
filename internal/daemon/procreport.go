@@ -457,6 +457,11 @@ func (d *Daemon) handleResourceReportReq(conn *ipc.Conn, msg *ipc.Message) {
 				GoHeapBytes: p.GoHeapBytes,
 				PTYRSSBytes: p.PTYRSSBytes,
 				TotalBytes:  p.Total,
+				// A sandbox pane's PID is the docker CLI; its agent runs in
+				// the Docker VM or a containerd cgroup, never beneath that
+				// process. Reporting the walk's answer would be the CLI's own
+				// footprint wearing the pane's name.
+				InContainer: d.paneInContainer(p.PaneID),
 			}
 		}
 	}

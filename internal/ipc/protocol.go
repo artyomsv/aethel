@@ -909,6 +909,16 @@ type PaneResourceInfo struct {
 	TotalBytes  uint64 `json:"total_bytes"`
 	// Tree is present only when WithTrees was set.
 	Tree *ProcNode `json:"tree,omitempty"`
+	// InContainer marks a pane whose process runs inside a container, so the
+	// dialog says "not measured" rather than a confidently wrong number.
+	//
+	// The collector walks the HOST process tree from the pane's PID, and a
+	// sandbox pane's PID is the docker CLI — the agent lives in the Docker VM
+	// on Windows or a containerd cgroup on Linux, never beneath it. The
+	// figure would therefore be the CLI's own footprint, which is neither the
+	// pane's nor visibly wrong. An em dash is the honest answer, the same
+	// rule this dialog already applies to an unsampled CPU reading.
+	InContainer bool `json:"in_container,omitempty"`
 }
 
 // QuilProcInfo is one of quil's own processes, as it described itself.
