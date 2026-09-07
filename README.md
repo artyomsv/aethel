@@ -227,7 +227,7 @@ Define your own pane types in TOML — see the [plugin reference](docs/plugin-re
 | **MCP (AI integration)** | [mcp.md](docs/mcp.md) |
 | **Custom plugins** | [plugin-reference.md](docs/plugin-reference.md) |
 | **Troubleshooting** | [troubleshooting.md](docs/troubleshooting.md) |
-| **Architecture (25 ADRs)** | [architecture.md](docs/architecture.md) |
+| **Architecture (30 ADRs)** | [architecture.md](docs/architecture.md) |
 | **Roadmap** | [roadmap.md](docs/roadmap.md) |
 | **Vision** | [vision.md](docs/vision.md) |
 | **Original PRD** | [prd.md](docs/prd.md) |

@@ -568,7 +568,14 @@ anything web-facing (M18 #18–19).
 
 **Remaining:**
 - JSON transformer (`Ctrl+J`) — format and highlight JSON in terminal output
-- Encrypted token storage — OS keyring integration for sensitive scraped values
+- Encrypted token storage — OS keyring integration for sensitive scraped values.
+  The `[security]` config section that reserved a name for this
+  (`encrypt_tokens`, alongside `redact_secrets`) was **removed**: both defaulted
+  to `true` and neither was ever read, so the file advertised two guarantees
+  nothing provided. Whoever builds this introduces the key then. `redact_secrets`
+  is not coming back — MCP log redaction is unconditional on purpose, and an off
+  switch for secret redaction is an anti-feature. An old `config.toml` still
+  carrying the section loads fine; the table is ignored
 - Tab dock positions (top/bottom/left/right)
 - OS service integration (`quil service install` — systemd/launchd/Task Scheduler)
 

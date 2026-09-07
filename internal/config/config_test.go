@@ -238,6 +238,34 @@ func TestLoad_MissingUpdateSection_KeepsDefaults(t *testing.T) {
 	}
 }
 
+func TestLoad_LegacySecuritySectionIsIgnored(t *testing.T) {
+	// [security] shipped with encrypt_tokens and redact_secrets, both
+	// defaulting to true and NEITHER ever read by any code path: token
+	// encryption was never built, and MCP log redaction is unconditional on
+	// purpose (an off switch for secret redaction is an anti-feature). The
+	// struct was removed rather than left as decoration.
+	//
+	// Every config.toml ever written by Save carries the section, because Save
+	// serializes the whole Config. This pins that such a file still loads —
+	// BurntSushi/toml reports an unknown table through MetaData.Undecoded()
+	// rather than erroring, and Load ignores it — and that the keys beside it
+	// still decode. Without this, the removal's only failure mode is a config
+	// nobody can load, on every install that has ever saved one.
+	path := filepath.Join(t.TempDir(), "config.toml")
+	legacy := "[security]\nencrypt_tokens = true\nredact_secrets = true\n\n[ui]\nmouse_scroll_lines = 7\n"
+	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load a config carrying the removed [security] section: %v", err)
+	}
+	if cfg.UI.MouseScrollLines != 7 {
+		t.Errorf("MouseScrollLines = %d, want 7 — a key after the dead section must still decode",
+			cfg.UI.MouseScrollLines)
+	}
+}
+
 func TestLoad_MigratesLegacyQuickActions(t *testing.T) {
 	legacyPath := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(legacyPath, []byte("[keybindings]\nquick_actions = \"ctrl+a\"\n"), 0600); err != nil {

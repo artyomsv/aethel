@@ -226,9 +226,9 @@ level = "info"                     # debug | info | warn | error
 max_size_mb = 10
 max_files = 3
 
-[security]
-encrypt_tokens = true              # Encrypt scraped tokens at rest
-redact_secrets = true              # Redact known secret patterns in logs
+[security]                         # NEVER IMPLEMENTED — section removed from the
+encrypt_tokens = true              #   real config. Token encryption was not built;
+redact_secrets = true              #   MCP log redaction is unconditional instead.
 
 [ui]
 tab_dock = "top"                   # top | bottom | left | right
