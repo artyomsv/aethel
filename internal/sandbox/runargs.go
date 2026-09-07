@@ -140,6 +140,12 @@ func Mounts(m Mapping) []mount {
 		// The pane's own subtree: hook spool, Claude config, object store.
 		mount{m.HostPaneRoot, ContainerQuil, false},
 	)
+	if m.SharedClaudeRoot != "" {
+		// The shared config directory is mounted OVER the per-pane one, so
+		// the container path stays /quil/claude either way and nothing
+		// downstream has to know which shape it got.
+		ms = append(ms, mount{m.SharedClaudeRoot, ContainerClaude, false})
+	}
 	if m.HostQuild != "" {
 		// Read-only: the hook binary is Quil's own, and nothing inside the
 		// container has any business rewriting the program the host asked it

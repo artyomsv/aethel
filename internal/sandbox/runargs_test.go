@@ -2,9 +2,24 @@ package sandbox
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// testCheckoutMapping is the ordinary-checkout shape. Several mount rules
+// apply only to it, and a worktree-only fixture makes their assertions run
+// zero times.
+func testCheckoutMapping(t *testing.T) Mapping {
+	t.Helper()
+	stubRealPath(t)
+	stubGit(t, "/projects/plain", "/projects/plain/.git", "/projects/plain/.git")
+	m, err := NewMapping(context.Background(), "/home/u/.quil", "/projects/plain", "pane1")
+	if err != nil {
+		t.Fatalf("NewMapping: %v", err)
+	}
+	return m
+}
 
 func testMapping(t *testing.T) Mapping {
 	t.Helper()
@@ -22,10 +37,27 @@ func testMapping(t *testing.T) Mapping {
 // real container as `cat /repo/.env` → SECRET=hunter2.
 func TestMounts_MainWorkingTreeNeverEntersTheContainer(t *testing.T) {
 	m := testMapping(t)
+
+	// An ALLOWLIST, not a check for one forbidden string. The first version
+	// asserted only that "/projects/main" was absent, which any ADDED mount of
+	// any other host path passes — including one that re-exposed the working
+	// tree by another route. Every host path the container sees is enumerated
+	// here, so a new mount fails this test until someone states why it is safe.
+	allowed := map[string]bool{
+		"/projects/main/.git":              true, // the repository metadata, ro
+		"/projects/main/.git/refs":         true,
+		"/projects/main/.git/logs":         true,
+		"/projects/main/.git/worktrees/wt": true, // THIS worktree's admin dir
+		"/projects/wt":                     true, // the checkout being worked in
+		m.HostDotGitOverlay():              true,
+		m.HostAdminGitdirOverlay():         true,
+		m.HostEmptyDir:                     true,
+		m.HostPaneRoot:                     true,
+	}
 	for _, mt := range Mounts(m) {
-		if mt.host == "/projects/main" {
-			t.Fatalf("the main checkout root is mounted at %s — the agent can read every "+
-				"file in the user's primary source tree, secrets included", mt.container)
+		if !allowed[filepath.ToSlash(mt.host)] {
+			t.Errorf("unexpected host path mounted at %s: %s — every mount is part of "+
+				"the security boundary and must be justified here", mt.container, mt.host)
 		}
 	}
 	var sawGitDir bool
@@ -39,20 +71,66 @@ func TestMounts_MainWorkingTreeNeverEntersTheContainer(t *testing.T) {
 	}
 }
 
+// An ordinary checkout has no separate admin directory, so worktrees/ sits
+// inside the read-write tree. Left writable, a container-side `git worktree
+// prune` unregisters the user's OTHER worktrees — the measured data loss the
+// overlay prevents on the linked-worktree path.
+func TestMounts_OrdinaryCheckoutPinsWorktreesDir(t *testing.T) {
+	m := testCheckoutMapping(t)
+	var seen bool
+	for _, mt := range Mounts(m) {
+		if mt.container == m.ContainerGitCommon()+"/worktrees" {
+			seen = true
+			if !mt.readOnly {
+				t.Error("worktrees/ is writable: a container-side prune can unregister " +
+					"the user's other worktrees")
+			}
+		}
+	}
+	if !seen {
+		t.Error("worktrees/ is not pinned read-only")
+	}
+}
+
 // Objects are every commit, tree and blob for every branch. A writable store
 // means one rm -rf destroys the repository's whole local history, so the
 // alternate must be read-only and new objects must go to the pane's own store.
 func TestMounts_ObjectStoreIsNeverWritable(t *testing.T) {
-	m := testMapping(t)
-	objects := "/projects/main/.git/objects"
-	for _, mt := range Mounts(m) {
-		if !pathWithin(objects, mt.host) {
-			continue
-		}
-		if !mt.readOnly {
-			t.Errorf("%s is mounted read-write at %s", mt.host, mt.container)
-		}
+	// BOTH kinds. The worktree mapping has no objects mount at all — its
+	// store rides the read-only /repo/.git — so a worktree-only fixture runs
+	// this loop zero times and passes however the checkout arm is written.
+	// That is exactly how a mutation flipping the KindCheckout objects mount
+	// to read-write survived.
+	for _, tc := range []struct {
+		name    string
+		m       Mapping
+		objects string
+	}{
+		{"worktree", testMapping(t), "/projects/main/.git/objects"},
+		{"checkout", testCheckoutMapping(t), "/projects/plain/.git/objects"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawObjectsMount bool
+			for _, mt := range Mounts(tc.m) {
+				if !pathWithin(tc.objects, mt.host) {
+					continue
+				}
+				sawObjectsMount = true
+				if !mt.readOnly {
+					t.Errorf("%s is mounted read-write at %s — one rm -rf then destroys "+
+						"the repository's whole local history", mt.host, mt.container)
+				}
+			}
+			// The checkout arm MUST have one; the worktree arm must not, and
+			// asserting which is what keeps this test from silently going
+			// vacuous again if a mount moves between the two shapes.
+			if want := tc.name == "checkout"; sawObjectsMount != want {
+				t.Errorf("objects mount present = %v, want %v", sawObjectsMount, want)
+			}
+		})
 	}
+
+	m := testMapping(t)
 	env := Env(m, Identity{}, "linux")
 	if !hasEnv(env, "GIT_OBJECT_DIRECTORY="+ContainerObjects) {
 		t.Error("new objects are not directed at the pane's own store")

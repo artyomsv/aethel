@@ -112,6 +112,11 @@ type Mapping struct {
 	// Slug is the container working-directory name under /work.
 	Slug string
 
+	// SharedClaudeRoot, when set, replaces the per-pane Claude config
+	// directory with one shared by every sandbox pane. Empty is the default
+	// and the safe shape; see HostClaudeConfig for the trade.
+	SharedClaudeRoot string
+
 	// HostQuild is the Linux quild the container's hooks invoke, on the host.
 	// Empty means this pane runs without hooks — legal for opencode and
 	// codex, refused for claude-code, where a missing session record turns
@@ -150,13 +155,23 @@ func (m Mapping) ContainerAlternate() string { return m.ContainerGitCommon() + "
 // HostObjects is the pane's own object store on the host.
 func (m Mapping) HostObjects() string { return joinHost(m.HostPaneRoot, "objects") }
 
-// HostClaudeConfig is the pane's own Claude config directory.
+// HostClaudeConfig is the Claude config directory this pane's container gets.
 //
-// Per-pane rather than shared: CLAUDE_CONFIG_DIR holds user-scope settings
-// (hooks), .claude.json (mcpServers), every transcript and history.jsonl, so
-// one shared directory would let any sandbox pane plant a hook that every
-// other sandbox pane's claude runs.
-func (m Mapping) HostClaudeConfig() string { return joinHost(m.HostPaneRoot, "claude") }
+// Per-pane by default: CLAUDE_CONFIG_DIR holds user-scope settings (hooks),
+// .claude.json (mcpServers), every transcript and history.jsonl, so one shared
+// directory lets any sandbox pane plant a hook or an MCP server that every
+// other sandbox pane's claude executes inside its own container.
+//
+// SharedClaudeRoot opts into exactly that, in exchange for signing in once
+// instead of once per pane. The trade is the user's to make and is spelled out
+// in the config comment and the docs; what must not happen is the knob
+// existing and doing nothing.
+func (m Mapping) HostClaudeConfig() string {
+	if m.SharedClaudeRoot != "" {
+		return m.SharedClaudeRoot
+	}
+	return joinHost(m.HostPaneRoot, "claude")
+}
 
 // HostDotGitOverlay is the file mounted over the worktree's own .git.
 func (m Mapping) HostDotGitOverlay() string { return joinHost(m.HostOverlayDir, "dot-gitdir") }

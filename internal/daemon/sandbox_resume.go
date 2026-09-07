@@ -80,22 +80,20 @@ func sandboxClaudeConfigDir(quilDir, paneID string) string {
 	return filepath.Join(sandboxRoot(quilDir), "panes", paneID, "claude")
 }
 
-// claudeConfigDirForPane answers which config directory a pane's sessions live
-// under: the daemon's own for a host pane, the pane's own for a sandbox one.
+// There is deliberately no "which config dir does the session PICKER use"
+// helper, and the reason is a property of the picker rather than an oversight.
 //
-// The session PICKER needs this as much as resume does. It resolves through
-// claudesessions.List, which reads the DAEMON's $CLAUDE_CONFIG_DIR — so for a
-// sandbox pane it would list the host's sessions and hand claude an id its own
-// config directory has never seen.
-func claudeConfigDirForPane(pane *Pane) string {
-	if pane == nil {
-		return ""
-	}
-	pane.PluginMu.Lock()
-	sandboxed := pane.SandboxImage != ""
-	pane.PluginMu.Unlock()
-	if !sandboxed {
-		return ""
-	}
-	return sandboxClaudeConfigDir(config.QuilDir(), pane.ID)
-}
+// The picker runs while the create dialog is open — before the pane exists. A
+// sandbox pane's Claude config directory is per-pane and is created at spawn,
+// so at picker time there is no directory to list and no pane id to name one
+// with (ClaudeSessionsReqPayload carries a CWD and nothing else). A brand-new
+// container has no prior sessions by construction.
+//
+// So the honest behaviour is to OFFER NO PICKER for a sandbox create rather
+// than to list the host's sessions, which is what pointing it at the daemon's
+// own $CLAUDE_CONFIG_DIR would do — the user would pick a conversation the
+// container has never seen and get a "No conversation found" spawn. The TUI
+// hides the session field when the sandbox row is on; see the setup dialog.
+//
+// RESUME is the separate case and does have a pane: hostTranscriptPath above
+// rewrites what that pane's own hook recorded.

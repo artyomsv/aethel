@@ -4218,10 +4218,27 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	if m.showSandboxField(p) {
 		n++
 	}
-	if p.Command.Sessions != "" {
+	if m.showSessionField(p) {
 		n++
 	}
 	return n
+}
+
+// showSessionField reports whether the setup dialog offers the resume picker.
+//
+// Hidden while the sandbox row is ON, and that is a correctness rule rather
+// than tidiness. The picker lists the sessions of whichever Claude config
+// directory the DAEMON resolves — its own — while a sandbox pane gets a fresh
+// per-pane directory created at spawn. A brand-new container has no prior
+// sessions by construction, so offering the host's would let the user pick a
+// conversation the container has never seen and get "No conversation found".
+// Showing nothing is the honest answer.
+//
+// All three enumerations of the field list route through here, for the reason
+// the sandbox row's own gate does: the count, the kind and the renderer's
+// separate walk must agree, or the cursor lands on a row nothing draws.
+func (m Model) showSessionField(p *plugin.PanePlugin) bool {
+	return p.Command.Sessions != "" && !m.sandboxOn
 }
 
 // showSandboxField reports whether the setup dialog offers the sandbox row.
@@ -4280,7 +4297,7 @@ func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, to
 		}
 		i--
 	}
-	if p.Command.Sessions != "" {
+	if m.showSessionField(p) {
 		if i == 0 {
 			return "session", -1
 		}
@@ -5901,7 +5918,7 @@ func (m Model) renderCreatePaneSetupDialog() string {
 	// Last field before Continue: the picker expands into a tall scrolling list
 	// on focus, so it sits below the short fixed-height rows rather than pushing
 	// them up and down as it opens and closes.
-	if p.Command.Sessions != "" {
+	if m.showSessionField(p) {
 		b.WriteByte('\n')
 		b.WriteString(m.renderSetupSessionField(cursor == fieldIdx))
 		fieldIdx++

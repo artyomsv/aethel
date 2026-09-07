@@ -62,14 +62,38 @@ func stubDockerRemove(t *testing.T, order *[]string) {
 func TestTeardownSandbox_HarvestsBeforeRemovingAnything(t *testing.T) {
 	d, paneID, repo := sandboxFixture(t)
 	var order []string
-	stubDockerRemove(t, &order)
-
 	m, _ := d.sandboxMappingFor(paneID)
+
+	// The stub records the state of the world AT the container removal, which
+	// is what makes this test position-dependent. The first version only ever
+	// appended "remove-container", so a mutation moving the removal AFTER the
+	// tree delete passed — and that ordering lets a live container recreate
+	// the tree, leaking it forever.
+	prev := sandboxRemoveFn
+	sandboxRemoveFn = func(context.Context, string) error {
+		order = append(order, "remove-container")
+		if _, err := os.Stat(m.HostPaneRoot); err == nil {
+			order = append(order, "tree-still-present")
+		}
+		if _, err := os.Stat(sandbox.AlternatesPath(m)); err == nil {
+			order = append(order, "alternates-still-present")
+		}
+		return nil
+	}
+	t.Cleanup(func() { sandboxRemoveFn = prev })
+
 	if err := sandbox.AddAlternate(m); err != nil {
 		t.Fatalf("AddAlternate: %v", err)
 	}
 
 	d.teardownSandbox(context.Background(), paneID)
+
+	// Both must still exist when the container is removed: the tree is
+	// deleted after, and the alternates line is removed after.
+	if len(order) != 3 {
+		t.Errorf("at container removal the world was %v — want the tree and the "+
+			"alternates line both still present, i.e. removal happens BEFORE them", order)
+	}
 
 	// The object reached the repository.
 	harvested := filepath.Join(repo, "objects", "ab",
@@ -85,9 +109,15 @@ func TestTeardownSandbox_HarvestsBeforeRemovingAnything(t *testing.T) {
 	if _, err := os.Stat(m.HostPaneRoot); !os.IsNotExist(err) {
 		t.Errorf("per-pane tree survived teardown: %v", err)
 	}
-	// And the container was removed.
-	if len(order) != 1 || order[0] != "remove-container" {
-		t.Errorf("container removal did not happen exactly once: %v", order)
+	// And the container was removed exactly once.
+	var removals int
+	for _, s := range order {
+		if s == "remove-container" {
+			removals++
+		}
+	}
+	if removals != 1 {
+		t.Errorf("container removal happened %d times, want 1: %v", removals, order)
 	}
 }
 

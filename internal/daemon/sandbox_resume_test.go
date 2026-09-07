@@ -80,22 +80,12 @@ func TestHostTranscriptPath_EmptyStaysEmpty(t *testing.T) {
 	}
 }
 
-// The session picker resolves through the DAEMON's config dir, so a sandbox
-// pane would be offered the host's sessions and handed an id its own config
-// directory has never seen.
-func TestClaudeConfigDirForPane(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("QUIL_HOME", home)
-
-	if got := claudeConfigDirForPane(sandboxPane(t, "")); got != "" {
-		t.Errorf("a host pane got an override: %q — it must use the daemon's own dir", got)
-	}
-	got := claudeConfigDirForPane(sandboxPane(t, "img"))
-	if !strings.Contains(filepath.ToSlash(got), "sandbox/panes/pane1/claude") {
-		t.Errorf("claudeConfigDirForPane = %q, want the pane's own config dir", got)
-	}
-	if got := claudeConfigDirForPane(nil); got != "" {
-		t.Errorf("nil pane returned %q", got)
+// A sandbox pane's Claude data lives under its own tree, not the daemon's
+// ~/.claude — which is what the resume rewrite above translates into.
+func TestSandboxClaudeConfigDir(t *testing.T) {
+	got := filepath.ToSlash(sandboxClaudeConfigDir("/home/u/.quil", "pane1"))
+	if !strings.HasSuffix(got, "sandbox/panes/pane1/claude") {
+		t.Errorf("sandboxClaudeConfigDir = %q, want the pane's own config dir", got)
 	}
 }
 

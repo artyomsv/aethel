@@ -127,6 +127,9 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, ima
 		return sandbox.Mapping{}, err
 	}
 	m.HostQuild = quild
+	if d.cfg.Sandbox.SharedClaudeConfig {
+		m.SharedClaudeRoot = filepath.Join(sandboxRoot(quilDir), "claude")
+	}
 
 	// The per-pane tree. Every directory the hook writes into lives under
 	// this one root, which is why the hook binary needs no change: it derives
@@ -135,6 +138,9 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, ima
 		m.HostPaneRoot,
 		m.HostObjects(),
 		m.HostClaudeConfig(),
+		// Created whether it is the per-pane dir or the shared one; docker
+		// would otherwise create a root-owned directory for a missing mount
+		// source and the container user could not sign in.
 		filepath.Join(m.HostPaneRoot, "sessions"),
 		filepath.Join(m.HostPaneRoot, "events"),
 		filepath.Join(m.HostPaneRoot, "history"),
