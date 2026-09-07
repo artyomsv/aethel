@@ -281,3 +281,36 @@ func TestOverlayDirIsNotInsideAnyMountedDirectory(t *testing.T) {
 		}
 	}
 }
+
+// A comma anywhere in the mount set must be refused, and the check is derived
+// from Mounts(m) precisely so a path nobody remembered is still covered. The
+// first version hand-listed four paths and missed HostAdminDir — reachable
+// through a linked worktree whose NAME contains a comma.
+func TestNewMapping_RefusesACommaInAnyMountSource(t *testing.T) {
+	stubRealPath(t)
+	for _, tc := range []struct {
+		name             string
+		top, common, git string
+	}{
+		{"worktree path", "/projects/a,b/wt", "/projects/main/.git", "/projects/main/.git/worktrees/wt"},
+		{"admin dir name", "/projects/wt", "/projects/main/.git", "/projects/main/.git/worktrees/w,t"},
+		{"repository .git", "/projects/wt", "/projects/m,ain/.git", "/projects/m,ain/.git/worktrees/wt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubGit(t, tc.top, tc.common, tc.git)
+			_, err := NewMapping(context.Background(), "/home/u/.quil", tc.top, "p1")
+			if !errors.Is(err, ErrUnsafeMapping) {
+				t.Fatalf("err = %v, want ErrUnsafeMapping — docker would mis-split this --mount source", err)
+			}
+		})
+	}
+}
+
+// And the quil-side paths, which every pane shares.
+func TestNewMapping_RefusesACommaInQuilHome(t *testing.T) {
+	stubRealPath(t)
+	stubGit(t, "/projects/wt", "/projects/main/.git", "/projects/main/.git/worktrees/wt")
+	if _, err := NewMapping(context.Background(), "/home/u/qu,il", "/projects/wt", "p1"); !errors.Is(err, ErrUnsafeMapping) {
+		t.Fatalf("err = %v, want ErrUnsafeMapping", err)
+	}
+}

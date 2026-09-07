@@ -268,10 +268,16 @@ func refuse(quilDir string, m Mapping) error {
 	// fields are comma-separated and docker offers no escaping. Refused at the
 	// boundary rather than emitted as an argument docker would mis-split into
 	// options nobody chose.
-	for _, p := range []string{m.HostWorktree, m.HostGitCommon, m.HostPaneRoot, m.HostOverlayDir} {
-		if strings.Contains(p, ",") {
+	//
+	// The list is derived from Mounts(m) rather than hand-written, because a
+	// hand-written one drifts: the first version listed four paths and missed
+	// HostAdminDir, which a linked worktree whose NAME contains a comma
+	// reaches directly. Asking the mount set itself means a mount added later
+	// is covered without anyone remembering this check exists.
+	for _, mt := range Mounts(m) {
+		if strings.Contains(mt.host, ",") {
 			return fmt.Errorf("%w: %q contains a comma, which a docker --mount source cannot express",
-				ErrUnsafeMapping, p)
+				ErrUnsafeMapping, mt.host)
 		}
 	}
 	for _, cand := range []struct{ what, path string }{
