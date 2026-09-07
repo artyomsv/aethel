@@ -314,3 +314,35 @@ func TestNewMapping_RefusesACommaInQuilHome(t *testing.T) {
 		t.Fatalf("err = %v, want ErrUnsafeMapping", err)
 	}
 }
+
+// The fields the daemon fills in AFTER NewMapping returns — the hook binary
+// and the shared config directory — are mount sources too, so Validate has to
+// be callable again once they are set. A check that only ever ran inside
+// NewMapping could not see either.
+func TestValidate_CatchesLateFields(t *testing.T) {
+	stubRealPath(t)
+	stubGit(t, "/projects/wt", "/projects/main/.git", "/projects/main/.git/worktrees/wt")
+	m, err := NewMapping(context.Background(), "/home/u/.quil", "/projects/wt", "p1")
+	if err != nil {
+		t.Fatalf("NewMapping: %v", err)
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("a clean mapping was refused: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		set  func(*Mapping)
+	}{
+		{"hook binary", func(mm *Mapping) { mm.HostQuild = "/opt/qu,il/quild" }},
+		{"shared claude root", func(mm *Mapping) { mm.SharedClaudeRoot = "/home/u/.qu,il/sandbox/claude" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			late := m
+			tc.set(&late)
+			if err := late.Validate(); !errors.Is(err, ErrUnsafeMapping) {
+				t.Errorf("err = %v, want ErrUnsafeMapping — this path reaches docker as a --mount source", err)
+			}
+		})
+	}
+}

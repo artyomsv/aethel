@@ -164,6 +164,15 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, ima
 		}
 	}
 
+	// Re-validate now that HostQuild and SharedClaudeRoot are set. NewMapping
+	// could not see either — they are filled in above, after it returned — and
+	// both become `--mount` sources, so a comma in a QUIL_SANDBOX_QUILD path
+	// or in the shared config directory would otherwise reach docker as a
+	// mis-split argument.
+	if err := m.Validate(); err != nil {
+		return sandbox.Mapping{}, err
+	}
+
 	// The empty FILE used to shadow config.worktree. Created here rather than
 	// in the directory loop above because it is a file, and docker would
 	// otherwise invent a root-owned DIRECTORY for a missing bind source —

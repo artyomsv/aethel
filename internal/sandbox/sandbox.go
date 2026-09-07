@@ -188,6 +188,34 @@ func (m Mapping) HostAdminGitdirOverlay() string {
 	return joinHost(m.HostOverlayDir, "admin-gitdir")
 }
 
+// Validate refuses a mapping whose mount set cannot be expressed as docker
+// arguments.
+//
+// It MUST be called again after every field is populated, not only from
+// NewMapping. HostQuild and SharedClaudeRoot are filled in by the daemon AFTER
+// NewMapping returns, and each becomes a `--mount` source — so a check that
+// ran only inside NewMapping cannot see them, and a hook binary reached
+// through QUIL_SANDBOX_QUILD with a comma in its path would fail the spawn
+// with a raw docker parse error instead of this refusal.
+//
+// A comma is the one character with no escape: `--mount` fields are
+// comma-separated and docker offers no quoting for them. (Colons are fine —
+// that is why the mounts moved off `-v`.)
+//
+// The paths come from Mounts(m) rather than a hand-written list, because a
+// hand-written one drifts: the first version enumerated four fields and missed
+// HostAdminDir. Asking the mount set means a mount added later is covered
+// without anyone remembering this exists.
+func (m Mapping) Validate() error {
+	for _, mt := range Mounts(m) {
+		if strings.Contains(mt.host, ",") {
+			return fmt.Errorf("%w: %q contains a comma, which a docker --mount source cannot express",
+				ErrUnsafeMapping, mt.host)
+		}
+	}
+	return nil
+}
+
 // ErrUnsafeMapping reports a checkout this package refuses to sandbox. Every
 // wrapped case is one where producing a mapping would defeat the sandbox, so
 // the caller must surface it as a spawn error and never fall back to a host
@@ -264,21 +292,8 @@ func refuse(quilDir string, m Mapping) error {
 		// where it really is.
 		return fmt.Errorf("%w: cannot resolve QUIL_HOME %q: %v", ErrUnsafeMapping, quilDir, err)
 	}
-	// A comma in a host path cannot be expressed as a `--mount` source: the
-	// fields are comma-separated and docker offers no escaping. Refused at the
-	// boundary rather than emitted as an argument docker would mis-split into
-	// options nobody chose.
-	//
-	// The list is derived from Mounts(m) rather than hand-written, because a
-	// hand-written one drifts: the first version listed four paths and missed
-	// HostAdminDir, which a linked worktree whose NAME contains a comma
-	// reaches directly. Asking the mount set itself means a mount added later
-	// is covered without anyone remembering this check exists.
-	for _, mt := range Mounts(m) {
-		if strings.Contains(mt.host, ",") {
-			return fmt.Errorf("%w: %q contains a comma, which a docker --mount source cannot express",
-				ErrUnsafeMapping, mt.host)
-		}
+	if err := m.Validate(); err != nil {
+		return err
 	}
 	for _, cand := range []struct{ what, path string }{
 		{"the worktree", m.HostWorktree},
