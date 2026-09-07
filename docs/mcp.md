@@ -50,7 +50,7 @@ The result: your AI can **see what's in your build pane and react**, instead of 
 
 Each client has its own config file. Add the snippet below, restart the client, and Quil shows up in the tool picker.
 
-You need `quil` on the AI client's `PATH`. If `quil --version` works in your shell, you're set. If your AI client doesn't inherit your shell PATH (common on macOS for GUI apps), use the absolute path — e.g., `~/.local/bin/quil`.
+You need `quil` on the AI client's `PATH`. If `quil version` works in your shell, you're set. If your AI client doesn't inherit your shell PATH (common on macOS for GUI apps), use the absolute path — e.g., `~/.local/bin/quil`.
 
 ### Claude Desktop
 

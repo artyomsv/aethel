@@ -20,7 +20,7 @@
 | [Keybindings](keybindings.md) | Full keymap, customization syntax, what to bind and what to leave for the PTY |
 | [tmux comparison](tmux-comparison.md) | The `tmux` preset against tmux's own default prefix table, and how to switch between keymaps |
 | [Configuration](configuration.md) | `~/.quil/config.toml` reference — every section + every key |
-| [MCP](mcp.md) | **Let your AI assistant drive Quil.** Wiring for Claude Desktop / Claude Code / Cursor / VS Code Copilot + all 17 tools documented + redaction model |
+| [MCP](mcp.md) | **Let your AI assistant drive Quil.** Wiring for Claude Desktop / Claude Code / Cursor / VS Code Copilot + all 18 tools documented + redaction model |
 
 ## Customization
 
@@ -32,7 +32,7 @@
 
 | Doc | What's in it |
 |---|---|
-| [Architecture](architecture.md) | All 25 ADRs — client-daemon split, IPC protocol, PTY cross-platform, persistence model, plugin system |
+| [Architecture](architecture.md) | All 30 ADRs — client-daemon split, IPC protocol, PTY cross-platform, persistence model, plugin system, SSH transport, projects + router, worktree panes, keymap registry |
 | [Vision](vision.md) | The project's why — what problem Quil solves and how |
 | [Product requirements](prd.md) | Original PRD (historical reference) |
 | [Roadmap](roadmap.md) | Milestone summary + planned work — see also [roadmap/](roadmap/) for per-feature PRDs |

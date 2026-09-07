@@ -226,9 +226,9 @@ level = "info"                     # debug | info | warn | error
 max_size_mb = 10
 max_files = 3
 
-[security]
-encrypt_tokens = true              # Encrypt scraped tokens at rest
-redact_secrets = true              # Redact known secret patterns in logs
+[security]                         # NEVER IMPLEMENTED — section removed from the
+encrypt_tokens = true              #   real config. Token encryption was not built;
+redact_secrets = true              #   MCP log redaction is unconditional instead.
 
 [ui]
 tab_dock = "top"                   # top | bottom | left | right
@@ -633,9 +633,9 @@ The PRD captures the original v1 plan. The product has shipped past M5 in tightl
 | **M6: Pane Focus Mode** | Done | `Ctrl+E` toggles the active pane to fill the tab — other panes keep running, layout tree intact, focus state not persisted |
 | **M7: Pane Notes** | Done | `Alt+E` opens a plain-text notes editor next to the active pane; one file per pane (`~/.quil/notes/<pane-id>.md`); 30 s debounced auto-save + explicit `Ctrl+S` + flush on exit. Notes outlive the pane. See [roadmap/pane-notes.md](roadmap/pane-notes.md) |
 | **M8: Bubble Tea v2 Migration** | Done | Migrated to Bubble Tea v2 (`charm.land/bubbletea/v2`) and Lipgloss v2 with declarative `View` / typed mouse events / `KeyPressMsg`. Added platform-native clipboard, terminal text selection, editor selection / clipboard / word jumps, beta disclaimer dialog, runtime `config.Save()` |
-| **M10: MCP Server** | Done | `quil mcp` exposes 17 tools over Model Context Protocol stdio so any MCP-capable client (Claude Desktop, Claude Code, Cursor) can drive the live workspace. See [roadmap/mcp-server.md](roadmap/mcp-server.md) |
+| **M10: MCP Server** | Done | `quil mcp` exposes 18 tools over Model Context Protocol stdio so any MCP-capable client (Claude Desktop, Claude Code, Cursor) can drive the live workspace. See [roadmap/mcp-server.md](roadmap/mcp-server.md) |
 | **M12: Notification Center** | Done | Daemon event queue with process-exit / OSC 133 / bell / smart-idle detection; non-modal `Alt+N` sidebar with severity colours and a pane-history stack (`Alt+Backspace`); blocking and non-blocking MCP tools. See [roadmap/notification-center.md](roadmap/notification-center.md) |
-| **M13: Memory Reporting** | Done | Per-pane Go-heap + PTY RSS surfaced in a status-bar `mem <n>` segment, an F1 → Memory dialog, and two MCP tools (`get_memory_report`, `get_pane_memory`). Cross-platform RSS via `/proc/<pid>/status` / `ps` / `GetProcessMemoryInfo` |
+| **M13: Memory Reporting** | Done | Per-pane Go-heap + PTY RSS surfaced in a status-bar `mem <n>` segment and two MCP tools (`get_memory_report`, `get_pane_memory`). Cross-platform RSS via `/proc/<pid>/status` / `ps` / `GetProcessMemoryInfo`. The F1 → Memory dialog was replaced in v1.63.0 by F1 → Processes, which adds the full process tree and CPU |
 | **v1.8.0+ patch milestones** | Done | Client/daemon version handshake (auto-restart on mismatch), VT-emulator drain goroutine + Update watchdog, claude-code SessionStart hook for session-id rotation, notes editor soft-wrap. See [CHANGELOG.md](../CHANGELOG.md) |
 
 These milestones are intentionally scope-limited follow-ups that did not warrant a full PRD revision; their designs live in `roadmap/<feature>.md` (or `superpowers/specs/` for memory reporting), and the priority matrix lives in [roadmap.md](roadmap.md).

@@ -11,14 +11,17 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [OpenCode session-id tracking](#opencode-session-id-tracking)
   - [Codex session-id tracking](#codex-session-id-tracking)
   - [AI session resume](#ai-session-resume)
+  - [Wide canvas (no-resize AI panes)](#wide-canvas-no-resize-ai-panes)
 - [Layout & navigation](#layout--navigation)
   - [tmux-style pane splits](#tmux-style-pane-splits)
   - [Spatial pane navigation](#spatial-pane-navigation)
   - [Live CWD tracking](#live-cwd-tracking)
   - [Pane focus mode](#pane-focus-mode)
   - [Tab customization](#tab-customization)
+  - [New tab, with the pane you actually want](#new-tab-with-the-pane-you-actually-want)
 - [Input & clipboard](#input--clipboard)
   - [Mouse & keyboard](#mouse--keyboard)
+  - [Command palette](#command-palette)
   - [Pane context menu](#pane-context-menu)
   - [Text selection & clipboard](#text-selection--clipboard)
   - [Image paste from clipboard](#image-paste-from-clipboard)
@@ -38,10 +41,14 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Desktop notifications](#desktop-notifications)
   - [Processes and memory](#processes-and-memory)
   - [Leveled logger + log viewer](#leveled-logger--log-viewer)
+- [Projects](#projects)
+  - [Projects on another machine](#projects-on-another-machine)
 - [Pane notes](#pane-notes)
 - [Operations](#operations)
   - [Self-healing daemon](#self-healing-daemon)
   - [Client/daemon version handshake](#clientdaemon-version-handshake)
+  - [Auto-update](#auto-update)
+  - [What's New after an upgrade](#whats-new-after-an-upgrade)
   - [Remote daemon over SSH](#remote-daemon-over-ssh)
   - [Cross-platform](#cross-platform)
 
@@ -249,18 +256,23 @@ Prompt text is sanitized before display, on both sides of the connection — con
 
 ### Built-in plugins
 
-Panes aren't just shells. Press `Ctrl+N` to create a typed pane from 5 built-in plugins:
+Panes aren't just shells. Press `Ctrl+N` to create a typed pane from 11 built-in plugins — two compiled into the binary, nine written to `~/.quil/plugins/` as editable TOML on first run:
 
 | Plugin | Category | Resume strategy |
 |---|---|---|
 | **Terminal** | Built-in shell | Restore working directory |
+| **Terminal (keeps content on squeeze)** | Built-in shell | Restore working directory; window-sized canvas, so a pane squeeze never cuts content |
 | **Claude Code** | AI Assistant | UUID-based session resume + `SessionStart` hook for rotations |
 | **OpenCode** *(beta)* | AI Assistant | JS plugin records `session.*` events; restore via `--session <id>` |
 | **Codex** | AI Assistant | Claude-compatible hooks registered through a trusted `-c hooks=…` override; restore via `resume <id>` |
+| **lazygit** | Tools | Re-run same command — also a per-tab `Alt+G` overlay |
+| **hunk** | Tools | Re-run same command — also a per-tab `Alt+D` overlay, sharing lazygit's slot |
+| **k9s** | Tools | Re-run same command; kube context picked from your kubeconfig |
+| **lazysql** | Tools | Re-run same command; connections stay in lazysql's own manager |
 | **SSH** *(POC)* | Remote | Re-run same command |
 | **Stripe** *(POC)* | Tools | Re-run same command |
 
-Each plugin defines its own spawn command, default args, resume strategy, idle pattern detection, and error handlers.
+Each plugin defines its own spawn command, default args, resume strategy, idle pattern detection, and error handlers. The ones that wrap an external binary are offered only when that binary is on `PATH`, and greyed with an install link when it is not — checked per machine, so a remote project reports what *that* host has.
 
 ### Pane setup dialog
 
@@ -599,6 +611,25 @@ found — if something newer than the staged version has shipped, that is
 what gets fetched and offered. Opening F1 also refreshes the row's label.
 The update row is local-only: with a remote project active it says so
 instead of acting, because applying swaps this machine's binaries.
+
+### What's New after an upgrade
+
+The first launch on a new version opens a summary of the releases you skipped,
+so an update is not a silent binary swap. Features and changes are shown in
+full; fixes are collapsed to a count that `→` expands. `Esc` closes it, and it
+is reachable at any time from **F1 → What's New**.
+
+The text is not the changelog. Each PR writes a one-line `headline:` beside its
+changelog fragment, and the release pipeline appends those to a file the binary
+embeds — so the dialog stays in the register you can read in half a minute
+rather than repeating a full entry. See
+[`changelog.d/README.md`](../changelog.d/README.md) for the fragment format.
+
+The marker it compares against is the last version you actually *ran*, not the
+last one you were told about, so dismissing an update offer never suppresses the
+summary for a version you never installed. Nothing is backfilled: a version is
+either present with complete data or absent, so the file starts empty on an
+install that predates the feature.
 
 ### Remote daemon over SSH
 
