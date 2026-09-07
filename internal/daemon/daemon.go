@@ -191,6 +191,15 @@ type Daemon struct {
 	// most one blocking-FS permit held for worktreeAddTimeout.
 	worktreeAdding atomic.Bool
 
+	// sandboxCap caches the answer to "can this machine run a container".
+	//
+	// Not an atomic.Bool single-flight like the dialog RPCs above, because
+	// this one CACHES: those reject a concurrent request outright, since a
+	// second directory listing has nothing useful to say, whereas a second
+	// capability request wants the same answer the first is already
+	// fetching. See its own type for why that difference matters.
+	sandboxCap sandboxCap
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -1440,6 +1449,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 
 	case ipc.MsgWorktreeStatusReq:
 		d.handleWorktreeStatusReq(conn, msg)
+	case ipc.MsgSandboxCapReq:
+		d.handleSandboxCapReq(conn, msg)
 	case ipc.MsgKubeCtxReq:
 		d.handleKubeCtxReq(conn, msg)
 	case ipc.MsgPluginListReq:
