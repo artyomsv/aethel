@@ -216,7 +216,14 @@ func ContainerName(paneID string) string { return "quil-" + paneID }
 // No --privileged, no user-supplied flag of any kind, and no -v beyond the
 // computed set. The image reference is the ONLY thing the user controls, and
 // the caller validates it before it reaches here.
-func RunArgs(spec Spec, m Mapping, id Identity, hostGOOS string, cmd string, cmdArgs []string) []string {
+// extraEnv carries a plugin's own [command] env. It is appended AFTER the
+// computed set, and docker takes the last -e for a repeated name, so the
+// caller must strip anything the container defines for itself before passing
+// it here — a plugin that redefined QUIL_HOOK_HOME or GIT_OBJECT_DIRECTORY
+// would silently repoint the hook spool or the object store at a path outside
+// the mount set.
+func RunArgs(spec Spec, m Mapping, id Identity, hostGOOS string, extraEnv []string,
+	cmd string, cmdArgs []string) []string {
 	args := []string{
 		"run",
 		"--name", ContainerName(m.PaneID),
@@ -234,6 +241,9 @@ func RunArgs(spec Spec, m Mapping, id Identity, hostGOOS string, cmd string, cmd
 		args = append(args, "-v", mt.arg())
 	}
 	for _, e := range Env(m, id, hostGOOS) {
+		args = append(args, "-e", e)
+	}
+	for _, e := range extraEnv {
 		args = append(args, "-e", e)
 	}
 	if id.ForwardOAuthToken {

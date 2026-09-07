@@ -208,7 +208,7 @@ func TestEnv_GitConfigCountMatches(t *testing.T) {
 // own environment when given the bare name.
 func TestRunArgs_TokenNeverCarriesItsValue(t *testing.T) {
 	m := testMapping(t)
-	args := RunArgs(Spec{Image: "img"}, m, Identity{ForwardOAuthToken: true}, "linux", "claude", nil)
+	args := RunArgs(Spec{Image: "img"}, m, Identity{ForwardOAuthToken: true}, "linux", nil, "claude", nil)
 	var found bool
 	for _, a := range args {
 		if a == oauthTokenVar {
@@ -228,7 +228,7 @@ func TestRunArgs_TokenNeverCarriesItsValue(t *testing.T) {
 // failure this feature can produce.
 func TestRunArgs_NoRmAndNoPrivileged(t *testing.T) {
 	m := testMapping(t)
-	args := RunArgs(Spec{Image: "img"}, m, Identity{}, "linux", "claude", []string{"--x"})
+	args := RunArgs(Spec{Image: "img"}, m, Identity{}, "linux", nil, "claude", []string{"--x"})
 	for _, a := range args {
 		if a == "--rm" || a == "--privileged" {
 			t.Errorf("argv contains %s", a)
@@ -243,7 +243,7 @@ func TestRunArgs_NoRmAndNoPrivileged(t *testing.T) {
 // on quil.pane alone would let a dev daemon force-remove production containers.
 func TestRunArgs_CarriesBothLabels(t *testing.T) {
 	m := testMapping(t)
-	args := RunArgs(Spec{Image: "img"}, m, Identity{QuilHomeLabel: "abc123"}, "linux", "claude", nil)
+	args := RunArgs(Spec{Image: "img"}, m, Identity{QuilHomeLabel: "abc123"}, "linux", nil, "claude", nil)
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "quil.pane=pane1") {
 		t.Error("quil.pane label missing")
@@ -255,10 +255,10 @@ func TestRunArgs_CarriesBothLabels(t *testing.T) {
 
 func TestRunArgs_UserOnlyWhenSet(t *testing.T) {
 	m := testMapping(t)
-	if strings.Contains(strings.Join(RunArgs(Spec{Image: "i"}, m, Identity{}, "windows", "c", nil), " "), "--user") {
+	if strings.Contains(strings.Join(RunArgs(Spec{Image: "i"}, m, Identity{}, "windows", nil, "c", nil), " "), "--user") {
 		t.Error("--user must be omitted when the host does not need it")
 	}
-	if !strings.Contains(strings.Join(RunArgs(Spec{Image: "i"}, m, Identity{User: "1000:1000"}, "linux", "c", nil), " "), "--user") {
+	if !strings.Contains(strings.Join(RunArgs(Spec{Image: "i"}, m, Identity{User: "1000:1000"}, "linux", nil, "c", nil), " "), "--user") {
 		t.Error("--user is missing on a host that needs it")
 	}
 }

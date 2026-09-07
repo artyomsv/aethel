@@ -101,7 +101,28 @@ type Pane struct {
 	// it into a refusal with the reason on screen. Cleared by spawnPane like
 	// SpawnError, so Alt+R gets the user an ordinary shell.
 	WorktreeInterrupted bool
-	Type                string            // Plugin name (default: "terminal")
+	// SandboxImage names the container image a sandbox pane runs in, and its
+	// non-emptiness IS the "this pane is sandboxed" flag. PERSISTED,
+	// PluginMu-protected, written once at creation.
+	//
+	// A restored pane must never silently become a host pane. The persisted
+	// TYPE carries the sandbox prefix for that reason (see sandboxPaneType):
+	// a daemon too old to know this field would otherwise restore a
+	// sandbox claude-code pane as an ordinary claude-code pane pointed at the
+	// worktree — an agent on the host, un-sandboxed, with no error anywhere.
+	// Auto-update has a rollback path, so "too old" is reachable forwards.
+	SandboxImage string
+	// ContainerCWD is the directory the agent ran in INSIDE the container.
+	// PERSISTED, PluginMu-protected.
+	//
+	// It is what the resume path needs and cannot re-derive: Claude stores a
+	// transcript under a directory name escaped from its own working
+	// directory, so locating the pane's own session means knowing the path
+	// the container used, not the host path CWD holds. A mismatch between
+	// this and a freshly computed one means the repository moved, and the
+	// pane says so rather than silently starting a fresh conversation.
+	ContainerCWD string
+	Type         string            // Plugin name (default: "terminal")
 	PluginState         map[string]string // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,

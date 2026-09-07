@@ -35,6 +35,7 @@ import (
 	"github.com/artyomsv/quil/internal/plugin"
 	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/ringbuf"
+	"github.com/artyomsv/quil/internal/sandbox"
 	"github.com/artyomsv/quil/internal/shellinit"
 	"github.com/artyomsv/quil/internal/version"
 	"github.com/charmbracelet/x/ansi"
@@ -4106,12 +4107,20 @@ var readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
 // different quoting rules, and the override value carries quotes — the same
 // bug class the inline Claude --settings JSON hit, with no file form to fall
 // back to. So a shim disables the hook rather than risk a split argument.
-func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env []string) {
-	if codexhook.IsShim(resolvedCmd) {
+// hookGOOS is the OS the CHILD runs on, which is the daemon's own only for a
+// host pane. It reaches THREE independent decisions here, and switching fewer
+// than all of them leaves codex prompting for trust on every pane: the hook
+// command's shell spelling, the session-flags path that is half the trust key,
+// and the shim check.
+func codexSpawnPrep(hp hookPaths, paneID, hookMode, resolvedCmd, hookGOOS string) (prefix, env []string) {
+	// The shim hazard is a Windows cmd.exe re-parse. A linux container cannot
+	// produce one, and asking about a host path there would answer about the
+	// wrong machine.
+	if hookGOOS == "windows" && codexhook.IsShim(resolvedCmd) {
 		log.Printf("warning: pane %s: codex resolves to a cmd.exe shim (%s); the inline hook override cannot survive its re-parse — codex hooks disabled (notifications, work state, input history, session resume). Install the native codex binary or set [command] path in codex.toml", paneID, resolvedCmd)
 		return nil, nil
 	}
-	exePath, err := quildExeFn()
+	exePath, err := hp.exe()
 	if err != nil {
 		log.Printf("warning: pane %s: cannot resolve quild executable: %v — codex hooks disabled (notifications, work state, input history, session resume)", paneID, err)
 		return nil, nil
@@ -4124,7 +4133,7 @@ func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env 
 		log.Printf("warning: pane %s: %v — codex hooks disabled", paneID, err)
 		return nil, nil
 	}
-	prefix, err = codexhook.ConfigOverrideArgs(codexhook.HookCommand(), runtime.GOOS)
+	prefix, err = codexhook.ConfigOverrideArgs(codexhook.HookCommandFor(hookGOOS), hookGOOS)
 	if err != nil {
 		log.Printf("warning: pane %s: build codex hook override: %v — codex hooks disabled", paneID, err)
 		return nil, nil
@@ -4139,7 +4148,7 @@ func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env 
 	env = []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
-		"QUIL_HOOK_HOME=" + quilDir,
+		"QUIL_HOOK_HOME=" + hp.RefDir,
 		exeEnv,
 	}
 	return prefix, env
@@ -4164,18 +4173,29 @@ var opencodeHookScriptStatFn = func(path string) error {
 // entries against its own CWD, not the daemon's. With `prompts_cwd = true`
 // the child CWD is user-chosen and may differ from where the daemon was
 // launched, so a relative quilDir would silently break tracking.
-func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
-	absQuilDir, err := filepath.Abs(quilDir)
+func opencodeSpawnPrep(hp hookPaths, paneID, hookMode string) []string {
+	absQuilDir, err := filepath.Abs(hp.HostDir)
 	if err != nil {
-		log.Printf("warning: pane %s: absolutize quilDir %q: %v — session-id rotation tracking disabled", paneID, quilDir, err)
+		log.Printf("warning: pane %s: absolutize quilDir %q: %v — session-id rotation tracking disabled", paneID, hp.HostDir, err)
 		return nil
 	}
 	scriptPath := opencodehook.ScriptPath(absQuilDir)
+	// A sandbox pane's tree does not carry the script — EnsureScripts writes
+	// it once into $QUIL_HOME — so it is copied in here. The config content
+	// below embeds an ABSOLUTE path and opencode refuses a relative one, so
+	// a host path there would name a file the container cannot open and
+	// session tracking would fail with nothing on screen.
+	if hp.RefDir != hp.HostDir {
+		if err := copyOpencodeScript(absQuilDir, hp.HostDir); err != nil {
+			log.Printf("warning: pane %s: stage opencode plugin script: %v — session-id rotation tracking disabled", paneID, err)
+			return nil
+		}
+	}
 	if err := opencodeHookScriptStatFn(scriptPath); err != nil {
 		log.Printf("warning: pane %s: opencode plugin script unavailable (%s): %v — session-id rotation tracking disabled", paneID, scriptPath, err)
 		return nil
 	}
-	cfg, err := opencodehook.BuildConfigContent(scriptPath)
+	cfg, err := opencodehook.BuildConfigContent(hp.ref(scriptPath))
 	if err != nil {
 		log.Printf("warning: pane %s: build opencode config content: %v — session-id rotation tracking disabled", paneID, err)
 		return nil
@@ -4186,7 +4206,7 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 	}
 	return []string{
 		"QUIL_PANE_ID=" + paneID,
-		"QUIL_HOOK_HOME=" + absQuilDir,
+		"QUIL_HOOK_HOME=" + hp.RefDir,
 		"QUIL_HOOK_MODE=" + mode,
 		"OPENCODE_CONFIG_CONTENT=" + cfg,
 	}
@@ -4208,8 +4228,8 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 // UNVERIFIED — Quil prepends its own, so depending on Claude's precedence
 // either the user loses their settings or Quil loses rotation tracking. See §7
 // of docs/superpowers/specs/2026-08-19-claude-session-seam-design.md.
-func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
-	exePath, err := quildExeFn()
+func claudeHookSpawnPrep(hp hookPaths, paneID, hookMode string, userArgs []string) (prefix, env []string) {
+	exePath, err := hp.exe()
 	if err != nil {
 		log.Printf("warning: pane %s: cannot resolve quild executable: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
@@ -4219,11 +4239,15 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 		log.Printf("warning: pane %s: build claude settings JSON: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
 	}
-	settingsPath, err := claudehook.WriteSettingsFile(quilDir, paneID, js)
+	settingsPath, err := claudehook.WriteSettingsFile(hp.HostDir, paneID, js)
 	if err != nil {
 		log.Printf("warning: pane %s: write hook settings file: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
 	}
+	// The file is WRITTEN on the host and NAMED for whoever will read it. For
+	// a sandbox pane those differ: claude loads it from inside the container,
+	// where the host path does not exist.
+	settingsPath = hp.ref(settingsPath)
 	for _, a := range userArgs {
 		if a == "--settings" {
 			log.Printf("warning: pane %s: claude-code args already contain --settings; precedence with Quil's hook entry is unverified", paneID)
@@ -4241,7 +4265,7 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	env = []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
-		"QUIL_HOOK_HOME=" + quilDir,
+		"QUIL_HOOK_HOME=" + hp.RefDir,
 	}
 	// WriteSettingsFile answers ("", nil) when there was nothing to write, and
 	// its contract is that the caller then SKIPS the flag rather than passing
@@ -4733,7 +4757,17 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// on the next lazy spawn — after the user had already retried it.
 	pane.WorktreeInterrupted = false
 	typ := pane.Type
+	sandboxImage := pane.SandboxImage
 	pane.PluginMu.Unlock()
+
+	// A sandboxed pane's persisted type carries a prefix, so the plugin it
+	// names has to be recovered before the registry is asked. A daemon too
+	// old to know the prefix looks the whole string up, misses, and takes the
+	// existing fallback to "terminal" — which is the point: a shell is wrong
+	// but visible, where an un-sandboxed agent on the host is wrong and
+	// silent.
+	typ, sandboxed := splitSandboxType(typ)
+	sandboxed = sandboxed || sandboxImage != ""
 
 	p := d.registry.Get(typ)
 	if p == nil {
@@ -4861,24 +4895,61 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// through OPENCODE_CONFIG_CONTENT (inline JSON) referencing a JS plugin
 	// under $QUIL_HOME/opencodehook/. OPENCODE_CONFIG_CONTENT merges with the
 	// user's own opencode config so their plugins/agents/modes still apply.
+	// The sandbox mapping is resolved HERE, before the hook switch, because
+	// every hook prep below bakes a path into a file or an argument that only
+	// the CONTAINER will read. Wrapping afterwards would leave a host path
+	// inside the settings JSON claude loads from inside the container.
+	//
+	// A failure is a refusal, never a host spawn. That is the whole contract
+	// of the feature: a pane the user asked to isolate must not quietly run
+	// unisolated because Docker Desktop was not started.
+	var sbox *sandbox.Mapping
+	if sandboxed {
+		if ok, why := d.sandboxAvailable(context.Background()); !ok {
+			return fmt.Errorf("sandbox unavailable: %s", why)
+		}
+		m, err := d.prepareSandbox(context.Background(), pane, sandboxImage)
+		if err != nil {
+			return err
+		}
+		sbox = &m
+	}
+
 	envVars := append([]string{}, p.Command.Env...)
 	// opencode first, for the reason refreshPluginStateFromHooks documents:
 	// these arms are no longer disjoint by construction, and prepending
 	// `--settings <path>` to opencode's argv would pass it a flag it does not
 	// have while skipping the session read it does need.
+	//
+	// A sandbox pane routes every one of these through the container's own
+	// paths and OS instead of the host's: hp names the pane's tree as the
+	// container sees it, and hookGOOS is what the child runs, not what the
+	// daemon runs.
+	hp := hostHookPaths(config.QuilDir())
+	hookGOOS := runtime.GOOS
+	if sbox != nil {
+		hp = containerHookPaths(*sbox)
+		hookGOOS = "linux"
+	}
 	switch {
 	case p.Name == "opencode":
-		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
+		envVars = append(envVars, opencodeSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
 	case p.Name == plugin.CodexPluginName:
 		// Codex rides a `-c hooks=…` override carrying its own trust hashes
 		// (see internal/codexhook). The hook needs the RESOLVED binary to
 		// refuse a cmd.exe shim; the LookPath below runs after this switch,
 		// so resolve here as well.
+		//
+		// A sandbox pane resolves nothing on the host: the codex binary is
+		// inside the container, and a host lookup would either fail or hand
+		// the shim check a path from the wrong machine.
 		resolvedCmd := cmd
-		if r, err := exec.LookPath(cmd); err == nil {
-			resolvedCmd = r
+		if sbox == nil {
+			if r, err := exec.LookPath(cmd); err == nil {
+				resolvedCmd = r
+			}
 		}
-		prefix, hookEnv := codexSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Codex, resolvedCmd)
+		prefix, hookEnv := codexSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Codex, resolvedCmd, hookGOOS)
 		if len(prefix) > 0 {
 			// `-c` is global, so it precedes both a fresh start and the
 			// `resume <id>` subcommand the restore branch appends.
@@ -4886,7 +4957,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 		envVars = append(envVars, hookEnv...)
 	case p.UsesClaudeSessions():
-		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
+		settingsArgs, hookEnv := claudeHookSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
 		}
@@ -4911,9 +4982,25 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	}
 	pane.PluginMu.Unlock()
 
-	// Resolve command to absolute path so CWD doesn't interfere with lookup
-	if resolved, err := exec.LookPath(cmd); err == nil {
-		cmd = resolved
+	// Resolve command to absolute path so CWD doesn't interfere with lookup.
+	//
+	// Skipped for a sandbox pane: the agent binary lives INSIDE the
+	// container, so a host lookup either fails or — worse — resolves a
+	// same-named binary on the host and puts that path in the container's
+	// argv, where it does not exist.
+	if sbox == nil {
+		if resolved, err := exec.LookPath(cmd); err == nil {
+			cmd = resolved
+		}
+	} else {
+		cmd, args = d.wrapInContainer(*sbox, pane, p, sandboxImage, cmd, args, envVars)
+		// The container carries the pane's environment through `docker run
+		// -e`, so the PTY child — the docker CLI itself — must not also
+		// inherit it. The one exception is the OAuth token, which travels by
+		// NAME so docker forwards the value from its own environment; that
+		// is why it is set here and never in argv.
+		envVars = dockerCLIEnv(d.cfg.Sandbox.Auth)
+		ptySession.SetEnv(envVars)
 	}
 
 	ptySession.SetCWD(pane.CWD)

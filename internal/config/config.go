@@ -28,6 +28,7 @@ type Config struct {
 	Overlay      OverlayConfig      `toml:"overlay"`
 	Update       UpdateConfig       `toml:"update"`
 	Remote       RemoteConfig       `toml:"remote"`
+	Sandbox      SandboxConfig      `toml:"sandbox"`
 	// Destinations are the ADDITIONAL daemons this client attaches to beside
 	// the local one, each contributing its projects to the same sidebar. A
 	// slice rather than a map because order is meaningful — it is the order the
@@ -37,6 +38,46 @@ type Config struct {
 	// THAT machine", and quietly attaching the configured extras to it would
 	// make one flag mean two different things.
 	Destinations []Destination `toml:"destinations"`
+}
+
+// SandboxConfig controls AI panes that run inside a Docker container.
+type SandboxConfig struct {
+	// Auth selects how a sandbox pane authenticates Claude Code.
+	//
+	// "" (default) — the user signs in inside the container, once per pane,
+	// into that pane's own config directory. Anthropic documents the fallback
+	// for a browser callback that cannot reach a container: copy the code
+	// shown in the browser and paste it at the prompt.
+	//
+	// "token" — the daemon forwards CLAUDE_CODE_OAUTH_TOKEN from its OWN
+	// environment, by name, so the value never enters argv or any log. This
+	// is the recommended path when running more than one sandbox pane: with
+	// no credential file to share, a per-pane config directory costs nothing.
+	// It gives up Remote Control and claude.ai connectors for that pane.
+	//
+	// Quil never reads, copies, stores or refreshes a credential in either
+	// mode.
+	Auth string `toml:"auth"`
+
+	// SharedClaudeConfig gives every sandbox pane ONE Claude config
+	// directory, so the user signs in once instead of once per pane.
+	//
+	// It merges them into one trust domain, and the cost is real: that
+	// directory holds user-scope settings (hooks), .claude.json (MCP
+	// servers), every transcript and the prompt history, so any sandbox pane
+	// can then plant a hook or an MCP server that every OTHER sandbox pane's
+	// claude executes inside its own container. Off by default for that
+	// reason; `auth = "token"` avoids the trade entirely.
+	SharedClaudeConfig bool `toml:"shared_claude_config"`
+
+	// DefaultImage pre-fills the setup dialog's image field.
+	//
+	// Ships empty and there is no built-in fallback. Quil publishes no image:
+	// running Claude Code inside a vendor's own image triggers the Commercial
+	// Terms conditions for "preinstalling or running Claude Code in your
+	// products or services", while a user-supplied image means Quil
+	// pre-installs nothing and that section never applies.
+	DefaultImage string `toml:"default_image"`
 }
 
 // Destination names one remote daemon to attach at launch.
