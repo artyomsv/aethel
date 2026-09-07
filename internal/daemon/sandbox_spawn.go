@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/opencodehook"
 	"github.com/artyomsv/quil/internal/plugin"
 	"github.com/artyomsv/quil/internal/sandbox"
@@ -29,6 +30,43 @@ func hookModeFor(cfg config.Config, p *plugin.PanePlugin) string {
 	default:
 		return cfg.Notification.Hooks.Claude
 	}
+}
+
+// applySandboxSpec records the container image a create asked for, so
+// spawnPane's sandbox branch fires.
+//
+// It is the ONE place a wire spec becomes pane state, and it must be called by
+// every create path. The first version of this feature had no caller at all:
+// the dialog sent the spec, three create paths applied Type and InstanceName
+// beside it, and none of them touched Sandbox — so `spawnPane` gated on a
+// field only RESTORE ever wrote, and "Run in a Docker container" spawned the
+// agent on the HOST, un-isolated, with no error anywhere. That is precisely
+// the silent-isolation failure this whole feature exists to prevent, and it
+// shipped because no test drove a create with a spec through to a docker argv.
+//
+// The image is validated HERE rather than at the spawn, because this is the
+// boundary between an untrusted wire value and daemon state. It reaches
+// `docker run` as the first positional argument, and docker parses options up
+// to the first operand — so an image beginning with "-" is read as docker
+// OPTIONS, and any IPC client could inject --privileged, -v /:/host,
+// --entrypoint or --network=host. A rejected image leaves the pane
+// un-sandboxed, which the caller must then refuse rather than spawn.
+func applySandboxSpec(pane *Pane, spec *ipc.SandboxSpec) error {
+	if spec == nil {
+		return nil
+	}
+	if !sandbox.ImageOK(spec.Image) {
+		// Logged by LENGTH, never by value: the daemon log is rendered by the
+		// F1 viewer, which does not pass through a VT emulator, so a hostile
+		// string must not reach it. Same rule the resume-id guard follows.
+		log.Printf("pane %s: refusing sandbox image of length %d — not a valid image reference",
+			pane.ID, len(spec.Image))
+		return fmt.Errorf("invalid container image reference")
+	}
+	pane.PluginMu.Lock()
+	pane.SandboxImage = spec.Image
+	pane.PluginMu.Unlock()
+	return nil
 }
 
 // sandboxTypePrefix marks a persisted pane type as sandboxed.

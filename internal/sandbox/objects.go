@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // The object-store half of the design.
@@ -30,6 +31,19 @@ import (
 //   - Remove only THIS pane's line. Two sandbox panes on one repository write
 //     two lines, and the user may have written one of their own.
 
+// alternatesMu serialises the read-modify-write of an alternates file.
+//
+// Two sandbox panes on ONE repository is the designed case, not an edge one —
+// and Add/Remove/Prune are each a read, an edit and a rewrite through a shared
+// temp path. Two of them interleaving loses a line, which is not a cosmetic
+// loss: a pane whose line is dropped has its objects unreachable, and the host
+// answers `fatal: bad object HEAD` for that worktree.
+//
+// A single process-wide mutex rather than one per repository: these calls are
+// rare (pane create, pane teardown, daemon start) and each is a few file
+// operations, so contention is irrelevant next to getting the invariant right.
+var alternatesMu sync.Mutex
+
 // alternatesRel is the file's location under a repository's object store.
 const alternatesRel = "info/alternates"
 
@@ -50,6 +64,9 @@ func AlternatesLine(m Mapping) string { return filepath.Clean(m.HostObjects()) }
 // creating it when absent. Idempotent: a line already present is left alone,
 // so a restart cannot accumulate duplicates.
 func AddAlternate(m Mapping) error {
+	alternatesMu.Lock()
+	defer alternatesMu.Unlock()
+
 	path := AlternatesPath(m)
 	want := AlternatesLine(m)
 
@@ -70,6 +87,9 @@ func AddAlternate(m Mapping) error {
 // Rewriting the file wholesale would drop another sandbox pane's line — and
 // its repository along with it — or a line the user put there themselves.
 func RemoveAlternate(m Mapping) error {
+	alternatesMu.Lock()
+	defer alternatesMu.Unlock()
+
 	path := AlternatesPath(m)
 	want := AlternatesLine(m)
 
@@ -129,6 +149,9 @@ func StaleAlternates(path, sandboxRoot string) ([]string, error) {
 
 // PruneAlternates removes every stale sandbox line from path.
 func PruneAlternates(path, sandboxRoot string) (removed int, err error) {
+	alternatesMu.Lock()
+	defer alternatesMu.Unlock()
+
 	stale, err := StaleAlternates(path, sandboxRoot)
 	if err != nil || len(stale) == 0 {
 		return 0, err
@@ -362,17 +385,24 @@ func copyNoClobber(root *os.Root, rel, dst string) (bool, error) {
 	}
 	defer in.Close()
 
-	tmp := dst + ".quiltmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o444)
+	// A UNIQUE temp name, not a fixed one. Two harvests can run at once — the
+	// 30 s ticker and the teardown pass, or shutdown's final harvest beside a
+	// tick already in flight, and nothing joins the ticker — so a shared
+	// dst+".quiltmp" lets one writer O_TRUNC the other's file and the loser
+	// then renames a TRUNCATED object into the user's real repository under a
+	// name git trusts. CreateTemp in the destination directory keeps the
+	// rename on one filesystem.
+	tmpFile, err := os.CreateTemp(filepath.Dir(dst), ".quiltmp-*")
 	if err != nil {
 		return false, fmt.Errorf("sandbox: create object: %w", err)
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+	tmp := tmpFile.Name()
+	if _, err := io.Copy(tmpFile, in); err != nil {
+		tmpFile.Close()
 		os.Remove(tmp)
 		return false, fmt.Errorf("sandbox: copy object: %w", err)
 	}
-	if err := out.Close(); err != nil {
+	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmp)
 		return false, fmt.Errorf("sandbox: close object: %w", err)
 	}

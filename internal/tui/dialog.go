@@ -2516,6 +2516,12 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	instanceArgs := m.selectedInstanceArgs
 	resumeSessionID := m.selectedSessionID
 	cwd := m.selectedCWD
+	// The sandbox choice is captured here for exactly the reason the paragraph
+	// below gives for the worktree one — and it shipped WITHOUT that capture,
+	// so every create sent a nil spec and every sandbox pane ran on the host.
+	// A reset landed in this teardown by mistake; reading the row after it
+	// yields the zero value, which is "off".
+	sbox := m.sandboxSpec()
 	// Captured with the other choices, BEFORE the teardown below clears them.
 	// Reading these after that reset yields the zero value, so the spec would
 	// silently never be sent and every "new branch" would spawn an ordinary
@@ -2568,7 +2574,6 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	m.worktreeScroll = 0
 	m.worktrees = worktreeState{}
 	m.resetSessionSelection()
-	m.resetSandboxField(m.createPaneDialogDest())
 
 	// The new-tab branch returns HERE — after the teardown, before everything
 	// below it — and both halves of that position are load-bearing.
@@ -2585,9 +2590,6 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// leaf is reserved, so there is nothing to unwind and nothing to time out:
 	// the tab arrives whole on the next broadcast.
 	if target == paneTargetNewTab {
-		// nil unless the user turned the row on, so every other create stays
-		// byte-identical on the wire and takes no new branch in the daemon.
-		sbox := m.sandboxSpec()
 		var spec *ipc.WorktreeSpec
 		if newBranch != "" {
 			if newBranchRepo == "" {
@@ -2685,9 +2687,6 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		// The spec, when the user asked for a new branch — replace carries one
 		// exactly as split does. The daemon creates the worktree BEFORE it
 		// touches the pane being replaced, so a failed add costs nothing there.
-		// nil unless the user turned the row on, so every other create stays
-		// byte-identical on the wire and takes no new branch in the daemon.
-		sbox := m.sandboxSpec()
 		var spec *ipc.WorktreeSpec
 		if newBranch != "" {
 			spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
@@ -2805,8 +2804,6 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// The spec, when the user asked for a new branch. RepoRoot is the main
 	// checkout the DAEMON reported, so no path built on this machine reaches
 	// the far one and the worktree cannot land inside the repository.
-	// nil unless the user turned the row on; see the other create paths.
-	sbox := m.sandboxSpec()
 	var spec *ipc.WorktreeSpec
 	if newBranch != "" {
 		// newBranchRepo is non-empty here: the unknown-root case was refused
@@ -3740,9 +3737,21 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 		return m.advanceFromPluginChoice()
 	}
 
+	// Reset the sandbox row HERE — on the way IN, never on a close path. Three
+	// dialog exits skip the teardown, and a flag surviving one of them would
+	// put the next plain create in a container. This is also where the row's
+	// visibility answer is PINNED, so a capability response landing mid-dialog
+	// cannot add or remove a field under a live cursor.
+	m.resetSandboxField(m.createPaneDialogDest())
+
 	// The browser's pre-fill now costs a round trip, so the dialog opens first
 	// and fills in when the daemon answers.
 	var browseCmd tea.Cmd
+	// Refresh the capability alongside it. Docker Desktop is frequently not
+	// running at login and started later, so an answer cached at attach is the
+	// wrong one for most of a daemon's life. The answer lands in destSandbox
+	// for the NEXT open — this dialog keeps the pinned one, deliberately.
+	sandboxCmd := m.requestSandboxCap(m.createPaneDialogDest())
 
 	if p.Command.PromptsCWD {
 		if p.Command.Discover == "git" {
@@ -3778,7 +3787,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 
 	m.dialogEdit = false // browser doesn't use edit mode
 	m.dialog = dialogCreatePaneSetup
-	return tea.Batch(tea.ClearScreen, browseCmd, kubeCmd)
+	return tea.Batch(tea.ClearScreen, browseCmd, kubeCmd, sandboxCmd)
 }
 
 // fallbackToRecentOrBrowser offers the recent-locations quick pick, falling

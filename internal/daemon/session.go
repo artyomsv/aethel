@@ -123,7 +123,7 @@ type Pane struct {
 	// pane says so rather than silently starting a fresh conversation.
 	ContainerCWD string
 	Type         string            // Plugin name (default: "terminal")
-	PluginState         map[string]string // Scraped values (e.g., "session_id": "abc123")
+	PluginState  map[string]string // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,
 	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and

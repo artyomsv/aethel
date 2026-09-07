@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/update"
@@ -80,6 +81,15 @@ func ensureLinuxQuild(ctx context.Context, arch string) (string, error) {
 	return dst, nil
 }
 
+// quildFetchTimeout bounds the whole download-and-extract.
+//
+// spawnPane can run on the requesting client's IPC dispatch goroutine, which
+// processes that connection's messages SEQUENTIALLY — so an unbounded fetch
+// there stops that client's keystrokes to every pane for as long as it takes.
+// update.Stager's own per-request timeout is generous by design (an update is
+// a background task nobody is waiting on); a pane create is not.
+const quildFetchTimeout = 90 * time.Second
+
 // stageLinuxQuild downloads and verifies the release archive for linux/<arch>
 // and extracts quild out of it.
 //
@@ -88,6 +98,9 @@ func ensureLinuxQuild(ctx context.Context, arch string) (string, error) {
 // Stage is already parameterised on GOOS/GOARCH, so a linux stage needs no new
 // download machinery and inherits the checksum verification unchanged.
 func stageLinuxQuild(ctx context.Context, ver, arch, dst string) error {
+	ctx, cancel := context.WithTimeout(ctx, quildFetchTimeout)
+	defer cancel()
+
 	checker := &update.Checker{}
 	rel, err := checker.Release(ctx, "v"+ver)
 	if err != nil {

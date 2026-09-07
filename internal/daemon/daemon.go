@@ -2137,6 +2137,13 @@ func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placehold
 		ResumeSessionID: spec.ResumeSessionID,
 		ReplacePaneID:   placeholderID,
 		Worktree:        spec.Worktree,
+		// This hand-copy is exactly the omission FirstPaneSpec.Sandbox warns
+		// about, and it was made anyway: the dialog's own designed flow — new
+		// tab, worktree chosen, sandbox on — reaches the daemon through here,
+		// so a spec that stopped at the field definition opened a tab whose
+		// agent ran on the host. Any field added to FirstPaneSpec has to be
+		// added here too.
+		Sandbox: spec.Sandbox,
 	}
 	go func() {
 		resp := d.worktreeAddAndCreate(p)
@@ -2520,6 +2527,16 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
 	pane.PluginMu.Unlock()
+	// The sandbox spec joins the fields above, and its absence here was the
+	// whole feature failing open: spawnPane gates the container branch on
+	// pane.SandboxImage, so a create that never set it ran the agent on the
+	// host. A REJECTED image destroys the pane rather than spawning it
+	// un-sandboxed — the user asked for isolation, and quietly not providing
+	// it is the one outcome that must never happen.
+	if err := applySandboxSpec(pane, payload.Sandbox); err != nil {
+		d.session.DestroyPane(pane.ID)
+		return nil, err
+	}
 	if payload.Overlay {
 		// CreatePane already PUBLISHED the pane into the session maps, so a
 		// concurrent snapshot/broadcast goroutine may be reading it — both
@@ -2578,6 +2595,13 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	newPane.Type = paneType
 	newPane.InstanceName = payload.InstanceName
 	newPane.InstanceArgs = payload.InstanceArgs
+	// Before the swap, deliberately. This pane is not published yet, so a
+	// refusal costs nothing — whereas past ReplacePane the OLD pane is gone
+	// whatever else fails, and refusing there would leave the tab short a
+	// pane to satisfy a validation the caller could have failed earlier.
+	if err := applySandboxSpec(newPane, payload.Sandbox); err != nil {
+		return nil, false, err
+	}
 	log.Printf("pane replace: %s -> %s (type=%s)", payload.ReplacePaneID, newPane.ID, paneType)
 
 	// Atomically swap old → new in the tab's pane list
@@ -2588,6 +2612,11 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	// The old pane is no longer reachable via the session — clean up its
 	// hook artifacts so the spool watcher stops re-polling a dead file.
 	d.cleanupPaneArtifacts(payload.ReplacePaneID)
+	// And its container, if it had one. A replace destroys the old pane as
+	// surely as a close does — the worktree-replace path is exactly how a
+	// sandbox pane is created into a fresh worktree, so the placeholder it
+	// supersedes is a routine case rather than a rare one.
+	go d.teardownSandbox(context.Background(), payload.ReplacePaneID)
 
 	// Claim the resume target only once the pane is published, so the claim is
 	// visible to a create racing on the same session (the occupancy scan walks
@@ -6296,6 +6325,14 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 
 	d.broadcastState()
 	d.requestSnapshot()
+
+	// The container goes with the pane on THIS path too. It is easy to miss
+	// because this handler shares no funnel with handleDestroyPane, and
+	// missing it leaks a running container plus a permanent alternates line
+	// in the user's repository — which makes every git command there fail
+	// once its object store is eventually removed. MCP destroy_pane is an
+	// ordinary way to close a pane, not an edge case.
+	go d.teardownSandbox(context.Background(), req.PaneID)
 
 	respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{
 		Success: true,

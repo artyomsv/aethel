@@ -63,14 +63,21 @@ func (c *sandboxCap) get(ctx context.Context) ipc.SandboxCapRespPayload {
 	c.inflight = wg
 	c.mu.Unlock()
 
-	answer := probeSandbox(ctx)
-
-	c.mu.Lock()
-	c.answer = answer
-	c.fetched = time.Now()
-	c.inflight = nil
-	c.mu.Unlock()
-	wg.Done()
+	// The release runs in a defer, and that is not tidiness: this goroutine
+	// holds the ONLY thing that can wake every waiter, so a panic anywhere in
+	// the probe would leave inflight set and the WaitGroup at 1 — and every
+	// later caller, including the spawn path, would block on it forever. A
+	// daemon-wide deadlock behind one failed probe.
+	var answer ipc.SandboxCapRespPayload
+	defer func() {
+		c.mu.Lock()
+		c.answer = answer
+		c.fetched = time.Now()
+		c.inflight = nil
+		c.mu.Unlock()
+		wg.Done()
+	}()
+	answer = probeSandbox(ctx)
 	return answer
 }
 

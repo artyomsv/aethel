@@ -506,8 +506,8 @@ type Model struct {
 	// destination is pinned at open for the same reason.
 	sandboxDialogAvail bool
 	// sandboxOn and sandboxImage are the create dialog's own row state.
-	sandboxOn    bool
-	sandboxImage string
+	sandboxOn        bool
+	sandboxImage     string
 	lastWidth        int        // last known window width (for persistence)
 	lastHeight       int        // last known window height (for persistence)
 	createPaneStep   int        // 0=category, 1=plugin, 2=instance form, 3=split direction
@@ -6783,7 +6783,11 @@ func (m Model) attachToDest(dest string) tea.Cmd {
 		m.sendForDest(dest, m.attachMessage(dest))
 		return nil
 	}
-	return tea.Batch(attachCmd, m.requestPluginListFor(dest), m.overlayTruthDestCmd(dest))
+	return tea.Batch(attachCmd, m.requestPluginListFor(dest), m.overlayTruthDestCmd(dest),
+		// Asked at attach as well as at dialog open: the first Ctrl+N should
+		// already know whether this daemon can host a container, rather than
+		// hiding the row until the second.
+		m.requestSandboxCap(dest))
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.

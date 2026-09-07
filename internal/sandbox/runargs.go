@@ -111,6 +111,14 @@ func Mounts(m Mapping) []mount {
 			mount{joinHost(m.HostGitCommon, "objects"), m.ContainerAlternate(), true},
 			mount{joinHost(m.HostGitCommon, "hooks"), m.ContainerGitCommon() + "/hooks", true},
 			mount{joinHost(m.HostGitCommon, "config"), m.ContainerGitCommon() + "/config", true},
+			// worktrees/ holds the admin directory of every OTHER worktree of
+			// this repository, and it is inside the read-write tree here
+			// because the whole checkout is mounted. Left writable, a
+			// container-side `git worktree prune` unregisters the user's other
+			// worktrees — the same data loss the overlay exists to prevent on
+			// the linked-worktree path, reached through a directory this one
+			// does not otherwise need at all.
+			mount{joinHost(m.HostGitCommon, "worktrees"), m.ContainerGitCommon() + "/worktrees", true},
 		)
 	}
 
