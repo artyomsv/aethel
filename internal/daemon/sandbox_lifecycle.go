@@ -227,6 +227,12 @@ func (d *Daemon) teardownSandbox(ctx context.Context, paneID string) {
 		}
 	}
 	d.sandboxReg.drop(paneID)
+	// Drop the forwarder's read offset with the tree it points into, or a
+	// later pane that draws the same id resumes from a stranger's position
+	// and silently forwards nothing until it catches up.
+	if d.spoolFwd != nil {
+		d.spoolFwd.forget(paneID)
+	}
 }
 
 // sweepSandboxContainers removes containers belonging to THIS daemon whose

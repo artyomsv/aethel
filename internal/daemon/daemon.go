@@ -95,6 +95,12 @@ type Daemon struct {
 	// every 200 ms while the daemon runs.
 	hookSpool *hookevents.Spool
 
+	// spoolFwd moves a sandbox pane's hook events out of its own tree and
+	// into the directory hookSpool scans. Spool reads one flat directory and
+	// cannot see a per-pane subtree, and the per-pane subtree is what keeps
+	// one sandboxed agent out of every other pane's data.
+	spoolFwd *spoolForwarder
+
 	// lastSnapshotDone is the UnixNano of the last completed snapshot().
 	// The snapshot loop is the daemon's liveness canary — it acquires the
 	// same locks (sm.mu, per-pane PluginMu) every wedge so far has parked
@@ -268,6 +274,7 @@ func New(cfg config.Config) *Daemon {
 		snapGens:   make(map[string]uint64),
 	}
 	d.sandboxReg = newSandboxRegistry(config.QuilDir())
+	d.spoolFwd = newSpoolForwarder()
 	d.sandboxReg.load()
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
 	d.procReport = newProcCollector(d.session, memreport.ProcRSSBatch)
@@ -905,6 +912,14 @@ func (d *Daemon) restoreWorkspace() error {
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
+				sandboxImage, _ := paneData["sandbox_image"].(string)
+				containerCWD, _ := paneData["container_cwd"].(string)
+				// The persisted type carries a sandbox prefix; strip it here
+				// so the registry lookup finds the plugin. spawnPane does the
+				// same, and re-derives "is this sandboxed" from either half —
+				// a snapshot written by a version that had only one of them
+				// still restores correctly.
+				paneType, _ = splitSandboxType(paneType)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -920,6 +935,8 @@ func (d *Daemon) restoreWorkspace() error {
 					OutputBuf:    ringbuf.NewRingBuffer(d.session.bufSize),
 					Muted:        muted,
 					Eager:        eager,
+					SandboxImage: sandboxImage,
+					ContainerCWD: containerCWD,
 					// Absent on pre-pin snapshots → false, which is the only
 					// safe default: inventing a mark the user never set would
 					// put a "look here" on a pane with nothing to look at, and
@@ -3951,6 +3968,24 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.WorktreePath != "" {
 				paneData["worktree_path"] = pane.WorktreePath
 			}
+			// The sandbox pair. The image is what makes a restored pane
+			// sandboxed at all; the container CWD is what the resume path
+			// needs and cannot re-derive, since Claude names a transcript
+			// directory after the working directory its own process saw.
+			//
+			// The pane TYPE is written with a sandbox prefix alongside them
+			// (see sandboxPaneType). That is what protects a DOWNGRADE: a
+			// daemon too old to read these keys would otherwise restore a
+			// sandbox pane as an ordinary one pointed at the worktree — an
+			// agent on the host, silently un-sandboxed — where an unknown
+			// type falls back to a plain shell.
+			if pane.SandboxImage != "" {
+				paneData["sandbox_image"] = pane.SandboxImage
+				paneData["type"] = sandboxPaneType(pane.Type)
+			}
+			if pane.ContainerCWD != "" {
+				paneData["container_cwd"] = pane.ContainerCWD
+			}
 			// PERSISTED, unlike the branch it stands for. A snapshot landing
 			// inside the checkout window would otherwise restore an ordinary
 			// terminal in the repository root — the bug this feature removes,
@@ -4571,6 +4606,12 @@ func claudeResumeCandidatesFrom(pane *Pane, rec claudehook.SessionRecord, err er
 				return // same session reached by two routes
 			}
 		}
+		// A sandbox pane's hook recorded a CONTAINER path, and the probe
+		// below stats on the host. Left alone, every candidate answers
+		// "missing", nothing is located, and the pane spawns with
+		// --session-id against an id whose transcript exists — exit 129,
+		// the very failure locatedOwnSession exists to prevent.
+		transcript = hostTranscriptPath(pane, transcript)
 		cands = append(cands, resumeCandidate{
 			id: id, source: source, transcript: transcript, state: transcriptState(id, transcript),
 		})
@@ -5230,6 +5271,11 @@ func (d *Daemon) hookEventsWatcher() {
 			if d.hookSpool == nil || d.hookIngester == nil {
 				continue
 			}
+			// A sandbox pane's hook writes into the pane's OWN tree, which
+			// Spool cannot see — it scans one flat directory. Forward BEFORE
+			// the tick so a container's events reach the sidebar on the same
+			// cadence as a host pane's, rather than one tick later.
+			d.forwardSandboxSpools()
 			payloads := d.hookSpool.Tick()
 			if len(payloads) > 0 {
 				logger.Debug("hook events tick: read %d payloads from spool", len(payloads))
