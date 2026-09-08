@@ -13,6 +13,11 @@ headline: Run an AI pane inside a Docker container
   Quil copies the new objects across every 30 seconds and again when the pane
   closes. Only the repository's `.git` enters the container — never your main
   checkout's working tree.
+- **Claude Code, Codex and OpenCode can all be sandboxed**, and each signs in the
+  way its own vendor documents for containers. Codex needs nothing at all — its
+  `auth.json` is copied from your host into the pane, so the agent runs against
+  your own plan with no sign-in. OpenCode signs in inside the container, once per
+  container.
 - **Notifications, the working indicator, input history and session resume all
   keep working**, through a Linux hook binary Quil fetches once per release and
   mounts into the container. Each pane gets its own hook spool and its own Claude

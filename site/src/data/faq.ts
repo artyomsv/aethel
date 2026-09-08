@@ -77,4 +77,9 @@ export const homeFaq: FaqItem[] = [
     answer:
       "On Linux or macOS: `curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh`. Go users can `go install github.com/artyomsv/quil/cmd/quil@latest`. Windows users download the .zip from the latest GitHub release. Full instructions at /install.",
   },
+  {
+    question: "Can I run an AI agent in a container so it can't touch the rest of my machine?",
+    answer:
+      "Yes — turn on `Run in a Docker container` in the pane setup dialog and the pane runs inside a per-pane container, for Claude Code, Codex or OpenCode. Its checkout is bind-mounted in, so its edits and commits are real, but its filesystem reach stops at that checkout. The mount set is the whole boundary: no --privileged, no --cap-add, no --network flag. The repository's .git is mounted as a mountpoint with objects, hooks, config, config.worktree, modules and worktrees pinned read-only on top, because those are values host git executes. New objects go to a per-pane store with your repository's own mounted read-only, so no commit on any branch can be deleted from inside. Notifications, the working spinner, input history and session resume all keep working. You supply the image — Quil publishes none and pulls none, and scripts/sandbox-image.sh builds one locally and then verifies it. Egress is deliberately not bounded. Full guide: docs/sandbox-panes.md.",
+  },
 ];

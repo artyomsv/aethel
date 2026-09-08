@@ -22,6 +22,7 @@ When things go sideways, this is the first place to look.
 - [Force-stop the daemon](#force-stop-the-daemon)
 - [Checking daemon + session status](#checking-daemon--session-status)
 - [Reset everything](#reset-everything)
+- [Sandbox panes](#sandbox-panes)
 
 ---
 
@@ -533,6 +534,44 @@ with `Session ID … is already in use`.
 
 On a development build there is no published release to fetch from — point
 `QUIL_SANDBOX_QUILD` at a locally built linux `quild`.
+
+### Fable is missing from `/model`, or Remote Control says the login expired
+
+That pane is on the **token** sign-in. A `claude setup-token` credential
+authenticates as *Claude API*, not as your subscription, so Fable, Remote
+Control and claude.ai connectors are not available to it. This is a property of
+the credential, not a bug Quil can fix.
+
+Open a new pane and set the **Sign in** row to **Browser**, or set
+`[sandbox] auth = "browser"` to make that the default. You then sign in inside
+the container, once per pane.
+
+### Every sandbox pane asks me to sign in
+
+Either the mode is `browser` — which signs in once *per pane*, by design — or
+the mode is `token` and no token was found.
+
+```bash
+quil sandbox status
+```
+
+`quild.log` names the reason on the pane that fell through. If the token is
+missing, `quil sandbox login` mints and stores one; opening a sandbox pane does
+the same thing on its own.
+
+The sign-in runs **where the daemon runs**, so under `quil --remote host` the
+browser step happens on `host`.
+
+### A codex pane opens on codex's sign-in menu
+
+Quil copies the host's `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) into
+the pane. A missing host credential is not an error — it just leaves codex
+unauthenticated. Run `codex` once on the daemon's machine and sign in there,
+then open a new sandbox pane.
+
+Note that option 1 of that menu ("Sign in with ChatGPT") cannot work from a
+container: the OAuth callback goes to a `localhost` the host browser cannot
+reach.
 
 ### The agent says its edits had no effect
 

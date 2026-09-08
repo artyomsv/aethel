@@ -320,6 +320,55 @@ Tabs were a flat list, so six tabs across three repositories were visually indis
 
 **Deferred, each to its own plan:** per-project MCP scoping (a breaking change to shipped tools; wants a `scope: "all"` opt-out and its own release note) and listening-port detection (three platform implementations, named the first thing to cut). The sidebar's `✗ exited-nonzero` glyph is unimplemented — `PaneInfo` carries no exit field.
 
+### M19: Sandbox Panes — [ADR-26](architecture.md#adr-26-docker-sandbox-panes--the-mount-set-as-the-security-boundary), [guide](sandbox-panes.md)
+
+> An AI pane running inside a Docker container, editing your real checkout.
+> Unreleased.
+
+`--dangerously-skip-permissions` is how an agent gets useful, and it is also how
+an agent reaches every file you can. A sandbox pane keeps the first and removes
+the second: the checkout is bind-mounted in, so edits and commits are real, but
+the agent's filesystem reach stops at that checkout.
+
+- **The mount set IS the boundary** — no `--privileged`, no `--cap-add`, no
+  `--network` flag. The checkout is read-write; the repository's `.git` is
+  mounted as a mountpoint (a mountpoint answers `EBUSY` to rename and remove)
+  with `objects`, `hooks`, `config`, `config.worktree`, `modules` and
+  `worktrees` pinned read-only on top. Those are values host git *executes* —
+  without the pin, an agent rewrites `.git/config` with a `core.fsmonitor` and
+  Quil's own git ticker runs it on the host
+- **History cannot be destroyed from inside** — new objects go to a per-pane
+  store with the repository's own store mounted read-only as an alternate. Quil
+  copies new objects across every 30 s and again at pane close. Branch pointers
+  are deliberately *not* read-only (that would make committing impossible) and
+  are recoverable via reflog
+- **Hooks keep working** — a Linux `quild` is mounted read-only into the
+  container and the agent's hooks call it, so notifications, work-state
+  indicators, input history and session resume behave exactly as they do
+  locally. Each pane gets its own hook spool and its own agent config directory
+- **Three agents** — Claude Code, Codex and OpenCode. Each authenticates the way
+  its own vendor documents for containers: Claude Code forwards
+  `CLAUDE_CODE_OAUTH_TOKEN` **by name** (Docker reads the value, so it never
+  enters argv or a log) or signs in inside the container, chosen **per pane** in
+  the create dialog; Codex has its `auth.json` copied in, because it ships no
+  minting command; OpenCode signs in per container
+- **The token flow needs no manual step** — a pane with no token drives
+  `claude setup-token` itself under a pseudo-terminal, behind a daemon-wide
+  single-flight so two panes never open two browser tabs, and stores the result
+  in the OS environment store. Quil keeps no copy of a credential in any mode
+- **Quil publishes no image and pulls none** — `scripts/sandbox-image.sh` builds
+  one locally from `docker/sandbox/Dockerfile` and then *verifies* it provides a
+  non-root user, the agent binary and `git`. `--with codex,opencode` adds the
+  other agents. There is deliberately no default registry name: the
+  official-looking `anthropics/claude-code` on Docker Hub is a security
+  researcher's honeypot containing no Claude Code
+
+**Known limits, documented rather than worked around:** egress is not bounded (a
+default-deny firewall needs `NET_ADMIN`, which Quil does not grant); bind-mount
+IO on Docker Desktop is ~20× slower and inotify does not cross it on Windows, so
+file watchers need polling; repositories with submodules are unsupported.
+
+
 ---
 
 ## In Progress
@@ -594,8 +643,13 @@ is a major surface and cuts against Quil's TUI/Windows-native focus.
     path whose first stage is read-only and needs no protocol change.
 19. **Remote phone access** — expose the dashboard over a Tailscale/Cloudflare
     tunnel with QR + passphrase pairing and Web Push (AoE). Builds on #18.
-20. **Container sandboxing** — isolate agents in Docker/Podman with shared auth
-    volumes so they authenticate in-container without re-login (AoE).
+20. ~~**Container sandboxing**~~ — **shipped**, see
+    [M19: Sandbox Panes](#m19-sandbox-panes--adr-26-guide) above. Docker only;
+    Podman is untested. Auth is per-pane rather than a shared volume: Claude
+    Code forwards a token by name or signs in in-container (your choice per
+    pane), Codex has its credential copied in, OpenCode signs in per container.
+    A shared Claude config directory is available (`shared_claude_config`) but
+    off by default, because it merges every sandbox pane into one trust domain.
 
 ---
 
@@ -637,7 +691,7 @@ section above.
 | 14 | **[gap]** Remote SSH thin-client attach | Large | Medium | Advanced |
 | 15 | Session sharing | Large | Medium | Advanced |
 | 16 | **[gap]** Web dashboard + remote phone access (M18) | Large | Medium | Advanced |
-| 17 | **[gap]** Container sandboxing | Large | Medium | Advanced |
+| ~~17~~ | ~~**[gap]** Container sandboxing~~ | ~~Large~~ | ~~Medium~~ | ~~Done (M19)~~ |
 | 18 | Native docs rendering on quil.cc | Small | Medium | Growth |
 | 19 | Terminal reflow-on-resize | Large | Medium | Polish |
 

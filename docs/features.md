@@ -27,6 +27,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Built-in plugins](#built-in-plugins)
   - [Pane setup dialog](#pane-setup-dialog)
   - [Spawn a pane in a worktree](#spawn-a-pane-in-a-worktree)
+  - [Run an AI pane in a Docker sandbox](#run-an-ai-pane-in-a-docker-sandbox)
   - [Resume a past session at pane creation](#resume-a-past-session-at-pane-creation)
   - [Custom plugins via TOML](#custom-plugins-via-toml)
   - [Lazygit integration](#lazygit-integration)
@@ -291,6 +292,22 @@ While the dialog is open it asks the daemon what the worktree holds and shows `c
 **If a worktree goes missing** (you ran `git worktree remove`, or its drive is unmounted), the pane restores *unspawned*, showing which worktree is gone, with `Alt+R` to retry. It does not quietly reopen in the main checkout — for an AI pane that would resume the recorded conversation against the wrong tree.
 
 The main checkout never appears as a row: it's the directory the field above already selected, not a worktree to attach *to*. Locked worktrees, and ones whose directory is gone from disk while git still tracks them (labeled `(directory is gone)`), are shown rather than hidden — the cursor can still reach them and the row explains why picking it is refused, instead of a worktree quietly vanishing from the list. Point the directory field at something that isn't a git repository at all, and the Worktree field goes inert — `not a git repository` — rather than disappearing, so a missing field is never mistaken for a bug.
+
+### Run an AI pane in a Docker sandbox
+
+`--dangerously-skip-permissions` is how an agent gets useful, and it is also how an agent reaches every file you can. Turn on **Run in a Docker container** in the setup dialog and the pane runs inside a container instead: its checkout is bind-mounted in, so its edits and its commits are real, but its filesystem reach stops at that checkout. Available for **Claude Code**, **Codex** and **OpenCode**, and only when the daemon's machine has Docker running linux containers.
+
+**The mount set is the boundary.** Quil passes no `--privileged`, no `--cap-add` and no `--network` flag. The checkout is read-write. The repository's `.git` is mounted *as a mountpoint* — a mountpoint answers `EBUSY` to rename and remove — with `objects`, `hooks`, `config`, `config.worktree`, `modules` and `worktrees` pinned read-only on top. Those files are values host git *executes*: without the pin an agent rewrites `.git/config` with a `core.fsmonitor` and Quil's own git ticker runs it on your machine.
+
+**Your history cannot be destroyed from inside.** New objects go to a store belonging to the pane, with your repository's object store mounted read-only as an alternate, so no commit on any branch can be deleted from the container. Quil copies the new objects across every 30 seconds and again when the pane closes. Branch pointers are deliberately *not* read-only — that would make committing impossible — and are recoverable with `git reflog`.
+
+**Everything else about the pane still works.** A Linux `quild` is mounted read-only into the container and the agent's hooks call it, so a sandboxed pane shows the same spinner while it works, the same green mark when it needs you, the same `Alt+Shift+I` input history, and resumes its session across a daemon restart. Each pane gets its own hook spool and its own agent config directory, so one sandboxed pane cannot read or write another's.
+
+**Signing in differs per agent**, because each vendor offers a different mechanism for containers. Claude Code gets a **Sign in** row in the same dialog: *Token* forwards `CLAUDE_CODE_OAUTH_TOKEN` by name (Docker reads the value, so it never enters a command line or a log) and needs no sign-in at all — a pane with no token runs `claude setup-token` for you, once per machine, behind a single-flight so two panes never open two browser tabs; *Browser* signs in inside the container, once per pane, and is what a pane needs for Fable, Remote Control and claude.ai connectors. Codex needs nothing — Quil copies your host `~/.codex/auth.json` into the pane. OpenCode signs in per container. **Quil never reads, copies, stores or refreshes a Claude credential in any mode.**
+
+**You supply the image; Quil publishes none and pulls none.** `scripts/sandbox-image.sh` builds one locally and then *verifies* it provides a non-root user, the agent binary and `git` — rather than reporting success from a clean build log. `--with codex,opencode` adds the other agents. There is deliberately no default registry name: the official-looking `anthropics/claude-code` on Docker Hub is a security researcher's honeypot containing no Claude Code at all.
+
+Closing the pane removes its container. Full guide, including the prerequisites, both auth flows and a walk through the image recipe: [Sandbox panes](sandbox-panes.md).
 
 ### Resume a past session at pane creation
 

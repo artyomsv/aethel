@@ -440,7 +440,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       { feature: "Git worktree-per-session", quil: "yes", them: "yes", note: "Was a genuine gap until recently. A Quil tab can now open straight onto a new worktree, showing a placeholder pane with a spinner while git worktree add runs so a slow checkout is never mistaken for an agent started in the main tree, and closing the tab or pane offers to remove the worktree — naming what it holds, and refusing to call a dirty one clean." },
       { feature: "Multi-repo workspaces", quil: "yes", them: "yes", note: "Was a genuine gap until v1.47. Quil projects each own a root directory and their own tabs, so several repositories sit side by side in one window — and a project can belong to a different machine, which AoE's workspaces do not span." },
       { feature: "Built-in diff viewer (review + edit)", quil: "no", them: "yes" },
-      { feature: "Container sandboxing (Docker/Podman/Apple)", quil: "no", them: "yes" },
+      { feature: "Container sandboxing (Docker/Podman/Apple)", quil: "partial", them: "yes", note: "Quil sandboxes an AI pane in Docker — one container per pane, an image you build yourself, and the mount set as the whole boundary. Podman and Apple Containers are untested. AoE also offers shared auth volumes; Quil's sandbox panes are per-pane by default, because one shared agent config directory merges every sandbox pane into one trust domain." },
       { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes" },
       { feature: "Breadth of agents supported", quil: "partial", them: "yes", note: "Quil: 2 deep + tools. AoE: ~13 terminal + 7 ACP." },
       { feature: "Session fork / import from disk", quil: "no", them: "yes" },
@@ -461,12 +461,12 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       {
         question: "Which is lighter to run?",
         answer:
-          "Quil ships two Go binaries and needs no tmux, Docker, or Node. AoE is a larger stack (tmux + a React app + optional Node ACP workers and containers) in exchange for its web and sandboxing features.",
+          "Quil ships two Go binaries and needs no tmux, no Node, and no Docker unless you opt a pane into a sandbox container. AoE is a larger stack (tmux + a React app + optional Node ACP workers and containers) in exchange for its web features.",
       },
       {
         question: "Can I sandbox agents in containers with Quil?",
         answer:
-          "Not yet — container sandboxing is an AoE strength that's on Quil's roadmap. For now Quil runs agents as normal processes with the same isolation as your shell.",
+          "Yes, in Docker. Tick 'Run in a Docker container' in the pane setup dialog and a Claude Code, Codex or OpenCode pane runs inside its own container, with its checkout bind-mounted in so its edits and commits are real. The mount set is the whole boundary — no --privileged, no --cap-add, no --network flag — and new git objects go to a per-pane store with your repository's own mounted read-only, so no commit on any branch can be deleted from inside. You supply the image; Quil publishes none and pulls none, and scripts/sandbox-image.sh builds and verifies one locally. AoE still leads here: it also covers Podman and Apple Containers, which Quil has not tested, and offers shared auth volumes where Quil's panes authenticate per pane by default.",
       },
     ],
   },

@@ -17,7 +17,8 @@ export type IconName =
   | "book-open"
   | "key-round"
   | "heart-pulse"
-  | "layout-panel-left";
+  | "layout-panel-left"
+  | "box";
 
 export interface Feature {
   slug: string;
@@ -174,6 +175,25 @@ export const features: Feature[] = [
       "Captured from the agent's own UserPromptSubmit hook, not keystroke scraping — multiline prompts, pastes, and edits are recorded exactly as submitted.",
       "Persists across daemon restarts at ~/.quil/history/<pane>.jsonl (64 KiB per entry, ring-trimmed to the last 200) and is removed when the pane is destroyed.",
       "Opt-in per pane type via `[command] record_history = true` (enabled for Claude Code and Codex); other pane types show an empty state. OpenCode support is planned.",
+    ],
+  },
+
+  {
+    slug: "docker-sandbox-panes",
+    icon: "box",
+    title: "Run an agent in a Docker sandbox",
+    blurb:
+      "Skip-permissions is how an agent gets useful, and how it reaches every file you own. Run the pane in a container instead — real edits, real commits, filesystem reach that stops at the checkout.",
+    category: "ai",
+    badge: "beta",
+    detail: [
+      "Turn on 'Run in a Docker container' in the pane setup dialog. The checkout is bind-mounted in, so the agent's edits and commits are real; everything outside it is simply not there. Available for Claude Code, Codex and OpenCode.",
+      "The mount set is the boundary — no --privileged, no --cap-add, no --network flag. The repository's .git is mounted as a mountpoint (which answers EBUSY to rename and remove) with objects, hooks, config, config.worktree, modules and worktrees pinned read-only on top: those are values host git executes, and without the pin an agent can rewrite .git/config with a core.fsmonitor the host then runs.",
+      "Your history cannot be destroyed from inside. New objects go to a per-pane store with your repository's own mounted read-only as an alternate, copied across every 30 seconds and again at pane close. Branch pointers stay writable — read-only refs would make committing impossible — and are recoverable via git reflog.",
+      "Notifications, the working spinner, input history and session resume all keep working: a Linux quild is mounted read-only into the container and the agent's hooks call it. Each pane gets its own hook spool and its own agent config directory.",
+      "Signing in follows each vendor's own container guidance. Claude Code offers a per-pane choice: forward CLAUDE_CODE_OAUTH_TOKEN by name (Docker reads the value, so it never enters a command line or a log; a pane with no token runs `claude setup-token` for you once per machine), or sign in inside the container for Fable, Remote Control and claude.ai connectors. Codex has its auth.json copied in. Quil never reads, copies, stores or refreshes a Claude credential in any mode.",
+      "You supply the image; Quil publishes none and pulls none. scripts/sandbox-image.sh builds one locally and then verifies it provides a non-root user, the agent binary and git. There is deliberately no default registry name — the official-looking anthropics/claude-code on Docker Hub is a security researcher's honeypot containing no Claude Code at all.",
+      "Documented limits: egress is not bounded (a default-deny firewall needs NET_ADMIN, which Quil does not grant), bind-mount IO on Docker Desktop is roughly 20× slower and inotify does not cross it on Windows, and repositories with submodules are unsupported.",
     ],
   },
 
