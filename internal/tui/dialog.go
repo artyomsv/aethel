@@ -4891,8 +4891,17 @@ func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Mod
 		m.worktreeCursor, m.worktreeScroll = 0, 0
 		return m, nil
 	default:
+		// BOTH spellings of the space key, the pair handleConfirmKey and
+		// handleRenameKey already match: Bubble Tea v2 reports a real press as
+		// the NAME "space" while a pasted or synthesised one arrives as " ".
+		// The rune-count test below accepts the second and silently drops the
+		// first, and a directory name may legitimately contain a space — so
+		// without this the search can never reach such a worktree.
+		if key == "space" {
+			key = " "
+		}
 		// One rune per key is what separates a typed character from a named
-		// key ("space", "f5", "ctrl+a") — the same test the name field applies.
+		// key ("f5", "ctrl+a") — the same test the name field applies.
 		// Bounded at ingest: the value is rendered on every frame, and the
 		// row it renders on truncates rather than wraps, so an unbounded one
 		// would be invisible past the edge and costly to draw regardless.

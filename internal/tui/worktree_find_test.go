@@ -206,6 +206,42 @@ func TestWorktreeSearch_JAndKTypeRatherThanMove(t *testing.T) {
 	}
 }
 
+// A real space arrives as the NAME "space", not as " " — the spelling
+// handleRenameKey and handleConfirmKey already special-case. A rune-count test
+// alone drops it silently, and a directory name may legitimately contain one,
+// so the search could never reach such a worktree.
+func TestWorktreeSearch_SpaceKeyTypesASpace(t *testing.T) {
+	m := typeWorktree(t, filterModel(t), "a", "space", "b")
+	if m.worktreeFilter != "a b" {
+		t.Errorf("filter = %q, want %q — the space key was dropped", m.worktreeFilter, "a b")
+	}
+}
+
+// The pasted or synthesised spelling is the literal " ", which the rune-count
+// test does accept; pinned so a future rewrite cannot drop one spelling while
+// keeping the other.
+func TestWorktreeSearch_LiteralSpaceAlsoTypes(t *testing.T) {
+	m := typeWorktree(t, filterModel(t), "a", " ", "b")
+	if m.worktreeFilter != "a b" {
+		t.Errorf("filter = %q, want %q", m.worktreeFilter, "a b")
+	}
+}
+
+// And the search then has to MATCH such a path, which is the point of
+// accepting the key at all.
+func TestWorktreeSearch_MatchesAPathContainingASpace(t *testing.T) {
+	m := worktreePickModel(t, []ipc.WorktreeInfo{
+		{Path: "/repo", Branch: "master", Main: true},
+		{Path: "/w/my project", Branch: "feat/x", CommitTime: 100},
+		{Path: "/w/other", Branch: "feat/y", CommitTime: 200},
+	})
+	m = typeWorktree(t, m, "m", "y", "space", "p")
+	rows := m.worktreeRows()
+	if len(rows) != 1 || rows[0].path != "/w/my project" {
+		t.Errorf("rows = %+v, want the worktree whose folder holds %q", rows, "my p")
+	}
+}
+
 func TestWorktreeSearch_BackspaceDropsOneRune(t *testing.T) {
 	m := typeWorktree(t, filterModel(t), "t", "é", "backspace")
 	if m.worktreeFilter != "t" {
