@@ -4218,6 +4218,9 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	if m.showSandboxField(p) {
 		n++
 	}
+	if m.showSandboxAuthField(p) {
+		n++
+	}
 	if m.showSessionField(p) {
 		n++
 	}
@@ -4294,6 +4297,14 @@ func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, to
 	if m.showSandboxField(p) {
 		if i == 0 {
 			return "sandbox", -1
+		}
+		i--
+	}
+	// Directly under the switch it belongs to, and present only while that
+	// switch is on — it describes how THAT container authenticates.
+	if m.showSandboxAuthField(p) {
+		if i == 0 {
+			return "sandboxauth", -1
 		}
 		i--
 	}
@@ -4398,6 +4409,22 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 
 	case "worktree":
 		return m.handleSetupWorktreeKey(p, key)
+
+	case "sandboxauth":
+		// A two-way choice: arrows and space, never typing. Tab and Enter fall
+		// through to the shared branches below, like every other row.
+		if m.handleSandboxAuthFieldKey(msg) {
+			return m, nil
+		}
+		switch key {
+		case "up", "k":
+			return m.moveSetupCursor(p, -1)
+		case "down", "j":
+			return m.moveSetupCursor(p, 1)
+		case "enter":
+			return m.submitSetupDialog(p)
+		}
+		return m, nil
 
 	case "sandbox":
 		// The row consumes space and, while enabled, printable text. It
@@ -4908,8 +4935,16 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	// Checked at submit rather than only on the row, for the same reason the
 	// worktree name is: the user can turn the sandbox on and then move on
 	// without ever coming back to it.
+	// Written to the SANDBOX row's own error, not worktreeErr: that one is
+	// painted only while the worktree name editor is open, so on a dialog with
+	// a settled worktree this refusal was stored and never drawn — Continue
+	// did nothing and explained nothing.
 	if msg := m.sandboxSubmitError(); msg != "" {
-		m.worktreeErr = msg
+		m.sandboxErr = msg
+		// The cursor may be anywhere. Move it to the row that has to change
+		// before the dialog will submit, so the message appears where the
+		// user is already looking.
+		m.setupFieldCursor = m.setupSandboxFieldIndex(p)
 		return m, nil
 	}
 
@@ -5913,6 +5948,22 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		b.WriteByte('\n')
 		b.WriteString(m.renderSetupSandboxField(cursor == fieldIdx))
 		fieldIdx++
+		// Same condition as the walk above, in the same order.
+		if m.showSandboxAuthField(p) {
+			b.WriteByte('\n')
+			b.WriteString(m.renderSetupSandboxAuthField(cursor == fieldIdx))
+			fieldIdx++
+		}
+	} else if p.Command.PromptsCWD {
+		// The row is hidden. Say why, when the daemon told us — a feature that
+		// silently is not there reads as a feature that was never built, and
+		// the user cannot tell "Docker is off" from "quil dropped it".
+		// Deliberately NOT a field: fieldIdx is untouched, so this line cannot
+		// put the cursor on a row setupFieldKind does not know about.
+		if line := m.renderSetupSandboxUnavailable(); line != "" {
+			b.WriteByte('\n')
+			b.WriteString(line)
+		}
 	}
 
 	// Last field before Continue: the picker expands into a tall scrolling list

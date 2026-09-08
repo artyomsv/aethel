@@ -65,7 +65,7 @@ type Daemon struct {
 	// connect — atomic.Pointer is what keeps that race-free.
 	clientCWD atomic.Pointer[string]
 
-	memReport   *memreport.Collector
+	memReport *memreport.Collector
 	// procReport enumerates per-pane process trees, and runs ONLY while a
 	// client keeps asking for them. See procGateWindow.
 	procReport *procCollector
@@ -76,7 +76,7 @@ type Daemon struct {
 	// process enumeration.
 	killRunning atomic.Bool
 	// hellos records which conns identified themselves as quil processes.
-	hellos *helloRegistry
+	hellos      *helloRegistry
 	collectorWG sync.WaitGroup
 
 	// snapGens records, per pane, the OutputBuf generation captured by the
@@ -214,6 +214,11 @@ type Daemon struct {
 	// knowing where to look is what separates a repair from the user editing
 	// a file by hand.
 	sandboxReg *sandboxRegistry
+
+	// sandboxSignIn serialises the browser sign-in a sandbox pane starts on
+	// the user's behalf. Daemon-wide: what it guards is one browser window and
+	// one person's attention, not a per-pane resource.
+	sandboxSignIn sandboxSignIn
 
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
@@ -917,6 +922,7 @@ func (d *Daemon) restoreWorkspace() error {
 				worktreePath, _ := paneData["worktree_path"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
 				sandboxImage, _ := paneData["sandbox_image"].(string)
+				sandboxAuth, _ := paneData["sandbox_auth"].(string)
 				containerCWD, _ := paneData["container_cwd"].(string)
 				// The persisted type carries a sandbox prefix; strip it here
 				// so the registry lookup finds the plugin. spawnPane does the
@@ -940,6 +946,11 @@ func (d *Daemon) restoreWorkspace() error {
 					Muted:        muted,
 					Eager:        eager,
 					SandboxImage: sandboxImage,
+					// Absent on a pre-choice snapshot → empty, which follows
+					// [sandbox] auth. That is the same behaviour those panes
+					// had before the choice existed, so a restore cannot move
+					// a pane to a mode it was never opened in.
+					SandboxAuth:  sandboxAuth,
 					ContainerCWD: containerCWD,
 					// Absent on pre-pin snapshots → false, which is the only
 					// safe default: inventing a mark the user never set would
@@ -2042,12 +2053,23 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 // resume claim onto a terminal, which a snapshot inside the checkout window
 // persists and a failed add leaves forever. createFirstPaneWorktree carries
 // the full set on its own payload, so nothing is lost.
+// Sandbox rides with them and MUST: this is the ordinary (no-worktree) arm of
+// Ctrl+T, and it is the one that shipped dropping the field. `create_tab` with
+// a sandbox spec and no worktree produced a claude pane running on the HOST, in
+// the project root, with --dangerously-skip-permissions, no container and no
+// error anywhere — the exact "never falls back to a host spawn" refusal the
+// feature is built around, defeated by an omission in a hand-copy.
+//
+// FirstPaneSpec.Sandbox's own doc comment warned about this hand-copy and then
+// named only createFirstPaneWorktree, which does copy it. Both copies are the
+// hazard; a field added to FirstPaneSpec belongs in each.
 func (d *Daemon) firstPanePayload(tabID, paneType string, spec ipc.FirstPaneSpec) ipc.CreatePanePayload {
 	create := ipc.CreatePanePayload{TabID: tabID, Type: paneType}
 	if paneType == spec.Type {
 		create.InstanceName = spec.InstanceName
 		create.InstanceArgs = spec.InstanceArgs
 		create.ResumeSessionID = spec.ResumeSessionID
+		create.Sandbox = spec.Sandbox
 	}
 	return create
 }
@@ -2564,6 +2586,21 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 	// as happily against a createPaneAt that no longer calls it.
 	ptySession := newSessionFn(0, 0)
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
+		// Recorded ON THE PANE, not only returned. Every caller of this
+		// function logged the error and moved on, so a pane that failed to
+		// spawn was published, broadcast, and drawn as an EMPTY RECTANGLE —
+		// the reason for it reachable only by reading quild.log. A sandbox
+		// refusal is the case that makes this unacceptable: those exist
+		// precisely so the user is told rather than silently given an
+		// un-isolated pane, and a black pane tells them nothing.
+		//
+		// Under PluginMu because CreatePane has already published the pane and
+		// a snapshot or broadcast goroutine may be reading it. Not persisted —
+		// spawnPane clears it on a later success, and a stale error surviving
+		// a restart would describe a condition that may be long gone.
+		pane.PluginMu.Lock()
+		pane.SpawnError = err.Error()
+		pane.PluginMu.Unlock()
 		return pane, fmt.Errorf("start PTY error: %w", err)
 	}
 	return pane, nil
@@ -4014,6 +4051,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// type falls back to a plain shell.
 			if pane.SandboxImage != "" {
 				paneData["sandbox_image"] = pane.SandboxImage
+				paneData["sandbox_auth"] = pane.SandboxAuth
 				paneData["type"] = sandboxPaneType(pane.Type)
 			}
 			if pane.ContainerCWD != "" {
@@ -5048,6 +5086,19 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		if ok, why := d.sandboxAvailable(context.Background()); !ok {
 			return fmt.Errorf("sandbox unavailable: %s", why)
 		}
+		// Sign in FOR the user rather than letting the pane fall through to a
+		// per-container sign-in they have to repeat for every pane. Returns
+		// true when it took ownership: this pane now has no child and a
+		// goroutine will spawn it once the browser flow finishes. Nil, not an
+		// error — a pane waiting on something is not a pane that failed, and
+		// the worktree placeholder is the same shape.
+		// `p`, not just the pane: the sign-in runs `claude setup-token` and
+		// opens a browser, which is meaningless for codex or opencode — their
+		// credentials are their own. Without this a codex pane with no Claude
+		// token launched a Claude sign-in.
+		if d.beginSandboxSignIn(pane, p) {
+			return nil
+		}
 		m, err := d.prepareSandbox(context.Background(), pane, p.Name, sandboxImage)
 		if err != nil {
 			return err
@@ -5139,7 +5190,16 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// inherit it. The one exception is the OAuth token, which travels by
 		// NAME so docker forwards the value from its own environment; that
 		// is why it is set here and never in argv.
-		envVars = dockerCLIEnv(d.cfg.Sandbox.Auth)
+		// Gated on the plugin as well as the mode, and it must match
+		// sandboxIdentity's own gate exactly: that one decides whether argv
+		// carries `-e CLAUDE_CODE_OAUTH_TOKEN`, this one whether the docker
+		// CLI has a value under that name to forward. A codex or opencode
+		// container has no use for either.
+		authMode := config.SandboxAuthBrowser
+		if plugin.UsesClaudeAuthName(p.Name) {
+			authMode = d.paneAuthMode(pane)
+		}
+		envVars = dockerCLIEnv(authMode)
 		ptySession.SetEnv(envVars)
 	}
 

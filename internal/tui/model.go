@@ -505,9 +505,27 @@ type Model struct {
 	// kind under a live cursor and shift the dialog's own chrome height. The
 	// destination is pinned at open for the same reason.
 	sandboxDialogAvail bool
+	// sandboxDialogReason pins WHY the row is absent, so a dialog that hides
+	// it can say so instead of leaving the user to guess whether the feature
+	// exists. Pinned alongside the answer above and for the same reason: the
+	// line it draws occupies a row, so a late arrival would shift the chrome.
+	sandboxDialogReason string
 	// sandboxOn and sandboxImage are the create dialog's own row state.
-	sandboxOn        bool
-	sandboxImage     string
+	sandboxOn    bool
+	sandboxImage string
+	// sandboxAuth is the sign-in mode chosen for THIS pane, "" until the user
+	// touches the row — which means "follow [sandbox] auth", so the dialog
+	// never silently overrides a configured default just by being opened.
+	sandboxAuth string
+	// sandboxErr is why the last Continue was refused, drawn on the row
+	// itself.
+	//
+	// Its own field rather than worktreeErr, which is where the refusal used
+	// to land: that message is drawn ONLY while the worktree name editor is
+	// open, so a sandbox refusal on a dialog with a settled worktree was set
+	// and never painted — Enter did nothing, said nothing, and read as a dead
+	// key. An error belongs beside the field that caused it.
+	sandboxErr       string
 	lastWidth        int        // last known window width (for persistence)
 	lastHeight       int        // last known window height (for persistence)
 	createPaneStep   int        // 0=category, 1=plugin, 2=instance form, 3=split direction
@@ -6679,6 +6697,16 @@ func (m *Model) attachAllDests() tea.Cmd {
 		// Batched per destination so each daemon is asked about its OWN
 		// registry; see requestPluginListFor.
 		if cmd := m.requestPluginListFor(dest); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		// The sandbox capability rides the same per-destination path, and it
+		// must ride THIS one rather than only attachToDest's: that function is
+		// the post-reconnect reattach, so on a freshly started TUI — the
+		// ordinary case — nothing had asked, resetSandboxField pinned the
+		// empty answer, and the FIRST Ctrl+N never offered the row however
+		// healthy the engine was. The dialog's own request landed after the
+		// pin, so the row only appeared on the second open.
+		if cmd := m.requestSandboxCap(dest); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
