@@ -220,6 +220,30 @@ func TestPrepareSandbox_SeedsTheClaudeConfig(t *testing.T) {
 	}
 }
 
+// The NEGATIVE half, and it is the one that matters: the gate exists because
+// skipping onboarding also skips the SIGN-IN inside it, so seeding a pane that
+// receives no credential hands the user a working-looking prompt that can
+// never authenticate.
+//
+// Without this, forcing the call site to seedClaudeConfig(m, true) passes the
+// whole package — TestSeedClaudeConfig_SkipsWhenThePaneGetsNoToken passes
+// `false` itself, so it can only ever test the helper, never the caller.
+func TestPrepareSandbox_DoesNotSeedAPaneWithNoToken(t *testing.T) {
+	d, pane, _ := sandboxCallsiteFixture(t)
+	d.cfg = config.Default()
+	t.Setenv(oauthTokenEnv, "") // no credential reaches this container
+	stubNoSavedToken(t)
+
+	m, err := d.prepareSandbox(context.Background(), pane, "claude-code", "img:1")
+	if err != nil {
+		t.Fatalf("prepareSandbox: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(m.HostClaudeConfig(), ".claude.json")); !os.IsNotExist(err) {
+		t.Error("an unauthenticated pane was seeded — its in-container sign-in screen is " +
+			"now hidden and it has no way to authenticate")
+	}
+}
+
 // prepareSandbox must SEED the codex credential for a codex pane, and must not
 // for anyone else.
 //

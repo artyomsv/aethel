@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/sandbox"
@@ -82,8 +83,11 @@ func TestSeedCodexAuth_NoHostCredentialIsNotAnError(t *testing.T) {
 // The copy is a credential in a directory the container can write, so it gets
 // the narrowest mode the container user can still read.
 func TestSeedCodexAuth_WritesItPrivate(t *testing.T) {
-	if os.Getenv("GOOS") == "windows" {
-		t.Skip("Windows maps mode onto attributes")
+	// runtime.GOOS, not os.Getenv("GOOS") — GOOS is a BUILD variable and does
+	// not exist in the environment at test time, so the Getenv form never
+	// fired and this ran on Windows against Go's synthesised 0666.
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows maps mode onto attributes, not permission bits")
 	}
 	m, hostHome := codexFixture(t)
 	if err := os.WriteFile(filepath.Join(hostHome, codexAuthFile), []byte("x"), 0o600); err != nil {

@@ -418,9 +418,9 @@ func TestSetupFieldCount_UnavailableExplanationIsNotAField(t *testing.T) {
 func sandboxKeyModel(t *testing.T) Model {
 	t.Helper()
 	dir := t.TempDir()
-	toml := "[plugin]\nname = \"probe\"\ndisplay_name = \"Probe\"\ncategory = \"ai\"\n\n" +
+	toml := "[plugin]\nname = \"claude-code\"\ndisplay_name = \"Claude Code\"\ncategory = \"ai\"\n\n" +
 		"[command]\ncmd = \"true\"\nprompts_cwd = true\n"
-	if err := os.WriteFile(filepath.Join(dir, "probe.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "claude-code.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("write toml: %v", err)
 	}
 	r := plugin.NewRegistry()
@@ -430,7 +430,7 @@ func sandboxKeyModel(t *testing.T) Model {
 
 	m := Model{
 		pluginRegistry: r,
-		selectedPlugin: "probe",
+		selectedPlugin: "claude-code",
 		dialog:         dialogCreatePaneSetup,
 		cwdBrowseDir:   "/repo",
 	}
@@ -438,7 +438,7 @@ func sandboxKeyModel(t *testing.T) Model {
 	m.applySandboxCap("", ipc.SandboxCapRespPayload{Available: true})
 	m.resetSandboxField("")
 	m.sandboxOn = true
-	m.setupFieldCursor = m.setupSandboxFieldIndex(r.Get("probe"))
+	m.setupFieldCursor = m.setupSandboxFieldIndex(r.Get("claude-code"))
 	return m
 }
 
@@ -514,7 +514,7 @@ func TestSetupDialog_TogglingOffClearsTheRefusal(t *testing.T) {
 // user's attention is barely better than no error.
 func TestSetupDialog_RefusalMovesTheCursorToTheRow(t *testing.T) {
 	m := sandboxKeyModel(t)
-	p := m.pluginRegistry.Get("probe")
+	p := m.pluginRegistry.Get("claude-code")
 	m.setupFieldCursor = 0 // the CWD field
 
 	upd, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -668,5 +668,52 @@ func TestShowSandboxAuthField_OnlyForClaudeCode(t *testing.T) {
 	}
 	if !m.showSandboxAuthField(promptsCWDPlugin()) {
 		t.Error("the choice vanished for claude-code")
+	}
+}
+
+// The RENDERER's own walk, asserted on the drawn frame.
+//
+// This is the third enumeration, and until now nothing exercised it: the
+// fixture built a plugin named "probe" while showSandboxAuthField requires
+// claude-code, so the sign-in row was absent from every frame any test had
+// ever produced. Three separate mutations of the renderer survived the whole
+// package — the guard forced false, the row rendering "", and the fieldIdx++
+// dropped.
+//
+// The consequence of drift is not cosmetic: Tab lands the cursor on a row
+// nobody draws, ←/→ silently change the auth mode, and [Continue] paints as
+// focused while setupFieldKind reports "sandboxauth".
+func TestRenderSetupDialog_DrawsTheSignInRow(t *testing.T) {
+	m := sandboxKeyModel(t)
+	frame := m.renderCreatePaneSetupDialog()
+
+	for _, want := range []string{"Sign in", "Token", "Browser"} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("the frame does not contain %q — the sign-in row is not drawn:\n%s", want, frame)
+		}
+	}
+	// The selected mode must be marked, or the row shows two identical options.
+	if !strings.Contains(frame, "(•)") {
+		t.Errorf("no mode is marked as selected:\n%s", frame)
+	}
+}
+
+// Every focusable row must be REACHABLE by the cursor and drawn when focused.
+//
+// Walks the real field list and renders at each index, which is what catches a
+// renderer that advances fieldIdx differently from setupFieldKind: the caret
+// would land on the wrong row, or on none.
+func TestRenderSetupDialog_EveryFieldIndexDrawsItsCaret(t *testing.T) {
+	m := sandboxKeyModel(t)
+	p := m.pluginRegistry.Get("claude-code")
+
+	for i := 0; i < m.setupFieldCount(p); i++ {
+		m.setupFieldCursor = i
+		kind, _ := m.setupFieldKind(p, i)
+		frame := m.renderCreatePaneSetupDialog()
+		if !strings.Contains(frame, "> ") {
+			t.Errorf("cursor index %d (%s) draws no caret — the renderer's walk disagrees "+
+				"with setupFieldKind:\n%s", i, kind, frame)
+		}
 	}
 }
