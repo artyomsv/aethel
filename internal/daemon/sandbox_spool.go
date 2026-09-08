@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -122,7 +123,7 @@ func (f *spoolForwarder) forward(rootDir, srcRel, dstPath, paneID string) (int64
 	}
 	buf := make([]byte, n)
 	read, err := io.ReadFull(src, buf)
-	if err != nil && err != io.ErrUnexpectedEOF {
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return 0, err
 	}
 	buf = buf[:read]

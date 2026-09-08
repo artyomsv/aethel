@@ -38,7 +38,7 @@ func handleSandbox() {
 // plain pipe cannot do it — measured: with stdout redirected the command emits
 // nothing, opens the browser, and waits — so it runs under a PTY, mirrored to
 // the user's terminal so the browser step is still visible and interactive.
-// See sandbox_capture.go. Quil reads the token, hands it to the OS, and never
+// See internal/claudetoken. Quil reads the token, hands it to the OS, and never
 // keeps a copy.
 func runSandboxLogin() {
 	if remoteMode() {

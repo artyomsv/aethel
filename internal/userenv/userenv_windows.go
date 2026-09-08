@@ -3,6 +3,7 @@
 package userenv
 
 import (
+	"errors"
 	"fmt"
 	"syscall"
 	"unsafe"
@@ -43,7 +44,7 @@ func get(name string) (string, error) {
 	defer k.Close()
 
 	v, _, err := k.GetStringValue(name)
-	if err == registry.ErrNotExist {
+	if errors.Is(err, registry.ErrNotExist) {
 		return "", nil
 	}
 	if err != nil {

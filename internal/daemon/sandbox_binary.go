@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/plugin"
 	"github.com/artyomsv/quil/internal/update"
 	"github.com/artyomsv/quil/internal/version"
 )
@@ -144,7 +145,7 @@ func (d *Daemon) linuxQuildForPane(ctx context.Context, pluginName, arch string)
 	if err == nil {
 		return path, nil
 	}
-	if pluginName == "claude-code" {
+	if plugin.UsesClaudeAuthName(pluginName) {
 		return "", fmt.Errorf("hook binary unavailable: %w", err)
 	}
 	// Other plugins lose session tracking and notifications, which is

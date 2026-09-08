@@ -174,7 +174,7 @@ func Capture(claudePath string, opts Options) (string, error) {
 func Find() (string, error) {
 	p, err := exec.LookPath("claude")
 	if err != nil {
-		return "", errors.New("`claude` is not on PATH")
+		return "", fmt.Errorf("`claude` is not on PATH: %w", err)
 	}
 	return p, nil
 }
