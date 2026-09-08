@@ -492,7 +492,40 @@ type Model struct {
 	// pluginAvailableFor would read it from another goroutine — no caller does,
 	// and none should start: resolve the answer in Update and capture the bool.
 	// disconnectDest drops a destination's entry with the rest of its tables.
-	destAvail        map[string]map[string]bool
+	destAvail map[string]map[string]bool
+	// destSandbox files each daemon's "can I run a container" answer under
+	// its OWN destination, for the same reason destAvail does — the answer
+	// describes the machine that sent it. Same goroutine discipline: written
+	// and read only in Update and View.
+	destSandbox map[string]ipc.SandboxCapRespPayload
+	// sandboxDialogAvail pins the answer the create dialog OPENED with.
+	//
+	// The capability is answered asynchronously and the daemon re-probes on a
+	// timer, so an answer landing mid-dialog would change the field count and
+	// kind under a live cursor and shift the dialog's own chrome height. The
+	// destination is pinned at open for the same reason.
+	sandboxDialogAvail bool
+	// sandboxDialogReason pins WHY the row is absent, so a dialog that hides
+	// it can say so instead of leaving the user to guess whether the feature
+	// exists. Pinned alongside the answer above and for the same reason: the
+	// line it draws occupies a row, so a late arrival would shift the chrome.
+	sandboxDialogReason string
+	// sandboxOn and sandboxImage are the create dialog's own row state.
+	sandboxOn    bool
+	sandboxImage string
+	// sandboxAuth is the sign-in mode chosen for THIS pane, "" until the user
+	// touches the row — which means "follow [sandbox] auth", so the dialog
+	// never silently overrides a configured default just by being opened.
+	sandboxAuth string
+	// sandboxErr is why the last Continue was refused, drawn on the row
+	// itself.
+	//
+	// Its own field rather than worktreeErr, which is where the refusal used
+	// to land: that message is drawn ONLY while the worktree name editor is
+	// open, so a sandbox refusal on a dialog with a settled worktree was set
+	// and never painted — Enter did nothing, said nothing, and read as a dead
+	// key. An error belongs beside the field that caused it.
+	sandboxErr       string
 	lastWidth        int        // last known window width (for persistence)
 	lastHeight       int        // last known window height (for persistence)
 	createPaneStep   int        // 0=category, 1=plugin, 2=instance form, 3=split direction
@@ -2653,6 +2686,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// MUST re-arm the listen loop, like every other IPC response branch.
 		cmd := m.applyPluginList(msg.Dest, msg.Resp)
 		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case sandboxCapMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch.
+		// The dialog's own copy of the answer is NOT updated here: it is
+		// pinned at open, so a late answer cannot move the fields under a
+		// live cursor.
+		m.applySandboxCap(msg.Dest, msg.Resp)
+		return m, m.listenForMessages()
 
 	case browseDirMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch —
@@ -6658,6 +6699,16 @@ func (m *Model) attachAllDests() tea.Cmd {
 		if cmd := m.requestPluginListFor(dest); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// The sandbox capability rides the same per-destination path, and it
+		// must ride THIS one rather than only attachToDest's: that function is
+		// the post-reconnect reattach, so on a freshly started TUI — the
+		// ordinary case — nothing had asked, resetSandboxField pinned the
+		// empty answer, and the FIRST Ctrl+N never offered the row however
+		// healthy the engine was. The dialog's own request landed after the
+		// pin, so the row only appeared on the second open.
+		if cmd := m.requestSandboxCap(dest); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 	// Batched ONCE per round, not per destination like requestPluginListFor:
 	// overlayPolicyCmd already loops over every known dest itself, so
@@ -6760,7 +6811,11 @@ func (m Model) attachToDest(dest string) tea.Cmd {
 		m.sendForDest(dest, m.attachMessage(dest))
 		return nil
 	}
-	return tea.Batch(attachCmd, m.requestPluginListFor(dest), m.overlayTruthDestCmd(dest))
+	return tea.Batch(attachCmd, m.requestPluginListFor(dest), m.overlayTruthDestCmd(dest),
+		// Asked at attach as well as at dialog open: the first Ctrl+N should
+		// already know whether this daemon can host a container, rather than
+		// hiding the row until the second.
+		m.requestSandboxCap(dest))
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.
@@ -6979,6 +7034,18 @@ func (m Model) listenForMessages() tea.Cmd {
 			// daemon — which is the wrong-machine bug this RPC exists to
 			// remove, wearing a different hat.
 			return pluginListMsg{Resp: payload, Dest: msg.Origin}
+
+		case ipc.MsgSandboxCapResp:
+			var payload ipc.SandboxCapRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode sandbox_cap_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			// Stamped, for the same reason the plugin list is: the answer
+			// describes the daemon that sent it, and an unstamped one files
+			// under "" — the local daemon — which would have a remote host's
+			// Docker engine decide whether the LOCAL project can sandbox.
+			return sandboxCapMsg{Resp: payload, Dest: msg.Origin}
 
 		case ipc.MsgBrowseDirResp:
 			var payload ipc.BrowseDirRespPayload

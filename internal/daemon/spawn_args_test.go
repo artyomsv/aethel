@@ -475,7 +475,7 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 			// Writable: claudeHookSpawnPrep now writes the hook settings to a
 			// per-pane file under <quilDir>/sessions/.
 			quilDir := t.TempDir()
-			prefix, env := claudeHookSpawnPrep(quilDir, tt.paneID, "default", tt.userArgs)
+			prefix, env := claudeHookSpawnPrep(hostHookPaths(quilDir), tt.paneID, "default", tt.userArgs)
 			if tt.wantPrefix {
 				if len(prefix) != 2 || prefix[0] != "--settings" {
 					t.Errorf("prefix = %v, want [--settings ...]", prefix)
@@ -693,7 +693,7 @@ func TestOpencodeSpawnPrep(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opencodeHookScriptStatFn = func(string) error { return tt.statErr }
-			env := opencodeSpawnPrep("/tmp/quil", tt.paneID, "default")
+			env := opencodeSpawnPrep(hostHookPaths("/tmp/quil"), tt.paneID, "default")
 			if tt.wantEnv {
 				if len(env) != 4 {
 					t.Fatalf("env = %v, want 4 entries (pane, home, mode, config)", env)
@@ -748,7 +748,7 @@ func TestClaudeHookSpawnPrep_WriteFailureDegradesInsteadOfFailing(t *testing.T) 
 
 	badDir := filepath.Join(t.TempDir(), "R&D")
 
-	prefix, env := claudeHookSpawnPrep(badDir, "pane-abc123", "default", nil)
+	prefix, env := claudeHookSpawnPrep(hostHookPaths(badDir), "pane-abc123", "default", nil)
 	if prefix != nil {
 		t.Errorf("prefix = %v, want nil so the spawn proceeds with no --settings", prefix)
 	}

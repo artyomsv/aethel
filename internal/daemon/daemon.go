@@ -35,6 +35,7 @@ import (
 	"github.com/artyomsv/quil/internal/plugin"
 	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/ringbuf"
+	"github.com/artyomsv/quil/internal/sandbox"
 	"github.com/artyomsv/quil/internal/shellinit"
 	"github.com/artyomsv/quil/internal/version"
 	"github.com/charmbracelet/x/ansi"
@@ -64,7 +65,7 @@ type Daemon struct {
 	// connect — atomic.Pointer is what keeps that race-free.
 	clientCWD atomic.Pointer[string]
 
-	memReport   *memreport.Collector
+	memReport *memreport.Collector
 	// procReport enumerates per-pane process trees, and runs ONLY while a
 	// client keeps asking for them. See procGateWindow.
 	procReport *procCollector
@@ -75,7 +76,7 @@ type Daemon struct {
 	// process enumeration.
 	killRunning atomic.Bool
 	// hellos records which conns identified themselves as quil processes.
-	hellos *helloRegistry
+	hellos      *helloRegistry
 	collectorWG sync.WaitGroup
 
 	// snapGens records, per pane, the OutputBuf generation captured by the
@@ -93,6 +94,12 @@ type Daemon struct {
 	// Claude .sh / opencode .js hook scripts. Polled by hookEventsWatcher
 	// every 200 ms while the daemon runs.
 	hookSpool *hookevents.Spool
+
+	// spoolFwd moves a sandbox pane's hook events out of its own tree and
+	// into the directory hookSpool scans. Spool reads one flat directory and
+	// cannot see a per-pane subtree, and the per-pane subtree is what keeps
+	// one sandboxed agent out of every other pane's data.
+	spoolFwd *spoolForwarder
 
 	// lastSnapshotDone is the UnixNano of the last completed snapshot().
 	// The snapshot loop is the daemon's liveness canary — it acquires the
@@ -191,6 +198,28 @@ type Daemon struct {
 	// most one blocking-FS permit held for worktreeAddTimeout.
 	worktreeAdding atomic.Bool
 
+	// sandboxCap caches the answer to "can this machine run a container".
+	//
+	// Not an atomic.Bool single-flight like the dialog RPCs above, because
+	// this one CACHES: those reject a concurrent request outright, since a
+	// second directory listing has nothing useful to say, whereas a second
+	// capability request wants the same answer the first is already
+	// fetching. See its own type for why that difference matters.
+	sandboxCap sandboxCap
+
+	// sandboxReg records which repository each sandbox pane wrote its
+	// alternates line into. Teardown and the startup repair both need that
+	// fact and neither can derive it: by teardown the worktree may be gone,
+	// and a stale line makes every git command in the repository fail, so
+	// knowing where to look is what separates a repair from the user editing
+	// a file by hand.
+	sandboxReg *sandboxRegistry
+
+	// sandboxSignIn serialises the browser sign-in a sandbox pane starts on
+	// the user's behalf. Daemon-wide: what it guards is one browser window and
+	// one person's attention, not a per-pane resource.
+	sandboxSignIn sandboxSignIn
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -249,6 +278,13 @@ func New(cfg config.Config) *Daemon {
 		gitCache:   newGitCache(),
 		snapGens:   make(map[string]uint64),
 	}
+	d.sandboxReg = newSandboxRegistry(config.QuilDir())
+	if cfg.Sandbox.SharedClaudeConfig {
+		// Recorded for the resume path, which has no Daemon to ask.
+		setSharedClaudeRoot(filepath.Join(sandboxRoot(config.QuilDir()), "claude"))
+	}
+	d.spoolFwd = newSpoolForwarder()
+	d.sandboxReg.load()
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
 	d.procReport = newProcCollector(d.session, memreport.ProcRSSBatch)
 	d.hellos = newHelloRegistry()
@@ -322,6 +358,16 @@ func (d *Daemon) Start() error {
 	if d.restored {
 		d.respawnPanes()
 	}
+
+	// Sandbox housekeeping, on a worker so a slow or absent Docker never
+	// delays the socket. Both passes clean up after a daemon that did not
+	// shut down cleanly: the repair strips alternates lines whose object
+	// store is gone — which otherwise makes EVERY git command in that
+	// repository fail — and the sweep reaps containers whose pane no longer
+	// exists. Ordered repair-then-sweep because the sweep's teardown writes
+	// to the same alternates files.
+	go d.sandboxStartupHousekeeping()
+	go d.harvestLoop()
 
 	sockPath := config.SocketPath()
 	d.server = ipc.NewServer(sockPath, d.handleMessage, d.onClientDisconnect)
@@ -508,6 +554,17 @@ func (d *Daemon) Stop() {
 		d.refreshPluginStateFromHooks()
 		log.Print("daemon stopping, writing final snapshot...")
 		d.snapshot()
+		// Sandbox panes, after the snapshot and before the PTY closes: the
+		// harvest puts their commits in the repository while the containers
+		// are still up, and the kill stops agents that would otherwise keep
+		// running — unreachable, unstoppable, and still spending quota —
+		// because killing the docker CLI does not stop its container.
+		if ids := d.sandboxPaneIDs(); len(ids) > 0 {
+			for _, id := range ids {
+				d.harvestSandbox(id)
+			}
+			d.killSandboxContainers(ids)
+		}
 		for _, tab := range d.session.Tabs() {
 			for _, pane := range d.session.Panes(tab.ID) {
 				if pane.PTY != nil {
@@ -864,6 +921,15 @@ func (d *Daemon) restoreWorkspace() error {
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 				worktreePath, _ := paneData["worktree_path"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
+				sandboxImage, _ := paneData["sandbox_image"].(string)
+				sandboxAuth, _ := paneData["sandbox_auth"].(string)
+				containerCWD, _ := paneData["container_cwd"].(string)
+				// The persisted type carries a sandbox prefix; strip it here
+				// so the registry lookup finds the plugin. spawnPane does the
+				// same, and re-derives "is this sandboxed" from either half —
+				// a snapshot written by a version that had only one of them
+				// still restores correctly.
+				paneType, _ = splitSandboxType(paneType)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -879,6 +945,13 @@ func (d *Daemon) restoreWorkspace() error {
 					OutputBuf:    ringbuf.NewRingBuffer(d.session.bufSize),
 					Muted:        muted,
 					Eager:        eager,
+					SandboxImage: sandboxImage,
+					// Absent on a pre-choice snapshot → empty, which follows
+					// [sandbox] auth. That is the same behaviour those panes
+					// had before the choice existed, so a restore cannot move
+					// a pane to a mode it was never opened in.
+					SandboxAuth:  sandboxAuth,
+					ContainerCWD: containerCWD,
 					// Absent on pre-pin snapshots → false, which is the only
 					// safe default: inventing a mark the user never set would
 					// put a "look here" on a pane with nothing to look at, and
@@ -1440,6 +1513,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 
 	case ipc.MsgWorktreeStatusReq:
 		d.handleWorktreeStatusReq(conn, msg)
+	case ipc.MsgSandboxCapReq:
+		d.handleSandboxCapReq(conn, msg)
 	case ipc.MsgKubeCtxReq:
 		d.handleKubeCtxReq(conn, msg)
 	case ipc.MsgPluginListReq:
@@ -1978,12 +2053,23 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 // resume claim onto a terminal, which a snapshot inside the checkout window
 // persists and a failed add leaves forever. createFirstPaneWorktree carries
 // the full set on its own payload, so nothing is lost.
+// Sandbox rides with them and MUST: this is the ordinary (no-worktree) arm of
+// Ctrl+T, and it is the one that shipped dropping the field. `create_tab` with
+// a sandbox spec and no worktree produced a claude pane running on the HOST, in
+// the project root, with --dangerously-skip-permissions, no container and no
+// error anywhere — the exact "never falls back to a host spawn" refusal the
+// feature is built around, defeated by an omission in a hand-copy.
+//
+// FirstPaneSpec.Sandbox's own doc comment warned about this hand-copy and then
+// named only createFirstPaneWorktree, which does copy it. Both copies are the
+// hazard; a field added to FirstPaneSpec belongs in each.
 func (d *Daemon) firstPanePayload(tabID, paneType string, spec ipc.FirstPaneSpec) ipc.CreatePanePayload {
 	create := ipc.CreatePanePayload{TabID: tabID, Type: paneType}
 	if paneType == spec.Type {
 		create.InstanceName = spec.InstanceName
 		create.InstanceArgs = spec.InstanceArgs
 		create.ResumeSessionID = spec.ResumeSessionID
+		create.Sandbox = spec.Sandbox
 	}
 	return create
 }
@@ -2077,6 +2163,13 @@ func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placehold
 		ResumeSessionID: spec.ResumeSessionID,
 		ReplacePaneID:   placeholderID,
 		Worktree:        spec.Worktree,
+		// This hand-copy is exactly the omission FirstPaneSpec.Sandbox warns
+		// about, and it was made anyway: the dialog's own designed flow — new
+		// tab, worktree chosen, sandbox on — reaches the daemon through here,
+		// so a spec that stopped at the field definition opened a tab whose
+		// agent ran on the host. Any field added to FirstPaneSpec has to be
+		// added here too.
+		Sandbox: spec.Sandbox,
 	}
 	go func() {
 		resp := d.worktreeAddAndCreate(p)
@@ -2159,9 +2252,43 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	// that may be on a network mount, and this is the requesting client's
 	// dispatch goroutine. Running it before the broadcast would also leave the
 	// tab on screen for the length of the checkout deletion.
-	if len(worktrees) > 0 {
-		go d.removeOwnedWorktrees(worktrees)
+	//
+	// Containers come down FIRST and are waited for, because each holds its
+	// worktree as a bind mount and removeOwnedWorktrees gives up after three
+	// attempts at 250 ms. Teardown harvests each pane's git objects on the
+	// way, so closing a tab never loses commits made inside a container.
+	closing := make([]string, 0, len(panes))
+	for _, p := range panes {
+		closing = append(closing, p.ID)
 	}
+	go func() {
+		// Teardowns run concurrently with each other but ALL of them finish
+		// before the worktrees go: they are independent containers, and a
+		// tab can hold several.
+		var wg sync.WaitGroup
+		var held atomic.Bool
+		for _, id := range closing {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				if !d.teardownSandbox(context.Background(), id) {
+					held.Store(true)
+				}
+			}(id)
+		}
+		wg.Wait()
+		// ONE surviving container is enough to cancel the removal for the
+		// whole tab: the worktrees are shared across its panes, and
+		// removeOwnedWorktrees forces the delete rather than failing on a busy
+		// mount. Deferred to the next daemon start, like the teardown itself.
+		if held.Load() {
+			log.Printf("tab close: worktree removal skipped — a sandbox container is still running")
+			return
+		}
+		if len(worktrees) > 0 {
+			d.removeOwnedWorktrees(worktrees)
+		}
+	}()
 }
 
 // recoverEmptyProject re-creates a shell tab for a project that has no tabs
@@ -2437,6 +2564,16 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
 	pane.PluginMu.Unlock()
+	// The sandbox spec joins the fields above, and its absence here was the
+	// whole feature failing open: spawnPane gates the container branch on
+	// pane.SandboxImage, so a create that never set it ran the agent on the
+	// host. A REJECTED image destroys the pane rather than spawning it
+	// un-sandboxed — the user asked for isolation, and quietly not providing
+	// it is the one outcome that must never happen.
+	if err := applySandboxSpec(pane, payload.Sandbox); err != nil {
+		d.session.DestroyPane(pane.ID)
+		return nil, err
+	}
 	if payload.Overlay {
 		// CreatePane already PUBLISHED the pane into the session maps, so a
 		// concurrent snapshot/broadcast goroutine may be reading it — both
@@ -2460,6 +2597,21 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 	// as happily against a createPaneAt that no longer calls it.
 	ptySession := newSessionFn(0, 0)
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
+		// Recorded ON THE PANE, not only returned. Every caller of this
+		// function logged the error and moved on, so a pane that failed to
+		// spawn was published, broadcast, and drawn as an EMPTY RECTANGLE —
+		// the reason for it reachable only by reading quild.log. A sandbox
+		// refusal is the case that makes this unacceptable: those exist
+		// precisely so the user is told rather than silently given an
+		// un-isolated pane, and a black pane tells them nothing.
+		//
+		// Under PluginMu because CreatePane has already published the pane and
+		// a snapshot or broadcast goroutine may be reading it. Not persisted —
+		// spawnPane clears it on a later success, and a stale error surviving
+		// a restart would describe a condition that may be long gone.
+		pane.PluginMu.Lock()
+		pane.SpawnError = err.Error()
+		pane.PluginMu.Unlock()
 		return pane, fmt.Errorf("start PTY error: %w", err)
 	}
 	return pane, nil
@@ -2495,6 +2647,13 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	newPane.Type = paneType
 	newPane.InstanceName = payload.InstanceName
 	newPane.InstanceArgs = payload.InstanceArgs
+	// Before the swap, deliberately. This pane is not published yet, so a
+	// refusal costs nothing — whereas past ReplacePane the OLD pane is gone
+	// whatever else fails, and refusing there would leave the tab short a
+	// pane to satisfy a validation the caller could have failed earlier.
+	if err := applySandboxSpec(newPane, payload.Sandbox); err != nil {
+		return nil, false, err
+	}
 	log.Printf("pane replace: %s -> %s (type=%s)", payload.ReplacePaneID, newPane.ID, paneType)
 
 	// Atomically swap old → new in the tab's pane list
@@ -2505,6 +2664,11 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	// The old pane is no longer reachable via the session — clean up its
 	// hook artifacts so the spool watcher stops re-polling a dead file.
 	d.cleanupPaneArtifacts(payload.ReplacePaneID)
+	// And its container, if it had one. A replace destroys the old pane as
+	// surely as a close does — the worktree-replace path is exactly how a
+	// sandbox pane is created into a fresh worktree, so the placeholder it
+	// supersedes is a routine case rather than a rare one.
+	go d.teardownSandbox(context.Background(), payload.ReplacePaneID)
 
 	// Claim the resume target only once the pane is published, so the claim is
 	// visible to a create racing on the same session (the occupancy scan walks
@@ -2638,9 +2802,31 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	// race for the worktree — but a hidden overlay pane in the same tab CAN be
 	// sitting in it, and ensureTabNotEmpty is what destroys those. Removing
 	// before it ran would find the overlay still live and keep the worktree.
+	//
+	// The container comes down FIRST, and in the same goroutine, because it
+	// holds the worktree as a bind mount and removeOwnedWorktrees gives up
+	// after three attempts at 250 ms. Teardown also harvests the pane's git
+	// objects before anything is deleted, so closing a pane never loses
+	// commits made inside the container.
+	closing := payload.PaneID
 	if len(worktrees) > 0 {
-		go d.removeOwnedWorktrees(worktrees)
+		go func() {
+			// GATED, not merely ordered. A container that could not be removed
+			// still holds the worktree as a bind mount, and
+			// removeOwnedWorktrees FORCES the removal after three attempts —
+			// so proceeding deletes the directory out from under a live agent.
+			// The teardown says so on its own log line and raises a sidebar
+			// event; the worktree survives for the next daemon start to clean
+			// up, which is the recoverable half of the same decision.
+			if !d.teardownSandbox(context.Background(), closing) {
+				log.Printf("pane %s: worktree removal skipped — its container is still running", closing)
+				return
+			}
+			d.removeOwnedWorktrees(worktrees)
+		}()
+		return
 	}
+	go d.teardownSandbox(context.Background(), closing)
 }
 
 // ensureTabNotEmpty destroys orphaned overlay panes and spawns a fresh
@@ -3873,6 +4059,25 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.WorktreePath != "" {
 				paneData["worktree_path"] = pane.WorktreePath
 			}
+			// The sandbox pair. The image is what makes a restored pane
+			// sandboxed at all; the container CWD is what the resume path
+			// needs and cannot re-derive, since Claude names a transcript
+			// directory after the working directory its own process saw.
+			//
+			// The pane TYPE is written with a sandbox prefix alongside them
+			// (see sandboxPaneType). That is what protects a DOWNGRADE: a
+			// daemon too old to read these keys would otherwise restore a
+			// sandbox pane as an ordinary one pointed at the worktree — an
+			// agent on the host, silently un-sandboxed — where an unknown
+			// type falls back to a plain shell.
+			if pane.SandboxImage != "" {
+				paneData["sandbox_image"] = pane.SandboxImage
+				paneData["sandbox_auth"] = pane.SandboxAuth
+				paneData["type"] = sandboxPaneType(pane.Type)
+			}
+			if pane.ContainerCWD != "" {
+				paneData["container_cwd"] = pane.ContainerCWD
+			}
 			// PERSISTED, unlike the branch it stands for. A snapshot landing
 			// inside the checkout window would otherwise restore an ordinary
 			// terminal in the repository root — the bug this feature removes,
@@ -4095,12 +4300,20 @@ var readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
 // different quoting rules, and the override value carries quotes — the same
 // bug class the inline Claude --settings JSON hit, with no file form to fall
 // back to. So a shim disables the hook rather than risk a split argument.
-func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env []string) {
-	if codexhook.IsShim(resolvedCmd) {
+// hookGOOS is the OS the CHILD runs on, which is the daemon's own only for a
+// host pane. It reaches THREE independent decisions here, and switching fewer
+// than all of them leaves codex prompting for trust on every pane: the hook
+// command's shell spelling, the session-flags path that is half the trust key,
+// and the shim check.
+func codexSpawnPrep(hp hookPaths, paneID, hookMode, resolvedCmd, hookGOOS string) (prefix, env []string) {
+	// The shim hazard is a Windows cmd.exe re-parse. A linux container cannot
+	// produce one, and asking about a host path there would answer about the
+	// wrong machine.
+	if hookGOOS == "windows" && codexhook.IsShim(resolvedCmd) {
 		log.Printf("warning: pane %s: codex resolves to a cmd.exe shim (%s); the inline hook override cannot survive its re-parse — codex hooks disabled (notifications, work state, input history, session resume). Install the native codex binary or set [command] path in codex.toml", paneID, resolvedCmd)
 		return nil, nil
 	}
-	exePath, err := quildExeFn()
+	exePath, err := hp.exe()
 	if err != nil {
 		log.Printf("warning: pane %s: cannot resolve quild executable: %v — codex hooks disabled (notifications, work state, input history, session resume)", paneID, err)
 		return nil, nil
@@ -4113,7 +4326,7 @@ func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env 
 		log.Printf("warning: pane %s: %v — codex hooks disabled", paneID, err)
 		return nil, nil
 	}
-	prefix, err = codexhook.ConfigOverrideArgs(codexhook.HookCommand(), runtime.GOOS)
+	prefix, err = codexhook.ConfigOverrideArgs(codexhook.HookCommandFor(hookGOOS), hookGOOS)
 	if err != nil {
 		log.Printf("warning: pane %s: build codex hook override: %v — codex hooks disabled", paneID, err)
 		return nil, nil
@@ -4128,7 +4341,7 @@ func codexSpawnPrep(quilDir, paneID, hookMode, resolvedCmd string) (prefix, env 
 	env = []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
-		"QUIL_HOOK_HOME=" + quilDir,
+		"QUIL_HOOK_HOME=" + hp.RefDir,
 		exeEnv,
 	}
 	return prefix, env
@@ -4153,18 +4366,29 @@ var opencodeHookScriptStatFn = func(path string) error {
 // entries against its own CWD, not the daemon's. With `prompts_cwd = true`
 // the child CWD is user-chosen and may differ from where the daemon was
 // launched, so a relative quilDir would silently break tracking.
-func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
-	absQuilDir, err := filepath.Abs(quilDir)
+func opencodeSpawnPrep(hp hookPaths, paneID, hookMode string) []string {
+	absQuilDir, err := filepath.Abs(hp.HostDir)
 	if err != nil {
-		log.Printf("warning: pane %s: absolutize quilDir %q: %v — session-id rotation tracking disabled", paneID, quilDir, err)
+		log.Printf("warning: pane %s: absolutize quilDir %q: %v — session-id rotation tracking disabled", paneID, hp.HostDir, err)
 		return nil
 	}
 	scriptPath := opencodehook.ScriptPath(absQuilDir)
+	// A sandbox pane's tree does not carry the script — EnsureScripts writes
+	// it once into $QUIL_HOME — so it is copied in here. The config content
+	// below embeds an ABSOLUTE path and opencode refuses a relative one, so
+	// a host path there would name a file the container cannot open and
+	// session tracking would fail with nothing on screen.
+	if hp.RefDir != hp.HostDir {
+		if err := copyOpencodeScript(absQuilDir, hp.HostDir); err != nil {
+			log.Printf("warning: pane %s: stage opencode plugin script: %v — session-id rotation tracking disabled", paneID, err)
+			return nil
+		}
+	}
 	if err := opencodeHookScriptStatFn(scriptPath); err != nil {
 		log.Printf("warning: pane %s: opencode plugin script unavailable (%s): %v — session-id rotation tracking disabled", paneID, scriptPath, err)
 		return nil
 	}
-	cfg, err := opencodehook.BuildConfigContent(scriptPath)
+	cfg, err := opencodehook.BuildConfigContent(hp.ref(scriptPath))
 	if err != nil {
 		log.Printf("warning: pane %s: build opencode config content: %v — session-id rotation tracking disabled", paneID, err)
 		return nil
@@ -4175,7 +4399,7 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 	}
 	return []string{
 		"QUIL_PANE_ID=" + paneID,
-		"QUIL_HOOK_HOME=" + absQuilDir,
+		"QUIL_HOOK_HOME=" + hp.RefDir,
 		"QUIL_HOOK_MODE=" + mode,
 		"OPENCODE_CONFIG_CONTENT=" + cfg,
 	}
@@ -4197,8 +4421,8 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 // UNVERIFIED — Quil prepends its own, so depending on Claude's precedence
 // either the user loses their settings or Quil loses rotation tracking. See §7
 // of docs/superpowers/specs/2026-08-19-claude-session-seam-design.md.
-func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
-	exePath, err := quildExeFn()
+func claudeHookSpawnPrep(hp hookPaths, paneID, hookMode string, userArgs []string) (prefix, env []string) {
+	exePath, err := hp.exe()
 	if err != nil {
 		log.Printf("warning: pane %s: cannot resolve quild executable: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
@@ -4208,11 +4432,15 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 		log.Printf("warning: pane %s: build claude settings JSON: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
 	}
-	settingsPath, err := claudehook.WriteSettingsFile(quilDir, paneID, js)
+	settingsPath, err := claudehook.WriteSettingsFile(hp.HostDir, paneID, js)
 	if err != nil {
 		log.Printf("warning: pane %s: write hook settings file: %v — claude hooks disabled (notifications, work state, input history, session-id rotation)", paneID, err)
 		return nil, nil
 	}
+	// The file is WRITTEN on the host and NAMED for whoever will read it. For
+	// a sandbox pane those differ: claude loads it from inside the container,
+	// where the host path does not exist.
+	settingsPath = hp.ref(settingsPath)
 	for _, a := range userArgs {
 		if a == "--settings" {
 			log.Printf("warning: pane %s: claude-code args already contain --settings; precedence with Quil's hook entry is unverified", paneID)
@@ -4230,7 +4458,7 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	env = []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
-		"QUIL_HOOK_HOME=" + quilDir,
+		"QUIL_HOOK_HOME=" + hp.RefDir,
 	}
 	// WriteSettingsFile answers ("", nil) when there was nothing to write, and
 	// its contract is that the caller then SKIPS the flag rather than passing
@@ -4470,6 +4698,12 @@ func claudeResumeCandidatesFrom(pane *Pane, rec claudehook.SessionRecord, err er
 				return // same session reached by two routes
 			}
 		}
+		// A sandbox pane's hook recorded a CONTAINER path, and the probe
+		// below stats on the host. Left alone, every candidate answers
+		// "missing", nothing is located, and the pane spawns with
+		// --session-id against an id whose transcript exists — exit 129,
+		// the very failure locatedOwnSession exists to prevent.
+		transcript = hostTranscriptPath(pane, transcript)
 		cands = append(cands, resumeCandidate{
 			id: id, source: source, transcript: transcript, state: transcriptState(id, transcript),
 		})
@@ -4722,7 +4956,17 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// on the next lazy spawn — after the user had already retried it.
 	pane.WorktreeInterrupted = false
 	typ := pane.Type
+	sandboxImage := pane.SandboxImage
 	pane.PluginMu.Unlock()
+
+	// A sandboxed pane's persisted type carries a prefix, so the plugin it
+	// names has to be recovered before the registry is asked. A daemon too
+	// old to know the prefix looks the whole string up, misses, and takes the
+	// existing fallback to "terminal" — which is the point: a shell is wrong
+	// but visible, where an un-sandboxed agent on the host is wrong and
+	// silent.
+	typ, sandboxed := splitSandboxType(typ)
+	sandboxed = sandboxed || sandboxImage != ""
 
 	p := d.registry.Get(typ)
 	if p == nil {
@@ -4850,24 +5094,74 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// through OPENCODE_CONFIG_CONTENT (inline JSON) referencing a JS plugin
 	// under $QUIL_HOME/opencodehook/. OPENCODE_CONFIG_CONTENT merges with the
 	// user's own opencode config so their plugins/agents/modes still apply.
+	// The sandbox mapping is resolved HERE, before the hook switch, because
+	// every hook prep below bakes a path into a file or an argument that only
+	// the CONTAINER will read. Wrapping afterwards would leave a host path
+	// inside the settings JSON claude loads from inside the container.
+	//
+	// A failure is a refusal, never a host spawn. That is the whole contract
+	// of the feature: a pane the user asked to isolate must not quietly run
+	// unisolated because Docker Desktop was not started.
+	var sbox *sandbox.Mapping
+	if sandboxed {
+		if ok, why := d.sandboxAvailable(context.Background()); !ok {
+			return fmt.Errorf("sandbox unavailable: %s", why)
+		}
+		// Sign in FOR the user rather than letting the pane fall through to a
+		// per-container sign-in they have to repeat for every pane. Returns
+		// true when it took ownership: this pane now has no child and a
+		// goroutine will spawn it once the browser flow finishes. Nil, not an
+		// error — a pane waiting on something is not a pane that failed, and
+		// the worktree placeholder is the same shape.
+		// `p`, not just the pane: the sign-in runs `claude setup-token` and
+		// opens a browser, which is meaningless for codex or opencode — their
+		// credentials are their own. Without this a codex pane with no Claude
+		// token launched a Claude sign-in.
+		if d.beginSandboxSignIn(pane, p) {
+			return nil
+		}
+		m, err := d.prepareSandbox(context.Background(), pane, p.Name, sandboxImage)
+		if err != nil {
+			return err
+		}
+		sbox = &m
+	}
+
 	envVars := append([]string{}, p.Command.Env...)
 	// opencode first, for the reason refreshPluginStateFromHooks documents:
 	// these arms are no longer disjoint by construction, and prepending
 	// `--settings <path>` to opencode's argv would pass it a flag it does not
 	// have while skipping the session read it does need.
+	//
+	// A sandbox pane routes every one of these through the container's own
+	// paths and OS instead of the host's: hp names the pane's tree as the
+	// container sees it, and hookGOOS is what the child runs, not what the
+	// daemon runs.
+	hp := hostHookPaths(config.QuilDir())
+	hookGOOS := runtime.GOOS
+	if sbox != nil {
+		hp = containerHookPaths(*sbox)
+		hookGOOS = "linux"
+	}
 	switch {
 	case p.Name == "opencode":
-		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
+		envVars = append(envVars, opencodeSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
 	case p.Name == plugin.CodexPluginName:
 		// Codex rides a `-c hooks=…` override carrying its own trust hashes
 		// (see internal/codexhook). The hook needs the RESOLVED binary to
 		// refuse a cmd.exe shim; the LookPath below runs after this switch,
 		// so resolve here as well.
+		//
+		// A sandbox pane resolves nothing on the host: the codex binary is
+		// inside the container, and a host lookup would either fail or hand
+		// the shim check a path from the wrong machine.
 		resolvedCmd := cmd
-		if r, err := exec.LookPath(cmd); err == nil {
-			resolvedCmd = r
+		if sbox == nil {
+			if r, err := exec.LookPath(cmd); err == nil {
+				resolvedCmd = r
+			}
 		}
-		prefix, hookEnv := codexSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Codex, resolvedCmd)
+		prefix, hookEnv := codexSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Codex, resolvedCmd, hookGOOS)
 		if len(prefix) > 0 {
 			// `-c` is global, so it precedes both a fresh start and the
 			// `resume <id>` subcommand the restore branch appends.
@@ -4875,7 +5169,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 		envVars = append(envVars, hookEnv...)
 	case p.UsesClaudeSessions():
-		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
+		settingsArgs, hookEnv := claudeHookSpawnPrep(hp, pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
 		}
@@ -4900,9 +5194,34 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	}
 	pane.PluginMu.Unlock()
 
-	// Resolve command to absolute path so CWD doesn't interfere with lookup
-	if resolved, err := exec.LookPath(cmd); err == nil {
-		cmd = resolved
+	// Resolve command to absolute path so CWD doesn't interfere with lookup.
+	//
+	// Skipped for a sandbox pane: the agent binary lives INSIDE the
+	// container, so a host lookup either fails or — worse — resolves a
+	// same-named binary on the host and puts that path in the container's
+	// argv, where it does not exist.
+	if sbox == nil {
+		if resolved, err := exec.LookPath(cmd); err == nil {
+			cmd = resolved
+		}
+	} else {
+		cmd, args = d.wrapInContainer(*sbox, pane, p, sandboxImage, cmd, args, envVars)
+		// The container carries the pane's environment through `docker run
+		// -e`, so the PTY child — the docker CLI itself — must not also
+		// inherit it. The one exception is the OAuth token, which travels by
+		// NAME so docker forwards the value from its own environment; that
+		// is why it is set here and never in argv.
+		// Gated on the plugin as well as the mode, and it must match
+		// sandboxIdentity's own gate exactly: that one decides whether argv
+		// carries `-e CLAUDE_CODE_OAUTH_TOKEN`, this one whether the docker
+		// CLI has a value under that name to forward. A codex or opencode
+		// container has no use for either.
+		authMode := config.SandboxAuthBrowser
+		if plugin.UsesClaudeAuthName(p.Name) {
+			authMode = d.paneAuthMode(pane)
+		}
+		envVars = dockerCLIEnv(authMode)
+		ptySession.SetEnv(envVars)
 	}
 
 	ptySession.SetCWD(pane.CWD)
@@ -5066,6 +5385,11 @@ func (d *Daemon) hookEventsWatcher() {
 			if d.hookSpool == nil || d.hookIngester == nil {
 				continue
 			}
+			// A sandbox pane's hook writes into the pane's OWN tree, which
+			// Spool cannot see — it scans one flat directory. Forward BEFORE
+			// the tick so a container's events reach the sidebar on the same
+			// cadence as a host pane's, rather than one tick later.
+			d.forwardSandboxSpools()
 			payloads := d.hookSpool.Tick()
 			if len(payloads) > 0 {
 				logger.Debug("hook events tick: read %d payloads from spool", len(payloads))
@@ -6086,6 +6410,14 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 
 	d.broadcastState()
 	d.requestSnapshot()
+
+	// The container goes with the pane on THIS path too. It is easy to miss
+	// because this handler shares no funnel with handleDestroyPane, and
+	// missing it leaks a running container plus a permanent alternates line
+	// in the user's repository — which makes every git command there fail
+	// once its object store is eventually removed. MCP destroy_pane is an
+	// ordinary way to close a pane, not an edge case.
+	go d.teardownSandbox(context.Background(), req.PaneID)
 
 	respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{
 		Success: true,

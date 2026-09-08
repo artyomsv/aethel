@@ -27,12 +27,13 @@
 | Doc | What's in it |
 |---|---|
 | [Plugin reference](plugin-reference.md) | Author your own pane types in TOML — every field, every strategy, every example |
+| [Sandbox panes](sandbox-panes.md) | Run an AI pane inside a Docker container — prerequisites, building the image, the sign-in flow for each agent, what the sandbox does and does not bound |
 
 ## Project
 
 | Doc | What's in it |
 |---|---|
-| [Architecture](architecture.md) | All 30 ADRs — client-daemon split, IPC protocol, PTY cross-platform, persistence model, plugin system, SSH transport, projects + router, worktree panes, keymap registry |
+| [Architecture](architecture.md) | All 31 ADRs — client-daemon split, IPC protocol, PTY cross-platform, persistence model, plugin system, SSH transport, projects + router, worktree panes, keymap registry, docker sandbox |
 | [Vision](vision.md) | The project's why — what problem Quil solves and how |
 | [Product requirements](prd.md) | Original PRD (historical reference) |
 | [Roadmap](roadmap.md) | Milestone summary + planned work — see also [roadmap/](roadmap/) for per-feature PRDs |

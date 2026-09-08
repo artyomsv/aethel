@@ -176,6 +176,38 @@ reload, `quil status` and the update controls refuse rather than retargeting,
 and remotes must be Linux or macOS. Details and the roadmap are in
 [docs/features.md](docs/features.md#remote-daemon-over-ssh).
 
+## Run an agent in a box
+
+`--dangerously-skip-permissions` is how an agent gets useful, and it is also how
+an agent reaches every file you can. Tick **Run in a Docker container** in the
+pane setup dialog and the pane runs inside a per-pane container instead — for
+**Claude Code**, **Codex** or **OpenCode**.
+
+The checkout is bind-mounted in, so the agent's edits and its commits are real.
+Everything outside it simply is not there.
+
+**The mount set is the whole boundary.** No `--privileged`, no `--cap-add`, no
+`--network` flag. The repository's `.git` is mounted *as a mountpoint* — which
+answers `EBUSY` to rename and remove — with `objects`, `hooks`, `config`,
+`config.worktree`, `modules` and `worktrees` pinned read-only on top, because
+those are values host git *executes*. New objects go to a store belonging to the
+pane, with your repository's own mounted read-only, so no commit on any branch
+can be deleted from inside.
+
+Notifications, the working spinner, input history and session resume keep
+working. Closing the pane removes its container.
+
+**You supply the image.** Quil publishes none and pulls none:
+
+```bash
+scripts/sandbox-image.sh                       # build and verify quil-sandbox:latest
+scripts/sandbox-image.sh --with codex,opencode # add the other agents
+```
+
+Prerequisites, both Claude sign-in flows, the image recipe line by line, and the
+limits that are *not* bounded (egress, branch pointers, submodules):
+[docs/sandbox-panes.md](docs/sandbox-panes.md).
+
 ## Let your AI assistant drive Quil
 
 Add this to your AI client's MCP config (Claude Desktop, Claude Code, Cursor, VS Code Copilot):
@@ -226,8 +258,9 @@ Define your own pane types in TOML — see the [plugin reference](docs/plugin-re
 | **Configuration** | [configuration.md](docs/configuration.md) |
 | **MCP (AI integration)** | [mcp.md](docs/mcp.md) |
 | **Custom plugins** | [plugin-reference.md](docs/plugin-reference.md) |
+| **Sandbox panes (Docker)** | [sandbox-panes.md](docs/sandbox-panes.md) |
 | **Troubleshooting** | [troubleshooting.md](docs/troubleshooting.md) |
-| **Architecture (30 ADRs)** | [architecture.md](docs/architecture.md) |
+| **Architecture (31 ADRs)** | [architecture.md](docs/architecture.md) |
 | **Roadmap** | [roadmap.md](docs/roadmap.md) |
 | **Vision** | [vision.md](docs/vision.md) |
 | **Original PRD** | [prd.md](docs/prd.md) |

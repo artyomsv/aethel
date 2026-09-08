@@ -128,6 +128,10 @@ type procRow struct {
 	// process had no answer. The sum is then an understatement, and rendering
 	// it bare would claim a completeness it does not have.
 	cpuPartial bool
+	// inContainer marks a pane whose process runs in a container, so its
+	// columns render as unknown rather than reporting the docker CLIs own
+	// footprint under the pane name.
+	inContainer bool
 	// version, uptime and exeName are the quil-section columns. Without them
 	// the section shows a role and a PID, which answers neither question it
 	// exists for — "is this binary current" and "how long has it been up".
@@ -362,7 +366,11 @@ func (m Model) procRows() []procRow {
 	var allCPU cpuAggregate
 	for _, p := range resp.Panes {
 		byTab[p.TabID] = append(byTab[p.TabID], p)
-		tabTotals[p.TabID] += p.TotalBytes
+		if !p.InContainer {
+			// Its bytes describe the docker CLI, so adding them would put a
+			// wrong number into a total that otherwise means something.
+			tabTotals[p.TabID] += p.TotalBytes
+		}
 		// Reading precomputed per-pane totals, so this loop is O(panes) — the
 		// tree walk already happened in applyResourceReport.
 		agg := m.proc.paneCPU[p.PaneID]
@@ -439,10 +447,11 @@ func (m Model) procRows() []procRow {
 				// response arrived, so a collapsed pane can show its subtotal
 				// without making render cost scale with the workspace — the
 				// constraint that previously forced this to report unknown.
-				cpu:        m.proc.paneCPU[p.PaneID].pct(),
-				cpuPartial: m.proc.paneCPU[p.PaneID].partial(),
-				expandable: p.Tree != nil,
-				expanded:   expanded,
+				cpu:         m.proc.paneCPU[p.PaneID].pct(),
+				cpuPartial:  m.proc.paneCPU[p.PaneID].partial(),
+				inContainer: p.InContainer,
+				expandable:  p.Tree != nil,
+				expanded:    expanded,
 			})
 			if !expanded || p.Tree == nil {
 				continue
@@ -1009,8 +1018,17 @@ func renderProcRow(row procRow, selected bool, inner int) string {
 	}
 
 	name := indent + marker + sanitizeRemoteText(row.label)
-	return style.Render(procLine(name, memreport.HumanBytes(row.rss),
-		formatCPUAggregate(row.cpu, row.cpuPartial), row.pid, row.flag, inner))
+	// A sandbox pane's figures describe the docker CLI, not the agent: the
+	// collector walks the HOST process tree from the pane's PID, and the
+	// agent lives in the Docker VM or a containerd cgroup, never beneath it.
+	// An em dash is the honest answer, exactly as it is for an unsampled CPU
+	// reading — a number here would be confidently wrong rather than absent.
+	mem := memreport.HumanBytes(row.rss)
+	cpu := formatCPUAggregate(row.cpu, row.cpuPartial)
+	if row.inContainer {
+		mem, cpu = "—", "—"
+	}
+	return style.Render(procLine(name, mem, cpu, row.pid, row.flag, inner))
 }
 
 // formatUptime renders a duration compactly: 6d 03h, 2h 14m, 12m, 45s.

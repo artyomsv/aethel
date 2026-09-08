@@ -22,6 +22,7 @@ When things go sideways, this is the first place to look.
 - [Force-stop the daemon](#force-stop-the-daemon)
 - [Checking daemon + session status](#checking-daemon--session-status)
 - [Reset everything](#reset-everything)
+- [Sandbox panes](#sandbox-panes)
 
 ---
 
@@ -489,3 +490,90 @@ quil
 ```
 
 Your `~/.quil/plugins/*.toml` files are part of "state" — if you customized them, back up the directory before nuking.
+
+## Sandbox panes
+
+### The "Run in a Docker container" row is missing
+
+Quil asks the machine the *daemon* runs on, not the machine you are typing on.
+The row appears only when that machine has Docker running **linux** containers.
+Docker Desktop in Windows-containers mode answers a probe and then fails every
+linux image, so it counts as unavailable.
+
+Check with `docker info` on the daemon's machine. The answer is cached for 30
+seconds, so start Docker and reopen the dialog.
+
+### The pane dies immediately
+
+- `exec: "claude": executable file not found in $PATH` — the image has no agent
+  binary. See [Sandbox panes](sandbox-panes.md) for what the image must provide.
+- A pull is not a hang. `docker run` streams progress into the pane the first
+  time it fetches an image.
+- The container's logs survive the pane: `docker logs quil-<pane-id>`.
+
+### Every git command in a repository errors
+
+```
+error: object directory …/sandbox/panes/<id>/objects does not exist;
+       check .git/objects/info/alternates
+```
+
+A sandbox pane's object store was removed while its reference remained. Quil
+repairs this at daemon start, unless `$QUIL_HOME` itself was wiped — which also
+removes the record of where to look.
+
+Manual fix: delete the offending line from
+`<repo>/.git/objects/info/alternates`, or the file if it is the only line.
+
+### A claude pane refuses to start with "hook binary unavailable"
+
+Quil fetches a Linux `quild` matching its own version and mounts it in, so the
+container's hooks can write notifications and session records. A claude pane
+refuses to run without one: with no session record, its *next* restart fails
+with `Session ID … is already in use`.
+
+On a development build there is no published release to fetch from — point
+`QUIL_SANDBOX_QUILD` at a locally built linux `quild`.
+
+### Fable is missing from `/model`, or Remote Control says the login expired
+
+That pane is on the **token** sign-in. A `claude setup-token` credential
+authenticates as *Claude API*, not as your subscription, so Fable, Remote
+Control and claude.ai connectors are not available to it. This is a property of
+the credential, not a bug Quil can fix.
+
+Open a new pane and set the **Sign in** row to **Browser**, or set
+`[sandbox] auth = "browser"` to make that the default. You then sign in inside
+the container, once per pane.
+
+### Every sandbox pane asks me to sign in
+
+Either the mode is `browser` — which signs in once *per pane*, by design — or
+the mode is `token` and no token was found.
+
+```bash
+quil sandbox status
+```
+
+`quild.log` names the reason on the pane that fell through. If the token is
+missing, `quil sandbox login` mints and stores one; opening a sandbox pane does
+the same thing on its own.
+
+The sign-in runs **where the daemon runs**, so under `quil --remote host` the
+browser step happens on `host`.
+
+### A codex pane opens on codex's sign-in menu
+
+Quil copies the host's `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) into
+the pane. A missing host credential is not an error — it just leaves codex
+unauthenticated. Run `codex` once on the daemon's machine and sign in there,
+then open a new sandbox pane.
+
+Note that option 1 of that menu ("Sign in with ChatGPT") cannot work from a
+container: the OAuth callback goes to a `localhost` the host browser cannot
+reach.
+
+### The agent says its edits had no effect
+
+File watchers do not see changes across a Docker Desktop bind mount on Windows.
+Run them in polling mode (`CHOKIDAR_USEPOLLING=1`, `--watch-poll`).

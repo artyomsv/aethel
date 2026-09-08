@@ -2516,6 +2516,12 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	instanceArgs := m.selectedInstanceArgs
 	resumeSessionID := m.selectedSessionID
 	cwd := m.selectedCWD
+	// The sandbox choice is captured here for exactly the reason the paragraph
+	// below gives for the worktree one — and it shipped WITHOUT that capture,
+	// so every create sent a nil spec and every sandbox pane ran on the host.
+	// A reset landed in this teardown by mistake; reading the row after it
+	// yields the zero value, which is "off".
+	sbox := m.sandboxSpec()
 	// Captured with the other choices, BEFORE the teardown below clears them.
 	// Reading these after that reset yields the zero value, so the spec would
 	// silently never be sent and every "new branch" would spawn an ordinary
@@ -2613,6 +2619,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			InstanceArgs:    instanceArgs,
 			ResumeSessionID: resumeSessionID,
 			Worktree:        spec,
+			Sandbox:         sbox,
 		})
 	}
 
@@ -2754,6 +2761,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				ReplacePaneID:   oldPaneID,
 				ResumeSessionID: resumeSessionID,
 				Worktree:        spec,
+				Sandbox:         sbox,
 			})
 			m.sendForDest(tabDest, msg)
 			return nil
@@ -2825,6 +2833,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			InstanceArgs:    instanceArgs,
 			ResumeSessionID: resumeSessionID,
 			Worktree:        spec,
+			Sandbox:         sbox,
 		})
 		m.sendForDest(tabDest, msg)
 		return nil
@@ -3719,15 +3728,30 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.kubeTruncated = false
 	m.resetSessionSelection()
 
+	// The sandbox row is not listed here on purpose: it is gated on
+	// PromptsCWD, which is already the first term, so a plugin that can show
+	// it always needs the dialog anyway.
 	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 ||
 		p.Command.Discover == "kube" || p.Command.Sessions != "")
 	if !needsSetup {
 		return m.advanceFromPluginChoice()
 	}
 
+	// Reset the sandbox row HERE — on the way IN, never on a close path. Three
+	// dialog exits skip the teardown, and a flag surviving one of them would
+	// put the next plain create in a container. This is also where the row's
+	// visibility answer is PINNED, so a capability response landing mid-dialog
+	// cannot add or remove a field under a live cursor.
+	m.resetSandboxField(m.createPaneDialogDest())
+
 	// The browser's pre-fill now costs a round trip, so the dialog opens first
 	// and fills in when the daemon answers.
 	var browseCmd tea.Cmd
+	// Refresh the capability alongside it. Docker Desktop is frequently not
+	// running at login and started later, so an answer cached at attach is the
+	// wrong one for most of a daemon's life. The answer lands in destSandbox
+	// for the NEXT open — this dialog keeps the pinned one, deliberately.
+	sandboxCmd := m.requestSandboxCap(m.createPaneDialogDest())
 
 	if p.Command.PromptsCWD {
 		if p.Command.Discover == "git" {
@@ -3763,7 +3787,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 
 	m.dialogEdit = false // browser doesn't use edit mode
 	m.dialog = dialogCreatePaneSetup
-	return tea.Batch(tea.ClearScreen, browseCmd, kubeCmd)
+	return tea.Batch(tea.ClearScreen, browseCmd, kubeCmd, sandboxCmd)
 }
 
 // fallbackToRecentOrBrowser offers the recent-locations quick pick, falling
@@ -4191,17 +4215,53 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	if p.Command.PromptsCWD {
 		n++ // the worktree field, scoped to the CWD above it
 	}
-	if p.Command.Sessions != "" {
+	if m.showSandboxField(p) {
+		n++
+	}
+	if m.showSandboxAuthField(p) {
+		n++
+	}
+	if m.showSessionField(p) {
 		n++
 	}
 	return n
 }
 
+// showSessionField reports whether the setup dialog offers the resume picker.
+//
+// Hidden while the sandbox row is ON, and that is a correctness rule rather
+// than tidiness. The picker lists the sessions of whichever Claude config
+// directory the DAEMON resolves — its own — while a sandbox pane gets a fresh
+// per-pane directory created at spawn. A brand-new container has no prior
+// sessions by construction, so offering the host's would let the user pick a
+// conversation the container has never seen and get "No conversation found".
+// Showing nothing is the honest answer.
+//
+// All three enumerations of the field list route through here, for the reason
+// the sandbox row's own gate does: the count, the kind and the renderer's
+// separate walk must agree, or the cursor lands on a row nothing draws.
+func (m Model) showSessionField(p *plugin.PanePlugin) bool {
+	return p.Command.Sessions != "" && !m.sandboxOn
+}
+
+// showSandboxField reports whether the setup dialog offers the sandbox row.
+//
+// Gated on the PINNED answer, not the live one: the capability is fetched
+// asynchronously and re-probed on a timer, so reading it live would add or
+// remove a row while the user's cursor is on the field list — changing what
+// setupFieldKind means for an index the key handler is already holding.
+//
+// Gated on PromptsCWD because a sandbox mounts the checkout the CWD step
+// settles on; a plugin that never asks for one has nothing to mount.
+func (m Model) showSandboxField(p *plugin.PanePlugin) bool {
+	return p.Command.PromptsCWD && m.sandboxDialogAvail
+}
+
 // setupFieldKind reports what field is at the given cursor index in the setup
-// dialog. Returns "cwd", "kube", "toggle" (with toggleIdx), "worktree",
+// dialog. Returns "cwd", "kube", "toggle" (with toggleIdx), "worktree", "sandbox",
 // "session", or "continue".
 //
-// Order is CWD → kube → toggles → worktree → session → Continue. The worktree
+// Order is CWD → kube → toggles → worktree → sandbox → session → Continue. The worktree
 // picker stays downstream of CWD because its contents are scoped to that
 // directory, and upstream of the session picker because the session listing is
 // scoped to whichever directory the worktree choice settles on. The session
@@ -4231,7 +4291,24 @@ func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, to
 		}
 		i--
 	}
-	if p.Command.Sessions != "" {
+	// Between worktree and session on purpose: the sandbox mounts whatever
+	// directory the worktree choice settles on, and the session listing is
+	// scoped to the directory the sandbox choice then relocates.
+	if m.showSandboxField(p) {
+		if i == 0 {
+			return "sandbox", -1
+		}
+		i--
+	}
+	// Directly under the switch it belongs to, and present only while that
+	// switch is on — it describes how THAT container authenticates.
+	if m.showSandboxAuthField(p) {
+		if i == 0 {
+			return "sandboxauth", -1
+		}
+		i--
+	}
+	if m.showSessionField(p) {
 		if i == 0 {
 			return "session", -1
 		}
@@ -4332,6 +4409,39 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 
 	case "worktree":
 		return m.handleSetupWorktreeKey(p, key)
+
+	case "sandboxauth":
+		// A two-way choice: arrows and space, never typing. Tab and Enter fall
+		// through to the shared branches below, like every other row.
+		if m.handleSandboxAuthFieldKey(msg) {
+			return m, nil
+		}
+		switch key {
+		case "up", "k":
+			return m.moveSetupCursor(p, -1)
+		case "down", "j":
+			return m.moveSetupCursor(p, 1)
+		case "enter":
+			return m.submitSetupDialog(p)
+		}
+		return m, nil
+
+	case "sandbox":
+		// The row consumes space and, while enabled, printable text. It
+		// deliberately does NOT consume Tab or Enter, so navigation and
+		// submit always reach the branches below.
+		if m.handleSandboxFieldKey(msg) {
+			return m, nil
+		}
+		switch key {
+		case "up", "k":
+			return m.moveSetupCursor(p, -1)
+		case "down", "j":
+			return m.moveSetupCursor(p, 1)
+		case "enter":
+			return m.submitSetupDialog(p)
+		}
+		return m, nil
 
 	case "session":
 		return m.handleSetupSessionKey(p, key)
@@ -4819,6 +4929,25 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	}
 	m.cwdInputError = ""
 
+	// Refused here, not defaulted. Quil publishes no image and ships none, so
+	// there is nothing it could honestly substitute — running the user's
+	// agent in a container they never chose would be worse than the refusal.
+	// Checked at submit rather than only on the row, for the same reason the
+	// worktree name is: the user can turn the sandbox on and then move on
+	// without ever coming back to it.
+	// Written to the SANDBOX row's own error, not worktreeErr: that one is
+	// painted only while the worktree name editor is open, so on a dialog with
+	// a settled worktree this refusal was stored and never drawn — Continue
+	// did nothing and explained nothing.
+	if msg := m.sandboxSubmitError(); msg != "" {
+		m.sandboxErr = msg
+		// The cursor may be anywhere. Move it to the row that has to change
+		// before the dialog will submit, so the message appears where the
+		// user is already looking.
+		m.setupFieldCursor = m.setupSandboxFieldIndex(p)
+		return m, nil
+	}
+
 	// A resume target is only valid for the directory it was listed under. The
 	// user can pick a session, Shift+Tab back to the browser, move to another
 	// project — or change the worktree choice — and press Continue without
@@ -5197,7 +5326,12 @@ func (m *Model) onSetupCWDChanged(dir string) tea.Cmd {
 // toggles, the Continue button, borders and padding — measured against the
 // shipped claude-code layout. Both worktreeVisibleRows and sessionVisibleRows
 // derive from this ONE constant so the two lists' budgets cannot drift apart.
-const setupChromeRows = 26
+// The sandbox row costs up to three of these when it is shown: the switch, the
+// image line, and a focused hint. It is counted in unconditionally rather than
+// added when visible — the two list budgets derive from this constant and a
+// budget that grew and shrank with an asynchronous capability answer would
+// resize the dialog under the user.
+const setupChromeRows = 29
 
 // worktreeVisibleRows caps the worktree list. The floor is 1, never a
 // friendlier number: lipgloss.Place does not clip, so any floor above the
@@ -5802,10 +5936,40 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		fieldIdx++
 	}
 
+	// Between worktree and session: the container mounts whatever directory
+	// the worktree choice settles on, and the session listing is scoped to
+	// the directory this choice then relocates.
+	//
+	// This walk is a SECOND enumeration of the field list — it never calls
+	// setupFieldKind — so its order and its conditions must match that
+	// function exactly. A cursor landing on a row nothing draws is the
+	// symptom when they drift.
+	if m.showSandboxField(p) {
+		b.WriteByte('\n')
+		b.WriteString(m.renderSetupSandboxField(cursor == fieldIdx))
+		fieldIdx++
+		// Same condition as the walk above, in the same order.
+		if m.showSandboxAuthField(p) {
+			b.WriteByte('\n')
+			b.WriteString(m.renderSetupSandboxAuthField(cursor == fieldIdx))
+			fieldIdx++
+		}
+	} else if p.Command.PromptsCWD {
+		// The row is hidden. Say why, when the daemon told us — a feature that
+		// silently is not there reads as a feature that was never built, and
+		// the user cannot tell "Docker is off" from "quil dropped it".
+		// Deliberately NOT a field: fieldIdx is untouched, so this line cannot
+		// put the cursor on a row setupFieldKind does not know about.
+		if line := m.renderSetupSandboxUnavailable(); line != "" {
+			b.WriteByte('\n')
+			b.WriteString(line)
+		}
+	}
+
 	// Last field before Continue: the picker expands into a tall scrolling list
 	// on focus, so it sits below the short fixed-height rows rather than pushing
 	// them up and down as it opens and closes.
-	if p.Command.Sessions != "" {
+	if m.showSessionField(p) {
 		b.WriteByte('\n')
 		b.WriteString(m.renderSetupSessionField(cursor == fieldIdx))
 		fieldIdx++

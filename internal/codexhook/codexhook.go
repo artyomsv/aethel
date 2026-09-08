@@ -69,6 +69,17 @@ func HookCommand() string {
 	return hookCommandFor(runtime.GOOS)
 }
 
+// HookCommandFor is HookCommand for a child that does not run on the daemon's
+// own OS — a sandbox pane, whose codex is inside a linux container while the
+// daemon may be on Windows.
+//
+// It is exported because the command is HALF THE TRUST KEY: the hash codex
+// checks covers this string, so a caller that switched only the GOOS handed to
+// ConfigOverrideArgs would still hash the PowerShell spelling and get no
+// matching trusted_hash — codex then prompts for trust on every pane, the
+// exact symptom the hook exists to remove.
+func HookCommandFor(goos string) string { return hookCommandFor(goos) }
+
 // hookCommandFor is HookCommand with the platform injected, so both spellings
 // are testable on the Linux CI image.
 func hookCommandFor(goos string) string {

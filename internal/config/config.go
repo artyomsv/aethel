@@ -27,6 +27,7 @@ type Config struct {
 	Overlay      OverlayConfig      `toml:"overlay"`
 	Update       UpdateConfig       `toml:"update"`
 	Remote       RemoteConfig       `toml:"remote"`
+	Sandbox      SandboxConfig      `toml:"sandbox"`
 	// Destinations are the ADDITIONAL daemons this client attaches to beside
 	// the local one, each contributing its projects to the same sidebar. A
 	// slice rather than a map because order is meaningful — it is the order the
@@ -36,6 +37,94 @@ type Config struct {
 	// THAT machine", and quietly attaching the configured extras to it would
 	// make one flag mean two different things.
 	Destinations []Destination `toml:"destinations"`
+}
+
+// SandboxConfig controls AI panes that run inside a Docker container.
+type SandboxConfig struct {
+	// Auth selects how a sandbox pane authenticates Claude Code. Read it
+	// through ResolveAuth, never directly — "" is both "unset" and the
+	// migration path for every config written before "browser" existed.
+	//
+	// "" or "token" (default) — the daemon forwards CLAUDE_CODE_OAUTH_TOKEN
+	// from its OWN environment, by name, so the value never enters argv or
+	// any log. Run `claude setup-token` once and export the result where the
+	// daemon runs. With no credential file to share, a per-pane config
+	// directory costs nothing. It gives up Remote Control and claude.ai
+	// connectors for that pane.
+	//
+	// "browser" — the FALLBACK: the user signs in inside the container, once
+	// per pane, into that pane's own config directory. Anthropic documents
+	// the paste-the-code path for a callback that cannot reach a container.
+	//
+	// The token flow is the default because it is the one the design chose,
+	// and shipping the reverse was a real defect rather than a preference:
+	// "" is the zero value, so a config that never mentioned auth silently
+	// selected the fallback and every pane asked the user to sign in again,
+	// with nothing on screen explaining why the token they had set up was
+	// being ignored.
+	//
+	// Quil never reads, copies, stores or refreshes a credential in either
+	// mode. Copying ~/.claude/.credentials.json is deliberately NOT
+	// implemented — see docs/sandbox-panes.md.
+	Auth string `toml:"auth"`
+
+	// SharedClaudeConfig gives every sandbox pane ONE Claude config
+	// directory, so the user signs in once instead of once per pane.
+	//
+	// It merges them into one trust domain, and the cost is real: that
+	// directory holds user-scope settings (hooks), .claude.json (MCP
+	// servers), every transcript and the prompt history, so any sandbox pane
+	// can then plant a hook or an MCP server that every OTHER sandbox pane's
+	// claude executes inside its own container. Off by default for that
+	// reason; `auth = "token"` avoids the trade entirely.
+	SharedClaudeConfig bool `toml:"shared_claude_config"`
+
+	// DefaultImage pre-fills the setup dialog's image field.
+	//
+	// Ships empty and there is no built-in fallback. Quil publishes no image:
+	// running Claude Code inside a vendor's own image triggers the Commercial
+	// Terms conditions for "preinstalling or running Claude Code in your
+	// products or services", while a user-supplied image means Quil
+	// pre-installs nothing and that section never applies.
+	DefaultImage string `toml:"default_image"`
+}
+
+// SandboxAuthMode is the sign-in path the daemon acts on, after the configured
+// string has been resolved. Consumers switch on this, never on the raw value.
+type SandboxAuthMode string
+
+const (
+	// SandboxAuthToken forwards CLAUDE_CODE_OAUTH_TOKEN from the daemon's own
+	// environment, by name.
+	SandboxAuthToken SandboxAuthMode = "token"
+	// SandboxAuthBrowser signs in inside the container, once per pane.
+	SandboxAuthBrowser SandboxAuthMode = "browser"
+)
+
+// ResolveAuth maps the configured Auth string onto the mode to act on, and
+// reports back any value it did not recognise so the caller can say so.
+//
+// "" resolves to the TOKEN flow, and that is the whole migration: Load starts
+// from Default() and lets the decoder overwrite only the keys a file names, so
+// every config.toml already on disk names `auth = ""` explicitly. Changing
+// Default() alone would therefore reach no existing install — the same
+// property unfocused_dim_enabled documents. Making the zero value mean the
+// intended default is the only change that reaches everyone, and it costs
+// nothing: before "browser" existed there was no way to ASK for the fallback,
+// so no "" on disk can be a deliberate choice of it.
+//
+// An unrecognised value resolves to the fallback rather than refusing: it is a
+// typo in a sign-in preference, not an isolation property, and the browser
+// path is always safe — it uses no credential at all. The caller logs it.
+func (c SandboxConfig) ResolveAuth() (mode SandboxAuthMode, unrecognised string) {
+	switch c.Auth {
+	case "", string(SandboxAuthToken):
+		return SandboxAuthToken, ""
+	case string(SandboxAuthBrowser):
+		return SandboxAuthBrowser, ""
+	default:
+		return SandboxAuthBrowser, c.Auth
+	}
 }
 
 // Destination names one remote daemon to attach at launch.

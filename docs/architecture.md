@@ -966,6 +966,32 @@ not a field-by-field rebind.
 - `bindings.toml` is read once at startup with no hot reload. `F1` → Shortcuts
   always renders the live keymap, which is how a user confirms an edit took.
 
+## ADR-31: Docker Sandbox Panes — the Mount Set as the Security Boundary
+
+**Context:** An AI agent with `--dangerously-skip-permissions` can reach every file the user can. Running it in a container is the obvious answer, but a container that bind-mounts a git checkout is only as safe as the mount set: git reads *executable* configuration out of `.git` (`core.fsmonitor`, `core.hooksPath`, `.git/hooks/`, `config.worktree`, `.git/modules/<sub>/`), and Quil's own git ticker runs those on the host every few seconds. Two further constraints shaped the design. Anthropic's Commercial Terms make a vendor that ships Claude Code preinstalled in its own image "preinstalling or running Claude Code in your products or services", and its authentication policy forbids collecting, storing or intermediating credentials — so Quil can neither publish an image nor copy `~/.claude/.credentials.json`.
+
+**Decision:** Sandbox panes run one container per pane, launched by the **daemon**, with an image the **user** supplies. The boundary is the mount set and nothing else — no `--privileged`, no `--cap-add`, no `--network` restriction. Every mount decision lives in `internal/sandbox`, which is pure path arithmetic apart from one file, so the whole boundary is table-testable with no Docker present.
+
+**Implementation:**
+
+- `internal/sandbox/` — `NewMapping` resolves a host CWD to a checkout and computes every path; `runargs.go` turns a `Mapping` into the `docker run` argv. `docker.go` is the only file that executes anything, which is what keeps the boundary unit-testable.
+- **Mount set.** The checkout is read-write. The repository's `.git` is mounted **as a mountpoint itself**, read-write (git must write the index, HEAD and refs), with the executable pieces pinned read-only *on top*: `objects`, `hooks`, `config`, `config.worktree`, `modules`, `worktrees`. Mounting `.git` itself is load-bearing — a mountpoint answers `EBUSY` to rename and remove, and without it the agent renames `.git` and writes a fresh one carrying `core.fsmonitor`, which the host then executes. The pane's own object store `/quil/objects` is a mountpoint for the same reason.
+- **Object isolation.** New objects go to a per-pane store (`GIT_OBJECT_DIRECTORY`) with the repository's own store as a read-only alternate, so nothing inside can delete history. Quil copies new objects across every 30 s and again at pane close.
+- **Refusals never soften.** `NewMapping` refuses a mapping whose worktree or `.git` contains `$QUIL_HOME` — the container would otherwise get every pane's settings, the workspace and the daemon socket.
+- **Per-pane state on the host** at `$QUIL_HOME/sandbox/panes/<pane-id>/` — hook spool, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, object store — mounted at `/quil`. One shared Claude config directory is opt-in (`shared_claude_config`) because it merges every sandbox pane into one trust domain.
+- **Hooks keep working.** A Linux `quild` is mounted read-only at a fixed container path and the agent's hooks invoke it, so notifications, work state, input history and session resume behave as they do locally.
+- **Authentication is per vendor.** Claude Code: forward `CLAUDE_CODE_OAUTH_TOKEN` by *name* (Docker reads the value from the daemon's environment, so it never enters argv or a log), or sign in inside the container — chosen per pane in the create dialog. When no token exists the pane drives `claude setup-token` itself under a PTY, behind a daemon-wide single-flight, and stores the result in the OS environment store (`HKCU\Environment` on Windows), never a Quil-owned file. Codex: its `auth.json` is **copied** from the host, because Codex ships no minting command and a copy cannot be written back over. OpenCode: in-container sign-in, per container.
+- **No image is published or pulled.** `docker/sandbox/Dockerfile` plus `scripts/sandbox-image.sh` build one locally and then *verify* it (non-root user, agent binary, `git`). There is deliberately no default registry name: `anthropics/claude-code` on Docker Hub is a honeypot, not Anthropic's.
+
+**Consequences:**
+
+- The user must build an image before the feature does anything. That is the cost of the Commercial Terms position, and the build script exists to make it one command.
+- Egress is **not** bounded. A default-deny firewall needs `NET_ADMIN`, which Quil does not grant; it has to come from the image's own runtime.
+- Branch pointers are **not** bounded — a pane can move or delete any branch. Recoverable via reflog, and read-only refs would make committing impossible.
+- Bind-mount IO on Docker Desktop is ~20× slower, and inotify does not cross the mount on Windows, so file watchers need polling. Both are documented rather than worked around.
+- Repositories with submodules are unsupported: a submodule's `.git` in a linked worktree is a relative path that escapes the worktree.
+- Full guide: [Sandbox panes](sandbox-panes.md); the invariants live in `.claude/rules/sandbox.md`.
+
 ## Storage Layout
 
 ```
@@ -1015,6 +1041,11 @@ not a field-by-field rebind.
 │   └── *.js
 ├── codexhook/                     # Codex hook log
 │   └── hook.log
+├── sandbox/                       # Docker sandbox panes (ADR-31)
+│   ├── empty/                     # Read-only shadow directory for pinned mounts
+│   ├── empty-file                 # Read-only shadow file for pinned mounts
+│   ├── overlays/<pane-id>/        # Never mounted into the container
+│   └── panes/<pane-id>/           # Mounted at /quil — hook spool, claude/, codex/, objects/
 ├── sessions/                      # Per-pane agent session ids (ADR-23)
 │   ├── pane-XXXXXXXX.id           #   Claude Code
 │   ├── opencode-pane-XXXXXXXX.id

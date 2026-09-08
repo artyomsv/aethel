@@ -137,6 +137,9 @@ func main() {
 		case "notify":
 			handleNotify()
 			return
+		case "sandbox":
+			handleSandbox()
+			return
 		// "activate" is dispatched above, before flag preprocessing.
 		case "version":
 			fmt.Println("quil v" + version)

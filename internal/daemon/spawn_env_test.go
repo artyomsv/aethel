@@ -18,7 +18,7 @@ func TestClaudeHookSpawnPrep_PaneEnvUsesHookHome(t *testing.T) {
 	// quilDir must be writable: claudeHookSpawnPrep now writes the hook
 	// settings to a per-pane file under <quilDir>/sessions/.
 	quilDir := t.TempDir()
-	_, env := claudeHookSpawnPrep(quilDir, "pane-abc123", "default", nil)
+	_, env := claudeHookSpawnPrep(hostHookPaths(quilDir), "pane-abc123", "default", nil)
 	assertHookHomeOnly(t, env, quilDir)
 }
 
@@ -30,7 +30,7 @@ func TestOpencodeSpawnPrep_PaneEnvUsesHookHome(t *testing.T) {
 	opencodeHookScriptStatFn = func(string) error { return nil }
 	defer func() { opencodeHookScriptStatFn = orig }()
 
-	env := opencodeSpawnPrep("/data/quil", "pane-oc123", "default")
+	env := opencodeSpawnPrep(hostHookPaths("/data/quil"), "pane-oc123", "default")
 	assertHookHomeOnly(t, env, "/data/quil")
 }
 
@@ -59,7 +59,7 @@ func TestCodexSpawnPrep_PaneEnvUsesHookHome(t *testing.T) {
 	quildExeFn = func() (string, error) { return "/fake/quild", nil }
 	defer func() { quildExeFn = orig }()
 
-	prefix, env := codexSpawnPrep("/data/quil", "pane-cx123", "default", "/usr/local/bin/codex")
+	prefix, env := codexSpawnPrep(hostHookPaths("/data/quil"), "pane-cx123", "default", "/usr/local/bin/codex", "linux")
 	assertHookHomeOnly(t, env, "/data/quil")
 	if len(prefix) != 2 || prefix[0] != "-c" || !strings.HasPrefix(prefix[1], "hooks={") {
 		t.Errorf("prefix = %q, want [-c hooks={…}]", prefix)
@@ -97,7 +97,11 @@ func TestCodexSpawnPrep_ShimDisablesHooks(t *testing.T) {
 	quildExeFn = func() (string, error) { return "/fake/quild", nil }
 	defer func() { quildExeFn = orig }()
 
-	prefix, env := codexSpawnPrep("/data/quil", "pane-cx123", "default", `C:\Users\x\AppData\Roaming\npm\codex.cmd`)
+	// "windows" explicitly: the shim hazard IS the cmd.exe re-parse, so the
+	// check is gated on the OS the child runs on. A sandbox pane's codex is
+	// inside a linux container, where a host .cmd path says nothing.
+	prefix, env := codexSpawnPrep(hostHookPaths("/data/quil"), "pane-cx123", "default",
+		`C:\Users\x\AppData\Roaming\npm\codex.cmd`, "windows")
 	if prefix != nil || env != nil {
 		t.Errorf("shim: prefix=%q env=%q, want nil/nil", prefix, env)
 	}
@@ -108,7 +112,7 @@ func TestCodexSpawnPrep_UnresolvableExeDisablesHooks(t *testing.T) {
 	quildExeFn = func() (string, error) { return "", errors.New("no exe") }
 	defer func() { quildExeFn = orig }()
 
-	prefix, env := codexSpawnPrep("/data/quil", "pane-cx123", "default", "/usr/local/bin/codex")
+	prefix, env := codexSpawnPrep(hostHookPaths("/data/quil"), "pane-cx123", "default", "/usr/local/bin/codex", "linux")
 	if prefix != nil || env != nil {
 		t.Errorf("prefix=%q env=%q, want nil/nil", prefix, env)
 	}

@@ -32,6 +32,9 @@ Client-daemon model:
 - `internal/keymap/` — Keybinding action registry: canonical chords, the action table with its dispatch `Tier`, multi-chord sequence matching, layered resolution (defaults → preset → user overrides), and the embedded presets. Stdlib + `BurntSushi/toml` only — no `config`, no `tui`, and no `QuilDir()`, so the whole package tests without a `Model` or a `QUIL_HOME`. Path-derived reads live in `internal/config/bindings.go` (`bindings.toml`, migration off the legacy `[keybindings]` table)
 - `internal/notify/` — Windows desktop toasts + `quil://` click-to-route activation. Split so every file with logic is platform-neutral (URI codec, toast XML, variant selection) and the `//go:build windows` files hold syscalls only — CI is Linux, so anything behind that tag is never compiled by `dev.sh test`. Raw COM/WinRT interop (no CGo, no new dependency), following `internal/clipboard`'s `NewProc` idiom
 - `internal/debugserver/` — opt-in pprof listener for both binaries, started only when `QUIL_PPROF` names a port. Compiled into RELEASED builds deliberately: the workloads worth profiling have been running for days in production, and a dev build profiles an empty workspace. The address is refused unless it is literally loopback (a bare port becomes `127.0.0.1:<port>`; `:6060` and any hostname are errors), and `localhost` is rewritten to `127.0.0.1` in `Addr` so `net.Listen` never receives a NAME — otherwise the resolver, not the validator, picks the bind address, which is precisely what "a hostname is never resolved" claims to prevent. **What a profile exposes is narrower than it looks and the guards' rationale must not overstate it**: Go's heap profile is a SAMPLED ALLOCATION profile (call stacks + byte counts), not a memory dump, so it carries no terminal buffer contents and `net/http/pprof` exposes nothing that dumps heap memory. The real leaks are `/debug/pprof/cmdline` (full argv — for `--remote` that names the destination host) and `/debug/pprof/goroutine?debug=2` (stacks with pointer words and absolute paths). The listener is UNAUTHENTICATED and loopback is a machine boundary, not a user boundary — the IPC socket is chmod 0600 and there is no TCP equivalent — so any local account can read the above while the port is open. `?seconds=` is clamped (`maxProfileSeconds`): `net/http/pprof` applies no ceiling and its own deadline helper is inert while `WriteTimeout` is zero, which it deliberately is here, and `runtime/pprof` refuses a second concurrent CPU profile — so one unbounded request would deny the operator the profiling this package exists to provide. Handlers sit on a private mux; importing `net/http/pprof` still pollutes `http.DefaultServeMux` via its `init`, which is inert only because nothing in quil serves on it. Fetch and analyse with `scripts/pprof.sh` / `scripts/pprof-view.sh` — two steps because the host has no Go toolchain and a container's `127.0.0.1` is the container
+- `internal/sandbox/` — the docker sandbox's mount set and container paths. Pure path arithmetic except `docker.go`, deliberately: the mount set IS the security boundary, and a boundary that needs a Docker daemon to test is a boundary nobody tests
+- `internal/claudetoken/` — runs `claude setup-token` under a PTY and reads the token out of its output. Nothing here persists it; the caller hands it to the OS
+- `internal/userenv/` — writes one persistent, user-scoped environment variable (`HKCU\Environment` on Windows, `ErrUnsupported` elsewhere). Same platform split as `internal/notify`: logic files are neutral, the `//go:build windows` file holds syscalls only
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
 
 Deep package notes — `internal/transport/`, `internal/pty/`, `internal/ipc/`, `internal/claudehook/`,
@@ -50,6 +53,7 @@ Go and make are NOT installed locally. Use `scripts/dev.sh` (Docker-based):
 ./scripts/dev.sh vet            # Lint
 ./scripts/dev.sh cross          # Cross-compile all platforms
 ./scripts/dev.sh image          # Build scratch-based Docker image
+./scripts/sandbox-image.sh      # Build the image sandbox PANES run in (`--with codex,opencode`, `--check`)
 ./scripts/dev.sh clean          # Remove built binaries
 ./scripts/dev.sh docs-size      # Check .claude/ agent-context files against size limits
 ```
@@ -118,6 +122,25 @@ AI tool configuration:
 {"mcpServers": {"quil": {"command": "quil", "args": ["mcp"]}}}
 ```
 
+## Sandbox panes
+
+`quil sandbox login|status` — the manual entry point to the Claude token flow a
+sandbox pane otherwise runs on the user's behalf. `login` drives Anthropic's own
+`claude setup-token` under a PTY, reads the token out of its output, saves it to
+the OS user environment and restarts the daemon; `status` says which auth mode
+is in effect and whether a token is present in this process and persisted.
+
+**Quil never keeps its own copy of a Claude credential** — `setup-token` mints
+one for exactly this purpose, and Anthropic's authentication policy speaks
+directly to intermediating theirs. Codex is the deliberate exception and a
+different posture: it ships no equivalent command, so its `~/.codex/auth.json`
+is COPIED into the pane's own `CODEX_HOME`, which is what its own users do for
+containers.
+
+`QUIL_SANDBOX_QUILD` overrides the Linux hook binary a container mounts, for
+development. Full detail in `.claude/rules/sandbox.md` and
+`docs/sandbox-panes.md`.
+
 ## Key Conventions
 
 ### Scoped rules — where the detail lives
@@ -136,6 +159,7 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 | `hooks-and-sessions.md` | `internal/claudehook/`, `opencodehook/`, `codexhook/`, `hookevents/`, `claudesessions/`, `tui/workstate.go`, `modelinfo.go` | hook producers, session-id rotation, hook-events pipeline, work-in-progress indicators |
 | `windows-pty.md` | `internal/pty/`, any `*_windows.go`, `tui/consolefix*.go` | ConPTY + bundled OpenConsole, console-mode restore, window geometry, spawn-size healing |
 | `plugins.md` | `internal/plugin/`, `gitdiscover/`, `kubediscover/`, `defaults/*.toml`, `tui/instances.go`, `overlay.go` | plugin schema + registry, instances, `discover`/`sessions` opt-ins, the shared overlay slot, lazygit/hunk/k9s/lazysql |
+| `sandbox.md` | `internal/sandbox/`, `daemon/sandbox*.go`, `tui/sandbox*.go` | docker sandbox panes — the mount set as a security boundary, the per-pane object store and its ordered teardown, refusals that never soften |
 | `auto-update.md` | `internal/update/`, `cmd/quil/update_apply.go`, `daemon/update.go`, `tui/update.go` | update check, staging, rename-aside swap + rollback |
 | `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `daemon/worktree*.go`, `internal/gitinfo/`, `internal/gitworktree/`, `tui/project*.go`, `tui/worktree_*.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, git subsystem, worktree creation + close-time removal |
 | `dev-environment.md` | *(always on)* | production-isolation rule — never touch the running production daemon |
@@ -211,6 +235,7 @@ Project docs are now organized as a navigable tree under `docs/` (with the index
 - `docs/mcp.md` — User-facing MCP guide (client wiring, all 18 tools, redaction model)
 - `docs/plugin-reference.md` — TOML plugin schema (every field, every strategy, examples)
 - `docs/troubleshooting.md` — Daemon won't start, MCP not detected, log file locations, reset
+- `docs/sandbox-panes.md` — Docker sandbox panes: building the image, signing in, what the sandbox does and does not bound
 - `docs/architecture.md` — 25 ADRs (moved from root `ARCHITECTURE.md`)
 - `docs/vision.md` — Project vision (moved from root `VISION.md`)
 - `docs/prd.md` — Original v1 PRD, historical reference (moved from root `PRD.md`)
@@ -245,5 +270,6 @@ Cached reference repos:
 | M13 | Done | Memory reporting — 5s collector, per-pane Go-heap + PTY RSS, dialog + 2 MCP tools |
 | M14 | Done (v1.47.0) | Projects — grouping above tabs, sidebar with agent+git state, multi-daemon router, runtime host connect/disconnect. Deferred to their own plans: MCP project scoping, listening ports |
 | M17 | Partial | Desktop notifications — Windows toasts on the sidebar's attention states, `quil://` click-to-route via the windowless `quil-activate.exe`, `quil notify setup/status/test/--remove`, F1 → Settings → Notifications (enabled / blocked / done). Still open in M17: sound, macOS/Linux (no transport there carries a click back to a pane). **Raising the terminal window on click was built and REMOVED** — clicking a notification hands the foreground to the shell's notification host, which holds it (measured: 5.5 s for one click, >10 s for the next, released on user input rather than on a timer) and refuses every documented way of taking it back. Windows highlights the taskbar button instead. Do not rebuild this without new evidence: `SetForegroundWindow`, `AttachThreadInput` queue borrowing, `SwitchToThisWindow` and Chromium's F22 hotkey injection were each implemented and each verified refused |
+| M19 | Done (unreleased) | Sandbox panes — an AI pane (claude-code, codex, opencode) inside a per-pane Docker container. **The mount set IS the boundary**: no `--privileged`, no `--cap-add`, no `--network`; the checkout read-write, `.git` mounted AS a mountpoint with `objects`/`hooks`/`config`/`config.worktree`/`modules`/`worktrees` pinned read-only on top, and new objects in a per-pane store with the repo's own as a read-only alternate. Auth is per-vendor and per-pane: Claude Code forwards `CLAUDE_CODE_OAUTH_TOKEN` BY NAME or signs in in-container (radio row in the create dialog; a token-mode pane with no token drives `claude setup-token` itself, single-flighted daemon-wide), codex gets its `auth.json` COPIED in, opencode signs in per container. Quil publishes and pulls NO image — `scripts/sandbox-image.sh` builds `docker/sandbox/Dockerfile` locally and verifies the result. See `.claude/rules/sandbox.md`, [ADR-31](../docs/architecture.md), `docs/sandbox-panes.md` |
 
 Full detail: `docs/roadmap.md` and `docs/roadmap/*.md`.
