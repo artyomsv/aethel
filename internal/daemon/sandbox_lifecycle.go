@@ -184,21 +184,34 @@ func (d *Daemon) harvestSandbox(paneID string) {
 	}
 }
 
-// teardownSandbox runs the ordered teardown for one pane.
+// teardownSandbox runs the ordered teardown for one pane, and reports whether
+// the container is gone.
 //
-// Returns only when the container is gone, because the caller must not remove
-// the worktree before then — a live container holds the bind mount, and
-// removeOwnedWorktrees gives up after three attempts at 250ms.
-func (d *Daemon) teardownSandbox(ctx context.Context, paneID string) {
+// The bool is what the worktree-removing caller must gate on, and returning it
+// is the difference between a comment and a guarantee. A live container holds
+// the worktree as a bind mount, so removing the directory under it deletes
+// files an agent is still writing — and `removeOwnedWorktrees` forces the
+// removal after three attempts at 250 ms, so it does not simply fail and stop.
+// False means "left in place deliberately"; the startup sweep reaps it.
+func (d *Daemon) teardownSandbox(ctx context.Context, paneID string) bool {
 	m, ok := d.sandboxMappingFor(paneID)
 	if !ok {
 		// No registry entry: either not a sandbox pane, or one whose prepare
 		// failed before it recorded anything. Removing any container it may
 		// still have is cheap and idempotent.
+		//
+		// TRUE even when that removal errors, and the asymmetry with the
+		// registered case below is deliberate. The registry entry is what says
+		// a container ever existed for this pane; with none, nothing holds the
+		// worktree as a bind mount. On a machine with no docker installed —
+		// which is most of them, and every one of them closes worktree panes —
+		// this call fails with "executable file not found" for EVERY ordinary
+		// pane, so gating on it would quietly stop removing worktrees for
+		// users who never opted into a sandbox at all.
 		if err := sandboxRemoveFn(ctx, paneID); err != nil {
 			log.Printf("sandbox: pane %s: remove container: %v", paneID, err)
 		}
-		return
+		return true
 	}
 
 	// 1. Harvest FIRST. After this the objects live in the repository and the
@@ -229,7 +242,7 @@ func (d *Daemon) teardownSandbox(ctx context.Context, paneID string) {
 			Message:  "Its files are left in place so nothing is deleted under a running agent. Quil will clean up on the next start.",
 			Severity: "warning",
 		})
-		return
+		return false
 	}
 
 	// 3. Remove the line — and ONLY this pane's line. Another sandbox pane on
@@ -251,6 +264,7 @@ func (d *Daemon) teardownSandbox(ctx context.Context, paneID string) {
 	if d.spoolFwd != nil {
 		d.spoolFwd.forget(paneID)
 	}
+	return true
 }
 
 // sweepSandboxContainers removes containers belonging to THIS daemon whose

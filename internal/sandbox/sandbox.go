@@ -338,6 +338,31 @@ func refuse(quilDir string, m Mapping) error {
 				ErrUnsafeMapping, home, cand.what, real)
 		}
 	}
+
+	// .git/modules is detected with a stat, and a stat FOLLOWS links. Nothing
+	// above covers it: the two candidates are resolved and checked against
+	// QUIL_HOME, while this path is a bind SOURCE in its own right, so a
+	// `.git/modules` symlink or junction pointing at an unrelated host
+	// directory mounts that directory into the container — read-only, but
+	// read-only host data the boundary is supposed to exclude. git never
+	// creates such a link, so refusing costs no real repository anything.
+	if m.HostGitModules != "" {
+		real, err := realPath(m.HostGitModules)
+		if err != nil {
+			return fmt.Errorf("%w: cannot resolve .git/modules %q: %v",
+				ErrUnsafeMapping, m.HostGitModules, err)
+		}
+		gitCommon, err := realPath(m.HostGitCommon)
+		if err != nil {
+			return fmt.Errorf("%w: cannot resolve the repository's .git %q: %v",
+				ErrUnsafeMapping, m.HostGitCommon, err)
+		}
+		if !pathWithin(gitCommon, real) {
+			return fmt.Errorf("%w: .git/modules resolves to %s, outside the repository's .git (%s) — "+
+				"mounting it would expose that directory inside the container",
+				ErrUnsafeMapping, real, gitCommon)
+		}
+	}
 	return nil
 }
 

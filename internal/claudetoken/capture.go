@@ -39,6 +39,30 @@ import (
 // screen and discarded.
 var TokenRe = regexp.MustCompile(`sk-ant-[A-Za-z0-9_\-]{20,}`)
 
+// completeToken returns the token in s only once s proves where it ENDS, and
+// "" while the answer is still arriving.
+//
+// The regex is greedy but can only be greedy about the bytes it has, and this
+// runs against a PTY stream read 4 KiB at a time. A read boundary that lands
+// mid-token leaves a match that satisfies {20,} and is a PREFIX of the real
+// credential — which the caller then persists to the user environment and
+// forwards to every container, where it fails to authenticate with nothing on
+// screen to say why. A truncated credential is worse than a late one.
+//
+// So a match is accepted only when a byte the token could not contain follows
+// it. `atEOF` is the other half: the stream can legitimately end on the last
+// character of the token, and then no delimiter is ever coming.
+func completeToken(s string, atEOF bool) string {
+	loc := TokenRe.FindStringIndex(s)
+	if loc == nil {
+		return ""
+	}
+	if loc[1] < len(s) || atEOF {
+		return s[loc[0]:loc[1]]
+	}
+	return ""
+}
+
 // Budget bounds the whole flow. Generous because the slow step is a human
 // authorising in a browser, not the command.
 const Budget = 5 * time.Minute
@@ -110,8 +134,31 @@ func Capture(claudePath string, opts Options) (string, error) {
 	done := make(chan struct{})
 	var foundOnce sync.Once
 
+	// take accepts the token once the accumulated stream proves where it ends.
+	// Called after every read with atEOF false, and once more when the stream
+	// is over — where a match running to the very last byte is final rather
+	// than possibly-truncated.
+	take := func(atEOF bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if token != "" {
+			return
+		}
+		// Matched against the whole accumulated stream rather than the chunk:
+		// a 4 KiB read can split the token, and a per-chunk scan would miss
+		// exactly the one that matters.
+		if m := completeToken(ansi.Strip(scan.String()), atEOF); m != "" {
+			token = m
+			foundOnce.Do(func() { close(found) })
+		}
+	}
+
 	go func() {
 		defer close(done)
+		// The stream is over, so a match that runs to the last byte is the
+		// whole token and no delimiter is coming. Runs before done closes, so
+		// the select below cannot observe the exit without the token.
+		defer take(true)
 		buf := make([]byte, 4096)
 		for {
 			n, err := s.Read(buf)
@@ -121,14 +168,8 @@ func Capture(claudePath string, opts Options) (string, error) {
 				}
 				mu.Lock()
 				scan.Write(buf[:n])
-				// Matched against the whole accumulated stream rather than the
-				// chunk: a 4 KiB read can split the token, and a per-chunk
-				// scan would miss exactly the one that matters.
-				if m := TokenRe.FindString(ansi.Strip(scan.String())); m != "" && token == "" {
-					token = m
-					foundOnce.Do(func() { close(found) })
-				}
 				mu.Unlock()
+				take(false)
 			}
 			if err != nil {
 				if !errors.Is(err, io.EOF) {

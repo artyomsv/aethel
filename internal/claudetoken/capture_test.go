@@ -121,3 +121,62 @@ func TestCapture_ReportsACommandThatPrintsNoToken(t *testing.T) {
 		t.Errorf("took %s — a command that exited was waited out", elapsed)
 	}
 }
+
+// The token is opaque and {20,} is a floor, not its length — so a read that
+// ends 25 characters into a 43-character token leaves a match that satisfies
+// the pattern and is a PREFIX of the credential. Accepting it persists a
+// broken token to the user environment and forwards it to every container,
+// where it fails to authenticate with nothing on screen to say why.
+func TestCompleteToken_WaitsForTheEndOfTheToken(t *testing.T) {
+	const token = "sk-ant-oat01-AbCdEf0123456789_-XyZaBcDeFgHiJkLmNoP"
+	const cut = 32 // "sk-ant-" + 25 token characters
+	head := token[:cut]
+
+	// The premise: the bare regex is already satisfied by the head, so this
+	// fixture reaches the branch under test rather than passing vacuously.
+	if m := TokenRe.FindString(head); m == "" {
+		t.Fatalf("fixture is wrong: the regex does not match %q at all", head)
+	} else if m == token {
+		t.Fatal("fixture is wrong: the head already contains the whole token")
+	}
+
+	if got := completeToken(head, false); got != "" {
+		t.Errorf("accepted %q from a stream that has not ended — that is a truncated credential", got)
+	}
+	if got := completeToken(token+"\n", false); got != token {
+		t.Errorf("with a delimiter present: got %q, want %q", got, token)
+	}
+	// A stream can legitimately end on the token's last byte, and then no
+	// delimiter is ever coming.
+	if got := completeToken(token, true); got != token {
+		t.Errorf("at EOF: got %q, want %q", got, token)
+	}
+	if got := completeToken("no token here", true); got != "" {
+		t.Errorf("at EOF with no token: got %q, want \"\"", got)
+	}
+}
+
+// The same defect through Capture, because the decision that matters is the
+// one the reader goroutine makes on a real split read — a direct-call test
+// cannot see a call site that never consults it.
+func TestCapture_DoesNotReturnAPrefixOfASplitToken(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh available")
+	}
+	const token = "sk-ant-oat01-AbCdEf0123456789_-XyZaBcDeFgHiJkLmNoP"
+	const cut = 32
+
+	// Two writes with a pause between them is a split read, exactly as a slow
+	// terminal produces one. The trailing sleep keeps the process alive so a
+	// pass cannot come from the exit path.
+	script := "printf %s '" + token[:cut] + "'; sleep 1; printf '%s\\n' '" + token[cut:] + "'; sleep 120"
+
+	got, err := Capture(sh, Options{Args: []string{"-c", script}})
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if got != token {
+		t.Errorf("token = %q, want %q — a prefix here is a credential that cannot authenticate", got, token)
+	}
+}

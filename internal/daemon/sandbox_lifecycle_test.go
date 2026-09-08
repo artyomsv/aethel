@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -252,4 +253,59 @@ func TestQuilHomeLabel_IsCanonical(t *testing.T) {
 	if quilHomeLabel("/home/u/.quil") == quilHomeLabel("/home/u/other") {
 		t.Error("two different data directories share a label")
 	}
+}
+
+// The return value is the worktree-removal gate, so it has to be false exactly
+// when a container may still be holding the bind mount. Both close paths force
+// the worktree removal after three attempts rather than failing on a busy
+// mount, so a wrong answer here deletes a directory a live agent is writing to.
+func TestTeardownSandbox_ReportsWhetherTheContainerIsGone(t *testing.T) {
+	t.Run("removal failed", func(t *testing.T) {
+		d, paneID, _ := sandboxFixture(t)
+		prev := sandboxRemoveFn
+		sandboxRemoveFn = func(context.Context, string) error {
+			return errors.New("docker: context deadline exceeded")
+		}
+		t.Cleanup(func() { sandboxRemoveFn = prev })
+
+		if d.teardownSandbox(context.Background(), paneID) {
+			t.Error("reported the container gone after `docker rm` failed — the caller would " +
+				"force-remove the worktree out from under a live agent")
+		}
+		// And nothing below the removal ran, so the next start can retry.
+		m, _ := d.sandboxMappingFor(paneID)
+		if _, err := os.Stat(m.HostPaneRoot); err != nil {
+			t.Errorf("the pane tree was deleted despite the failure: %v", err)
+		}
+	})
+
+	t.Run("removal succeeded", func(t *testing.T) {
+		d, paneID, _ := sandboxFixture(t)
+		var order []string
+		stubDockerRemove(t, &order)
+
+		if !d.teardownSandbox(context.Background(), paneID) {
+			t.Error("reported the container still present after a clean removal — worktrees " +
+				"would never be removed again")
+		}
+	})
+
+	// A pane with no registry entry never had a container recorded, so nothing
+	// holds its worktree. This must stay TRUE even when the removal errors:
+	// on a machine with no docker installed that call fails for every ordinary
+	// pane, and gating on it would stop removing worktrees for users who never
+	// opted into a sandbox.
+	t.Run("unknown pane, docker unavailable", func(t *testing.T) {
+		d, _, _ := sandboxFixture(t)
+		prev := sandboxRemoveFn
+		sandboxRemoveFn = func(context.Context, string) error {
+			return errors.New(`exec: "docker": executable file not found in $PATH`)
+		}
+		t.Cleanup(func() { sandboxRemoveFn = prev })
+
+		if !d.teardownSandbox(context.Background(), "never-prepared") {
+			t.Error("a pane that never had a container blocked its worktree removal — " +
+				"this fires for every ordinary pane on a machine without docker")
+		}
+	})
 }

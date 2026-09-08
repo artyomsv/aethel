@@ -338,6 +338,13 @@ func TestBeginSandboxSignIn_StillFiresForClaudeCode(t *testing.T) {
 	t.Cleanup(func() { captureTokenFn = prevCap })
 
 	d := &Daemon{cfg: config.Default(), session: NewSessionManager(1024), events: newEventQueue(50)}
+	// Registered BEFORE the call, so it runs AFTER the cleanups above are
+	// queued and therefore BEFORE them (t.Cleanup is LIFO). The sign-in runs
+	// on its own goroutine and reads captureTokenFn there, so returning
+	// without waiting lets the restore above race that read — which is a
+	// failure only under `go test -race`, i.e. only in CI.
+	t.Cleanup(d.sandboxSignIn.wait)
+
 	pane := &Pane{ID: "p1", SandboxImage: "img"}
 	if !d.beginSandboxSignIn(pane, &plugin.PanePlugin{Name: "claude-code"}) {
 		t.Error("the sign-in no longer fires for claude-code")
@@ -458,4 +465,35 @@ func stubNoSavedToken(t *testing.T) {
 	prev := userenvGet
 	userenvGet = func(string) (string, error) { return "", nil }
 	t.Cleanup(func() { userenvGet = prev })
+}
+
+// The sign-in is an untracked goroutine with a five-minute budget on a human in
+// a browser, so a daemon told to stop can still be holding one. Spawning after
+// that point starts PTY children behind the final snapshot.
+func TestRespawnAfterSignIn_DoesNotSpawnDuringShutdown(t *testing.T) {
+	d := &Daemon{session: NewSessionManager(1024), events: newEventQueue(10)}
+	d.shutdown = make(chan struct{})
+
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+
+	var spawned int
+	prev := signInSpawnFn
+	signInSpawnFn = func(*Daemon, *Pane) error { spawned++; return nil }
+	t.Cleanup(func() { signInSpawnFn = prev })
+
+	// The control: an open channel means running, and the pane spawns.
+	d.respawnAfterSignIn(pane.ID)
+	if spawned != 1 {
+		t.Fatalf("spawned %d times while running, want 1 — the fixture never reaches the spawn", spawned)
+	}
+
+	close(d.shutdown)
+	d.respawnAfterSignIn(pane.ID)
+	if spawned != 1 {
+		t.Errorf("spawned %d times, want 1 — a pane was started after the daemon was told to stop", spawned)
+	}
 }

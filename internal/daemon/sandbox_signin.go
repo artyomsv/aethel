@@ -56,7 +56,24 @@ type sandboxSignIn struct {
 	// flight, so the winner can spawn them too rather than leaving them
 	// sitting with a message and no child.
 	waiting []string
+	// inFlight tracks the sign-in goroutine so a caller can wait for it to
+	// finish reading everything it touches.
+	//
+	// Shutdown deliberately does NOT wait on this: the flight is a human in a
+	// browser with a five-minute budget, and holding the stop path open for
+	// that would turn every quit during a sign-in into a SIGKILL. The guard
+	// against acting late is respawnAfterSignIn's own d.stopping() check.
+	//
+	// Its real caller is a test. beginSandboxSignIn returns as soon as the
+	// goroutine is launched, so a test that stubs captureTokenFn and returns
+	// restores that package var while the goroutine is still reading it —
+	// a data race that CI's `go test -race ./...` catches and `dev.sh test`
+	// does not.
+	inFlight sync.WaitGroup
 }
+
+// wait blocks until any in-flight sign-in goroutine has finished.
+func (s *sandboxSignIn) wait() { s.inFlight.Wait() }
 
 // begin claims the sign-in. It reports whether the caller OWNS it; a caller
 // told false has been recorded as a waiter and must not start its own.
@@ -227,7 +244,13 @@ func (d *Daemon) beginSandboxSignIn(pane *Pane, p *plugin.PanePlugin) bool {
 		"A browser window is opening — click Authorize there.\r\n"+
 		"This happens once; every sandbox pane after this is signed in.\r\n\r\n")
 
-	go d.runSandboxSignIn(claude, pane.ID)
+	// Add BEFORE the go statement, never inside it: a Wait racing an Add that
+	// has not run yet returns immediately and the handle guarantees nothing.
+	d.sandboxSignIn.inFlight.Add(1)
+	go func() {
+		defer d.sandboxSignIn.inFlight.Done()
+		d.runSandboxSignIn(claude, pane.ID)
+	}()
 	return true
 }
 
@@ -347,7 +370,34 @@ func (d *Daemon) failSandboxSignIn(paneID string, cause error) {
 // It re-reads the pane rather than holding one across the browser flow: minutes
 // pass, and the tab may be long closed. spawnPane's own sandbox branch runs
 // again, and now finds the token.
+// stopping reports whether the daemon has been told to stop.
+//
+// A nil channel answers false, which is what the many tests that build a
+// Daemon literal need — they never call Start, so nothing closes it, and a
+// receive on nil blocks forever rather than reporting "not stopping".
+func (d *Daemon) stopping() bool {
+	if d.shutdown == nil {
+		return false
+	}
+	select {
+	case <-d.shutdown:
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *Daemon) respawnAfterSignIn(paneID string) {
+	// The sign-in is an untracked goroutine holding a five-minute budget on a
+	// human in a browser, so the daemon can be told to stop while it waits.
+	// Spawning here after that point starts PTY children behind the final
+	// snapshot — processes nothing will record, reap, or find again. The
+	// window is small (the stop path's defers), which is exactly why it is
+	// worth closing with a read rather than reasoning about.
+	if d.stopping() {
+		log.Printf("sandbox: pane %s: signed in during shutdown; not spawning", paneID)
+		return
+	}
 	pane := d.session.Pane(paneID)
 	if pane == nil {
 		return

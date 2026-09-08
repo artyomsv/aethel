@@ -81,10 +81,12 @@ func runSandboxLogin() {
 		os.Exit(1)
 	}
 
+	persisted := true
 	switch err := userenv.Set(oauthTokenVar, token); {
 	case err == nil:
 		fmt.Printf("\nSaved %s to your user environment.\n", oauthTokenVar)
 	case errors.Is(err, userenv.ErrUnsupported):
+		persisted = false
 		// Not a failure of this command — there is nowhere on this platform to
 		// put it that the daemon would reliably read. Say exactly that, and
 		// print the line to place.
@@ -96,10 +98,30 @@ func runSandboxLogin() {
 		os.Exit(1)
 	}
 
-	restartDaemonForToken()
+	// Only meaningful when a daemon is running AND the token can outlive this
+	// process: restarting one that will re-read nothing changes nothing.
+	restarted := persisted && restartDaemonForToken()
 
-	fmt.Println("\nDone. Sandbox panes will use this token — no sign-in inside the container.")
-	fmt.Println("Quil keeps no copy of it.")
+	// The closing line has to match what actually happened, because this is
+	// the last thing the user reads before they believe the setup is done.
+	//
+	// On a platform with nowhere to persist a variable, the token exists only
+	// in THIS process, which is about to exit. Saying "sandbox panes will use
+	// this token" there is the confidently-wrong answer that sends the user
+	// back to a container sign-in with no idea why — the same failure the
+	// daemon's own "cannot find a token" log line exists to prevent.
+	switch {
+	case !persisted:
+		fmt.Println("\nNot done yet. The token above is not stored anywhere:")
+		fmt.Printf("export it as %s where the DAEMON runs, then restart it.\n", oauthTokenVar)
+		fmt.Println("Until then sandbox panes will sign in inside the container.")
+	case restarted:
+		fmt.Println("\nDone. Sandbox panes will use this token — no sign-in inside the container.")
+		fmt.Println("Quil keeps no copy of it.")
+	default:
+		fmt.Println("\nDone. The next daemon to start will use this token — no sign-in inside")
+		fmt.Println("the container. Quil keeps no copy of it.")
+	}
 }
 
 // restartDaemonForToken restarts a running local daemon so it inherits the
@@ -109,12 +131,15 @@ func runSandboxLogin() {
 // re-reads it — so without this the user does everything right, sees
 // "Done", and the next sandbox pane still asks them to sign in. That silent
 // gap is the whole reason this command exists.
-func restartDaemonForToken() {
+// Reports whether it actually restarted one, so the closing message can say
+// "sandbox panes will use this token" only when a daemon is holding it.
+func restartDaemonForToken() bool {
 	if daemonPID() == 0 {
-		return // nothing running; the next start inherits it anyway
+		return false // nothing running; the next start inherits it anyway
 	}
 	fmt.Println("Restarting the daemon so it picks up the token…")
 	restartDaemonCmd()
+	return true
 }
 
 // runSandboxStatus answers the question the log line can only answer after the

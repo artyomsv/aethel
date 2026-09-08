@@ -346,3 +346,56 @@ func TestValidate_CatchesLateFields(t *testing.T) {
 		})
 	}
 }
+
+// stubModulesExist makes NewMapping believe the repository has a .git/modules,
+// which is the one filesystem question it asks that git does not answer.
+func stubModulesExist(t *testing.T, exists bool) {
+	t.Helper()
+	prev := dirExistsFn
+	dirExistsFn = func(string) bool { return exists }
+	t.Cleanup(func() { dirExistsFn = prev })
+}
+
+// .git/modules is found with a stat, and a stat FOLLOWS links — so a symlink
+// or junction there makes an unrelated host directory the bind SOURCE for
+// /repo/.git/modules, mounting it into the container. Read-only, but read-only
+// host data the boundary exists to exclude.
+func TestNewMapping_RefusesGitModulesLinkedOutsideTheRepository(t *testing.T) {
+	stubGit(t, "/projects/repo", "/projects/repo/.git", "/projects/repo/.git")
+	stubModulesExist(t, true)
+
+	prev := evalSymlinksFn
+	evalSymlinksFn = func(p string) (string, error) {
+		s := filepath.ToSlash(p)
+		if s == "/projects/repo/.git/modules" {
+			return "/home/u/secrets", nil
+		}
+		return s, nil
+	}
+	t.Cleanup(func() { evalSymlinksFn = prev })
+
+	_, err := NewMapping(context.Background(), "/home/u/.quil", "/projects/repo", "pane1")
+	if !errors.Is(err, ErrUnsafeMapping) {
+		t.Fatalf("err = %v, want ErrUnsafeMapping — the link's target would be mounted", err)
+	}
+	if !strings.Contains(err.Error(), "modules") {
+		t.Errorf("error does not name the cause: %v", err)
+	}
+}
+
+// The ordinary case must still work, or the refusal above is indistinguishable
+// from "submodule repositories never map".
+func TestNewMapping_AcceptsGitModulesInsideTheRepository(t *testing.T) {
+	stubRealPath(t)
+	stubModulesExist(t, true)
+	stubGit(t, "/projects/repo", "/projects/repo/.git", "/projects/repo/.git")
+
+	m, err := NewMapping(context.Background(), "/home/u/.quil", "/projects/repo", "pane1")
+	if err != nil {
+		t.Fatalf("NewMapping: %v", err)
+	}
+	if m.HostGitModules != filepath.ToSlash(filepath.Join("/projects/repo/.git", "modules")) &&
+		filepath.ToSlash(m.HostGitModules) != "/projects/repo/.git/modules" {
+		t.Errorf("HostGitModules = %q, want the repository's own modules directory", m.HostGitModules)
+	}
+}

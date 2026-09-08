@@ -32,7 +32,7 @@ headline: Run an AI pane inside a Docker container
 - **`scripts/sandbox-image.sh` builds the image**, locally, from
   `docker/sandbox/Dockerfile`, and then verifies it actually satisfies what a pane
   needs — a non-root user, a working `claude`, and `git` — rather than reporting
-  success from a clean build log. `--check <tag>` runs the same assertions against
+  success from a clean build log. `--check --tag <tag>` runs the same assertions against
   an image you built yourself. Quil still publishes no image and pulls none: there
   is no official Claude Code image to pull, and the official-looking name on Docker
   Hub is a security researcher's honeypot containing no Claude Code at all.

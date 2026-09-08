@@ -2266,14 +2266,25 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 		// before the worktrees go: they are independent containers, and a
 		// tab can hold several.
 		var wg sync.WaitGroup
+		var held atomic.Bool
 		for _, id := range closing {
 			wg.Add(1)
 			go func(id string) {
 				defer wg.Done()
-				d.teardownSandbox(context.Background(), id)
+				if !d.teardownSandbox(context.Background(), id) {
+					held.Store(true)
+				}
 			}(id)
 		}
 		wg.Wait()
+		// ONE surviving container is enough to cancel the removal for the
+		// whole tab: the worktrees are shared across its panes, and
+		// removeOwnedWorktrees forces the delete rather than failing on a busy
+		// mount. Deferred to the next daemon start, like the teardown itself.
+		if held.Load() {
+			log.Printf("tab close: worktree removal skipped — a sandbox container is still running")
+			return
+		}
 		if len(worktrees) > 0 {
 			d.removeOwnedWorktrees(worktrees)
 		}
@@ -2800,7 +2811,17 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	closing := payload.PaneID
 	if len(worktrees) > 0 {
 		go func() {
-			d.teardownSandbox(context.Background(), closing)
+			// GATED, not merely ordered. A container that could not be removed
+			// still holds the worktree as a bind mount, and
+			// removeOwnedWorktrees FORCES the removal after three attempts —
+			// so proceeding deletes the directory out from under a live agent.
+			// The teardown says so on its own log line and raises a sidebar
+			// event; the worktree survives for the next daemon start to clean
+			// up, which is the recoverable half of the same decision.
+			if !d.teardownSandbox(context.Background(), closing) {
+				log.Printf("pane %s: worktree removal skipped — its container is still running", closing)
+				return
+			}
 			d.removeOwnedWorktrees(worktrees)
 		}()
 		return

@@ -90,6 +90,25 @@ wrote into, so the startup repair knows where to look. It is best-effort: the
 registry lives in `$QUIL_HOME` too, so `reset-daemon` defeats it, and the docs
 carry the one-line manual fix.
 
+**`teardownSandbox` RETURNS whether the container is gone, and the worktree
+removal is gated on that bool** — the comment claiming the ordering was not
+enough, because the function returns early on a failed `docker rm` and the
+caller went on regardless. A live container holds the worktree as a bind mount
+and `removeOwnedWorktrees` FORCES the removal after three attempts at 250 ms,
+so it does not simply fail: it deletes the directory out from under a running
+agent. Both close paths gate on it, and the tab path cancels for the whole tab
+when ANY of its panes' containers survived, since the worktrees are shared
+across them.
+
+**The no-registry-entry branch returns TRUE even when its removal errors, and
+that asymmetry is load-bearing.** The registry entry is what says a container
+ever existed; with none, nothing holds the worktree. On a machine with no
+docker installed — most of them, and every one of them closes worktree panes —
+that call fails with `executable file not found` for EVERY ordinary pane, so
+gating on it would quietly stop removing worktrees for users who never opted
+into a sandbox at all. `TestTeardownSandbox_ReportsWhetherTheContainerIsGone`
+carries that case explicitly.
+
 ## Refusals that must never soften
 
 A sandbox pane **never falls back to a host spawn**. An unavailable engine and
@@ -101,6 +120,17 @@ dev build puts it inside the checkout, so sandboxing a quil worktree would
 mount every pane's settings file and, on Linux, the daemon socket. Containment
 is tested on **symlink-resolved** paths: a junction defeats a string prefix
 test.
+
+**`.git/modules` is found with a `stat`, and a stat FOLLOWS links** — so it
+needs its own containment check and does not get one from the two candidates
+above. It is a bind SOURCE in its own right, so a symlink or junction there
+makes an unrelated host directory appear at `/repo/.git/modules` inside the
+container. Read-only, but read-only host data the boundary exists to exclude.
+`refuse` resolves it and demands it stay inside the resolved `.git`; git never
+creates such a link, so the refusal costs no real repository anything.
+`TestNewMapping_RefusesGitModulesLinkedOutsideTheRepository` drives it through
+the `evalSymlinksFn` seam, with an accepting twin so the refusal cannot degrade
+into "submodule repositories never map".
 
 The persisted pane type carries a `sandbox/` prefix. Auto-update has a rollback
 path, and a daemon too old to read `sandbox_image` would otherwise restore the
@@ -183,7 +213,7 @@ The build script VERIFIES by asking the image — non-root user, working
 `claude`, `git` — rather than trusting a clean build log. The recipe it
 replaces was hand-copied into the docs WITHOUT its install step, producing an
 image with no `claude` on PATH that failed at spawn with the error the same doc
-page described three paragraphs later. `--check <tag>` runs the assertions
+page described three paragraphs later. `--check --tag <tag>` runs the assertions
 against a user's own image.
 
 `pwd -W` in that script is load-bearing on Windows, exactly as in `dev.sh`:
@@ -258,6 +288,26 @@ real newline a scanner cannot tell from an intentional one, and the width is
 ours to choose. Output is mirrored verbatim so the browser step stays visible
 and interactive; only the scan copy is ANSI-stripped, and it runs over the
 ACCUMULATED stream because a read boundary can split the token.
+
+**Accumulating is only half of it: the match is accepted only once the stream
+proves where the token ENDS** (`completeToken`). `{20,}` is a floor, not the
+token's length, so a read that ends 25 characters into a 43-character token
+leaves a match that satisfies the pattern and is a PREFIX of the credential —
+which is then persisted to the user environment and forwarded to every
+container, where it fails to authenticate with nothing on screen saying why. A
+truncated credential is worse than a late one. A match is therefore taken only
+when a byte the token could not contain follows it, or when the stream has
+ENDED — that second case is required, since a stream can legitimately end on
+the token's last byte. `TestCapture_DoesNotReturnAPrefixOfASplitToken` drives a
+real two-write split through `Capture`, because the decision lives in the
+reader goroutine.
+
+**Unix `login` must not claim success it did not achieve.** Persistence is
+unsupported there, so the token lives only in the exiting process; the closing
+line says so and names what to do, instead of "sandbox panes will use this
+token". Same rule one level down: the daemon restart is only attempted when
+something was persisted AND a daemon is running, and the message distinguishes
+"this daemon has it" from "the next one will".
 
 Unix returns `ErrUnsupported` rather than guessing a shell profile: which file
 depends on the shell and the session, and a daemon under launchd or systemd
@@ -357,6 +407,24 @@ from inside a spawn names a pane id no attached client has seen — and the
 client drops it. That is why the first version of the sign-in left a black
 rectangle after the browser step, with the message sitting unread in the
 daemon's buffer.
+
+**`respawnAfterSignIn` refuses to spawn once the daemon is stopping.** The
+flight is an untracked goroutine holding a five-minute budget on a human in a
+browser, so a stop can land while it waits; spawning after that point starts
+PTY children behind the final snapshot — processes nothing records, reaps or
+can find again. `d.stopping()` reads the shutdown channel and treats a NIL one
+as running, which is what the many tests that build a `Daemon` literal need.
+
+**Shutdown deliberately does NOT wait for the flight** (`sandboxSignIn.inFlight`
+exists, and `Stop` does not call it). Holding the stop path open for a browser
+step turns every quit during a sign-in into a SIGKILL; the `stopping()` check is
+the guard instead. Its real caller is a TEST: `beginSandboxSignIn` returns as
+soon as the goroutine is launched, so a test that stubs `captureTokenFn` and
+returns restores that package var while the goroutine is still reading it. That
+is a data race `go test -race ./...` catches and `dev.sh test` does not — it was
+live on this branch for several commits. `Add` runs BEFORE the `go` statement,
+never inside it, or a `Wait` racing it returns immediately and guarantees
+nothing.
 
 ## A token authenticates; it does NOT skip onboarding
 
