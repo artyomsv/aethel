@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
@@ -189,4 +190,73 @@ func TestSpawnPane_HostPaneIsUnaffected(t *testing.T) {
 		t.Error("an ordinary pane was wrapped in a container")
 	}
 	_ = config.QuilDir()
+}
+
+// prepareSandbox must SEED the claude config, not merely create the directory.
+//
+// A direct-call test of seedClaudeConfig passes just as happily against a
+// prepareSandbox that never calls it — and the consequence of nobody calling
+// it is the bug this was written for: a pane with a perfectly good token that
+// opens on a sign-in screen anyway, every single time.
+func TestPrepareSandbox_SeedsTheClaudeConfig(t *testing.T) {
+	d, pane, _ := sandboxCallsiteFixture(t)
+	// The seed is gated on the container actually receiving a credential:
+	// without one, hiding onboarding would hide the sign-in inside it.
+	d.cfg = config.Default()
+	t.Setenv(oauthTokenEnv, "sk-ant-test-token")
+
+	m, err := d.prepareSandbox(context.Background(), pane, "claude-code", "img:1")
+	if err != nil {
+		t.Fatalf("prepareSandbox: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(m.HostClaudeConfig(), ".claude.json"))
+	if err != nil {
+		t.Fatalf("no seeded claude config: %v — the pane opens on a sign-in screen "+
+			"despite having a token", err)
+	}
+	if !strings.Contains(string(body), "hasCompletedOnboarding") {
+		t.Errorf("seed = %s, want the onboarding answer", body)
+	}
+}
+
+// prepareSandbox must SEED the codex credential for a codex pane, and must not
+// for anyone else.
+//
+// A direct-call test of seedCodexAuth passes against a prepareSandbox that
+// never calls it — the trap this file exists for. The consequence of the miss
+// is a codex pane on a sign-in menu whose browser option cannot work from a
+// container; the consequence of the over-reach is another agent's pane holding
+// a credential it has no use for.
+func TestPrepareSandbox_SeedsCodexAuthOnlyForCodex(t *testing.T) {
+	for _, tc := range []struct {
+		plugin string
+		want   bool
+	}{
+		{"codex", true},
+		{"claude-code", false},
+		{"opencode", false},
+	} {
+		t.Run(tc.plugin, func(t *testing.T) {
+			d, pane, _ := sandboxCallsiteFixture(t)
+
+			hostHome := t.TempDir()
+			if err := os.WriteFile(filepath.Join(hostHome, codexAuthFile), []byte("TEST-cred"), 0o600); err != nil {
+				t.Fatalf("write host auth: %v", err)
+			}
+			prev := hostCodexHomeFn
+			hostCodexHomeFn = func() string { return hostHome }
+			t.Cleanup(func() { hostCodexHomeFn = prev })
+
+			m, err := d.prepareSandbox(context.Background(), pane, tc.plugin, "img:1")
+			if err != nil {
+				t.Fatalf("prepareSandbox: %v", err)
+			}
+			_, statErr := os.Stat(filepath.Join(m.HostCodexHome(), codexAuthFile))
+			got := statErr == nil
+			if got != tc.want {
+				t.Errorf("codex credential present = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

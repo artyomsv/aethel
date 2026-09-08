@@ -22,6 +22,23 @@ headline: Run an AI pane inside a Docker container
   `CLAUDE_CODE_OAUTH_TOKEN` from the daemon's own environment — Quil never reads,
   copies, stores or refreshes a credential, and the token never reaches a command
   line or a log.
+- **`scripts/sandbox-image.sh` builds the image**, locally, from
+  `docker/sandbox/Dockerfile`, and then verifies it actually satisfies what a pane
+  needs — a non-root user, a working `claude`, and `git` — rather than reporting
+  success from a clean build log. `--check <tag>` runs the same assertions against
+  an image you built yourself. Quil still publishes no image and pulls none: there
+  is no official Claude Code image to pull, and the official-looking name on Docker
+  Hub is a security researcher's honeypot containing no Claude Code at all.
 - Closing the pane removes its container. See `docs/sandbox-panes.md` for the
-  Dockerfile to start from, the bind-mount performance cost, and why file watchers
-  need polling mode inside a container.
+  image recipe, the bind-mount performance cost, why sandbox panes have no network
+  egress restriction, and why file watchers need polling mode inside a container.
+- **`quil sandbox login` does the token setup for you.** It runs Anthropic's own
+  `claude setup-token` under a pseudo-terminal, reads the token out of its output,
+  saves it to your user environment, and restarts the daemon — no token to copy,
+  no environment variable to set, no config edit. `quil sandbox status` says
+  whether it is in place. **Quil keeps no copy of the token**: it goes to the OS
+  store (`HKCU\Environment` on Windows), so Quil is a UI over somewhere you could
+  have typed it yourself rather than a credential store of its own. The token flow
+  is the default; the per-pane sign-in inside the container is the fallback, and
+  a daemon that cannot find a token now says so in `quild.log` instead of silently
+  asking you to log in again.

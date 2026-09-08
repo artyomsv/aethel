@@ -63,8 +63,26 @@ func applySandboxSpec(pane *Pane, spec *ipc.SandboxSpec) error {
 			pane.ID, len(spec.Image))
 		return fmt.Errorf("invalid container image reference")
 	}
+	// Validated like the image, and for the same reason: any IPC client can set
+	// it, and the two modes hand the container DIFFERENT credentials. An
+	// unknown value is dropped to empty — follow the config — rather than
+	// guessed, because guessing wrong is either a pane that cannot
+	// authenticate or one that silently loses the model it was opened for.
+	auth := ""
+	switch config.SandboxAuthMode(spec.Auth) {
+	case config.SandboxAuthToken, config.SandboxAuthBrowser:
+		auth = spec.Auth
+	case "":
+		// Absent: follow [sandbox] auth, which is what every older client and
+		// every non-dialog producer sends.
+	default:
+		log.Printf("pane %s: ignoring unknown sandbox auth mode of length %d; using the configured default",
+			pane.ID, len(spec.Auth))
+	}
+
 	pane.PluginMu.Lock()
 	pane.SandboxImage = spec.Image
+	pane.SandboxAuth = auth
 	pane.PluginMu.Unlock()
 	return nil
 }
@@ -149,6 +167,7 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, ima
 		m.HostPaneRoot,
 		m.HostObjects(),
 		m.HostClaudeConfig(),
+		m.HostCodexHome(),
 		// Created whether it is the per-pane dir or the shared one; docker
 		// would otherwise create a root-owned directory for a missing mount
 		// source and the container user could not sign in.
@@ -173,14 +192,27 @@ func (d *Daemon) prepareSandbox(ctx context.Context, pane *Pane, pluginName, ima
 		return sandbox.Mapping{}, err
 	}
 
-	// The empty FILE used to shadow config.worktree. Created here rather than
-	// in the directory loop above because it is a file, and docker would
-	// otherwise invent a root-owned DIRECTORY for a missing bind source —
-	// which git then refuses to read as a config file.
-	if f, err := os.OpenFile(m.HostEmptyFile, os.O_CREATE|os.O_WRONLY, 0o400); err == nil {
-		f.Close()
-	} else if !os.IsExist(err) {
-		return sandbox.Mapping{}, fmt.Errorf("sandbox: create empty shadow file: %w", err)
+	if err := ensureEmptyShadowFile(m.HostEmptyFile); err != nil {
+		return sandbox.Mapping{}, fmt.Errorf("sandbox: %w", err)
+	}
+
+	// So the pane opens on a working prompt instead of four first-run screens.
+	// Gated on the container actually GETTING a credential: the same seed on
+	// an unauthenticated pane hides the sign-in that lives inside onboarding.
+	// See sandbox_claudeconfig.go.
+	if err := seedClaudeConfig(m, d.sandboxTokenAvailable(pane, pluginName)); err != nil {
+		return sandbox.Mapping{}, fmt.Errorf("sandbox: %w", err)
+	}
+
+	// The codex equivalent, and a different mechanism because codex has no
+	// setup-token: its credential is a file, and copying it is what its own
+	// users do for containers. Scoped to a codex pane — no other agent reads
+	// it, and a credential should not travel further than the pane that needs
+	// it. See sandbox_codexauth.go.
+	if pluginName == plugin.CodexPluginName {
+		if err := seedCodexAuth(m); err != nil {
+			return sandbox.Mapping{}, fmt.Errorf("sandbox: %w", err)
+		}
 	}
 
 	if err := writeOverlays(m); err != nil {
@@ -226,8 +258,59 @@ func writeOverlays(m sandbox.Mapping) error {
 	return nil
 }
 
+// ensureEmptyShadowFile makes sure the empty FILE that shadows
+// config.worktree exists.
+//
+// A file rather than part of the directory loop, because docker invents a
+// root-owned DIRECTORY for a missing bind source and git then refuses to read
+// it as a config file.
+//
+// It STATS FIRST, and that is the fix rather than the tidy-up. The previous
+// version opened with O_CREATE|O_WRONLY and forgave os.IsExist — but O_CREATE
+// without O_EXCL never REPORTS EEXIST, it just opens the existing file for
+// writing, and this file is created 0400. On Windows that sets the ReadOnly
+// attribute, so opening it for writing answers "Access is denied" — an error
+// os.IsExist does not match. The result: the first sandbox pane on a fresh
+// QUIL_HOME worked, and every one after it failed to spawn. The forgiving
+// branch was checking for an error the call could not produce.
+//
+// The host mode is not the security boundary — the mount carries docker's own
+// `readonly` — so the file only has to EXIST and be EMPTY.
+func ensureEmptyShadowFile(path string) error {
+	switch st, err := os.Stat(path); {
+	case err == nil:
+		if st.IsDir() {
+			return fmt.Errorf("shadow file %s is a directory (docker invents one for a "+
+				"missing bind source); remove it", path)
+		}
+		if st.Size() != 0 {
+			// It is mounted OVER config.worktree, which host git executes
+			// values from, so content here is not cosmetic. Refused rather
+			// than truncated: the 0400 mode means truncating needs the
+			// attribute cleared first, and a file that grew content is a
+			// state worth a human looking at.
+			return fmt.Errorf("shadow file %s is not empty (%d bytes); it shadows "+
+				"config.worktree and git would read it; remove it", path, st.Size())
+		}
+		return nil
+	case !os.IsNotExist(err):
+		return fmt.Errorf("stat shadow file %s: %w", path, err)
+	}
+
+	// O_EXCL so a lost race is distinguishable from a real failure — two panes
+	// can prepare at once, and the loser must not report an error.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o400)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return fmt.Errorf("create shadow file %s: %w", path, err)
+	}
+	return f.Close()
+}
+
 // sandboxIdentity gathers what the container needs that only the host knows.
-func (d *Daemon) sandboxIdentity(pane *Pane, hookMode string, recordHistory bool) sandbox.Identity {
+func (d *Daemon) sandboxIdentity(pane *Pane, pluginName, hookMode string, recordHistory bool) sandbox.Identity {
 	id := sandbox.Identity{
 		HookMode:      hookMode,
 		RecordHistory: recordHistory,
@@ -238,8 +321,28 @@ func (d *Daemon) sandboxIdentity(pane *Pane, hookMode string, recordHistory bool
 	// The token travels as a NAME only: docker forwards the value from its
 	// own environment, so it never reaches argv and therefore never reaches
 	// quild.log, which the F1 viewer renders.
-	if d.cfg.Sandbox.Auth == "token" && os.Getenv(oauthTokenEnv) != "" {
-		id.ForwardOAuthToken = true
+	_, unrecognised := d.cfg.Sandbox.ResolveAuth()
+	mode := d.paneAuthMode(pane)
+	if unrecognised != "" {
+		log.Printf("sandbox: pane %s: unknown [sandbox] auth = %q; using the "+
+			"browser fallback. Valid values are \"token\" and \"browser\"", pane.ID, unrecognised)
+	}
+	if mode == config.SandboxAuthToken && plugin.UsesClaudeAuthName(pluginName) {
+		if os.Getenv(oauthTokenEnv) != "" {
+			id.ForwardOAuthToken = true
+		} else {
+			// Said out loud rather than silently degraded. This is the exact
+			// state that reads as a broken feature: the pane opens, claude
+			// asks the user to sign in, and nothing anywhere connects that
+			// prompt to a token the daemon could not find. The remedy is in
+			// the message because the daemon's environment is the one place
+			// a user would not think to look.
+			log.Printf("sandbox: pane %s: [sandbox] auth is the token flow but %s is not set "+
+				"in the DAEMON's environment — the pane will ask you to sign in inside the "+
+				"container instead. Run `claude setup-token`, export the result where quild "+
+				"runs, and restart the daemon; or set [sandbox] auth = \"browser\" to choose "+
+				"the per-pane sign-in deliberately", pane.ID, oauthTokenEnv)
+		}
 	}
 	if runtime.GOOS != "windows" {
 		// Docker Desktop on Windows ignores uids. On a Linux host — the
@@ -412,7 +515,7 @@ func (d *Daemon) wrapInContainer(m sandbox.Mapping, pane *Pane, p *plugin.PanePl
 		extra = append(extra, e)
 	}
 
-	id := d.sandboxIdentity(pane, hookModeFor(d.cfg, p), p.Command.RecordHistory)
+	id := d.sandboxIdentity(pane, p.Name, hookModeFor(d.cfg, p), p.Command.RecordHistory)
 	runArgs := sandbox.RunArgs(sandbox.Spec{Image: image}, m, id, runtime.GOOS, extra, cmd, args)
 
 	dockerPath := dockerBinaryPath()
@@ -446,8 +549,13 @@ func isReservedSandboxEnv(entry string) bool {
 // to `docker run` by NAME, so docker reads the VALUE from its own environment.
 // That is what keeps it out of argv, and therefore out of quild.log, which the
 // F1 log viewer renders on screen.
-func dockerCLIEnv(auth string) []string {
-	if auth != "token" {
+// Takes the RESOLVED mode, not the raw config string: this and
+// sandboxIdentity must agree about which flow is in effect, and the two used
+// to reach that answer by separately comparing against the literal "token" —
+// so a change to the accepted spellings had to be made in both or the CLI
+// would be handed a token the identity had decided not to forward.
+func dockerCLIEnv(mode config.SandboxAuthMode) []string {
+	if mode != config.SandboxAuthToken {
 		return nil
 	}
 	if v := os.Getenv(oauthTokenEnv); v != "" {

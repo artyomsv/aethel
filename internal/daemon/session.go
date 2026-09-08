@@ -112,6 +112,15 @@ type Pane struct {
 	// worktree — an agent on the host, un-sandboxed, with no error anywhere.
 	// Auto-update has a rollback path, so "too old" is reachable forwards.
 	SandboxImage string
+	// SandboxAuth is the sign-in mode this pane was created with: "token",
+	// "browser", or empty to follow [sandbox] auth. PERSISTED,
+	// PluginMu-protected, written once at creation.
+	//
+	// Persisted because a restored pane must come back the way it was made: a
+	// pane the user opened for Fable is a BROWSER pane, and restoring it under
+	// a token would silently drop the model they chose it for — and one opened
+	// for zero-prompt work must not start demanding a sign-in.
+	SandboxAuth string
 	// ContainerCWD is the directory the agent ran in INSIDE the container.
 	// PERSISTED, PluginMu-protected.
 	//

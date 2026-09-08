@@ -189,6 +189,11 @@ func Env(m Mapping, id Identity, hostGOOS string) []string {
 		// Claude writes and refreshes its own credentials here. Quil never
 		// reads, copies or stores one.
 		"CLAUDE_CONFIG_DIR": ContainerClaude,
+		// Codex reads auth.json, its config and its sessions from here.
+		// Always set, even for a claude pane: the directory is the pane's own
+		// either way, and a codex started by hand inside the container must
+		// not fall back to a home directory nothing mounts.
+		"CODEX_HOME": ContainerCodex,
 		// New objects go to the pane's own store; history is read from the
 		// repository's, read-only.
 		"GIT_OBJECT_DIRECTORY":             ContainerObjects,

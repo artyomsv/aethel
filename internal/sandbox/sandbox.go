@@ -48,6 +48,11 @@ const (
 	ContainerQuil    = "/quil"
 	ContainerObjects = "/quil/objects"
 	ContainerClaude  = "/quil/claude"
+	// ContainerCodex is the pane's CODEX_HOME. Its own directory beside the
+	// Claude one, and per pane for the same reason: codex writes refreshed
+	// credentials and session state there, and one shared directory would put
+	// every sandbox pane in one trust domain.
+	ContainerCodex = "/quil/codex"
 	// ContainerQuild is the Linux quild the hooks invoke.
 	ContainerQuild = "/usr/local/bin/quild"
 )
@@ -169,6 +174,14 @@ func (m Mapping) HostObjects() string { return joinHost(m.HostPaneRoot, "objects
 // instead of once per pane. The trade is the user's to make and is spelled out
 // in the config comment and the docs; what must not happen is the knob
 // existing and doing nothing.
+// HostCodexHome is the pane's CODEX_HOME on the host. Always per-pane: codex
+// writes refreshed credentials and session state there, so one shared directory
+// would put every sandbox pane in one trust domain — the trade
+// shared_claude_config makes explicit for Claude and nothing has asked for here.
+func (m Mapping) HostCodexHome() string {
+	return joinHost(m.HostPaneRoot, "codex")
+}
+
 func (m Mapping) HostClaudeConfig() string {
 	if m.SharedClaudeRoot != "" {
 		return m.SharedClaudeRoot

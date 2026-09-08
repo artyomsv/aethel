@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/sandbox"
 )
 
@@ -163,22 +164,84 @@ func TestIsReservedSandboxEnv(t *testing.T) {
 }
 
 // The token reaches the docker CLI through its own environment, never argv.
+//
+// Driven through ResolveAuth rather than by handing dockerCLIEnv a literal:
+// this used to pass the raw config string, so `dockerCLIEnv("")` asserted that
+// the DEFAULT forwards nothing — which was true then and is a state that can
+// no longer occur, since "" now resolves to the token flow. A test that keeps
+// passing while describing an unreachable case is the trap; going through the
+// resolver keeps it describing the real configuration.
 func TestDockerCLIEnv_OnlyCarriesTheTokenUnderTokenAuth(t *testing.T) {
 	t.Setenv(oauthTokenEnv, "secret-value")
 
-	if env := dockerCLIEnv(""); len(env) != 0 {
-		t.Errorf("default auth passed env to the docker CLI: %v", env)
+	browser, _ := config.SandboxConfig{Auth: "browser"}.ResolveAuth()
+	if env := dockerCLIEnv(browser); len(env) != 0 {
+		t.Errorf("the browser fallback passed env to the docker CLI: %v", env)
 	}
-	env := dockerCLIEnv("token")
-	if len(env) != 1 || !strings.HasPrefix(env[0], oauthTokenEnv+"=") {
-		t.Fatalf("token auth env = %v, want the token variable", env)
+
+	// Both spellings of the token flow, including the empty one every
+	// existing config.toml carries.
+	for _, auth := range []string{"", "token"} {
+		mode, _ := config.SandboxConfig{Auth: auth}.ResolveAuth()
+		env := dockerCLIEnv(mode)
+		if len(env) != 1 || !strings.HasPrefix(env[0], oauthTokenEnv+"=") {
+			t.Errorf("auth=%q env = %v, want the token variable", auth, env)
+		}
 	}
 }
 
 func TestDockerCLIEnv_NothingToForward(t *testing.T) {
 	t.Setenv(oauthTokenEnv, "")
-	if env := dockerCLIEnv("token"); len(env) != 0 {
+	mode, _ := config.SandboxConfig{Auth: "token"}.ResolveAuth()
+	if env := dockerCLIEnv(mode); len(env) != 0 {
 		t.Errorf("env = %v with no token set", env)
+	}
+}
+
+// sandboxIdentity and dockerCLIEnv must agree: the identity decides whether
+// RunArgs emits `-e CLAUDE_CODE_OAUTH_TOKEN`, and dockerCLIEnv decides whether
+// the docker CLI has a value under that name to forward. One without the other
+// is either a name docker cannot resolve or a value nothing asks for.
+func TestSandboxAuth_IdentityAndCLIEnvAgree(t *testing.T) {
+	t.Setenv(oauthTokenEnv, "secret-value")
+
+	for _, tc := range []struct {
+		auth        string
+		wantForward bool
+	}{
+		{"", true},      // every config already on disk
+		{"token", true}, // explicit
+		{"browser", false},
+		{"typo", false}, // unrecognised falls back
+	} {
+		d := &Daemon{cfg: config.Default()}
+		d.cfg.Sandbox.Auth = tc.auth
+		id := d.sandboxIdentity(&Pane{ID: "pane-1"}, "claude-code", "", false)
+		mode, _ := d.cfg.Sandbox.ResolveAuth()
+		gotEnv := len(dockerCLIEnv(mode)) == 1
+
+		if id.ForwardOAuthToken != tc.wantForward {
+			t.Errorf("auth=%q ForwardOAuthToken = %v, want %v",
+				tc.auth, id.ForwardOAuthToken, tc.wantForward)
+		}
+		if gotEnv != id.ForwardOAuthToken {
+			t.Errorf("auth=%q: identity forwards=%v but the CLI env has the value=%v — "+
+				"docker is handed a name it cannot resolve, or a value nothing asks for",
+				tc.auth, id.ForwardOAuthToken, gotEnv)
+		}
+	}
+}
+
+// The token flow with no token in the daemon's environment must NOT claim to
+// forward one: RunArgs would emit a bare `-e CLAUDE_CODE_OAUTH_TOKEN` that
+// docker resolves to nothing, and claude would see an empty credential rather
+// than none.
+func TestSandboxIdentity_TokenFlowWithNoTokenForwardsNothing(t *testing.T) {
+	t.Setenv(oauthTokenEnv, "")
+	d := &Daemon{cfg: config.Default()}
+
+	if d.sandboxIdentity(&Pane{ID: "pane-1"}, "claude-code", "", false).ForwardOAuthToken {
+		t.Error("forwarded a token that is not set")
 	}
 }
 

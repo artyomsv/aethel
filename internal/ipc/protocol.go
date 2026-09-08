@@ -345,6 +345,22 @@ type SandboxSpec struct {
 	// services", while a user-supplied image means Quil pre-installs nothing
 	// and that section never applies.
 	Image string `json:"image"`
+
+	// Auth is the sign-in mode for THIS pane: "token" or "browser". Empty
+	// follows [sandbox] auth, so an older client and every restore path keep
+	// the configured behaviour.
+	//
+	// Per-pane because the trade is per-pane, and both halves were measured: a
+	// token pane needs no sign-in at all but authenticates as "Claude API",
+	// where Fable is absent from /model and Remote Control reports the login
+	// expired; a browser pane signs in inside the container and gets the full
+	// subscription. Neither is the right answer for every pane.
+	//
+	// The daemon validates it. An unknown value is refused rather than
+	// guessed: the two modes hand the container different credentials, and
+	// guessing wrong is either a pane that cannot authenticate or one that
+	// silently loses the model the user picked it for.
+	Auth string `json:"auth,omitempty"`
 }
 
 // WorktreeSpec asks the daemon to create a linked worktree for a new pane.

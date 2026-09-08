@@ -318,3 +318,27 @@ func (p *PanePlugin) RestoresOwnHistory() bool {
 	}
 	return false
 }
+
+// UsesClaudeAuth reports whether this plugin authenticates the way Claude Code
+// does: a CLAUDE_CODE_OAUTH_TOKEN minted by `claude setup-token`, or a browser
+// sign-in inside the container.
+//
+// By NAME, and narrower than UsesClaudeSessions on purpose. Codex qualifies
+// there — it speaks Claude's hook JSON — but its credentials are its own
+// (`~/.codex/auth.json`), and opencode's are its own again. Conflating the two
+// would run `claude setup-token` and open a browser for a codex pane, forward
+// a Claude token to a container that has no use for it, and offer the user a
+// sign-in choice that does not describe the agent they picked.
+//
+// A user's own TOML naming itself "claude-code" is the same override
+// UsesClaudeSessions already accepts, and means the same thing: this pane runs
+// Claude Code.
+func (p *PanePlugin) UsesClaudeAuth() bool {
+	return p != nil && UsesClaudeAuthName(p.Name)
+}
+
+// UsesClaudeAuthName is the same question for a call site that has only the
+// name — the daemon's sandbox prep is handed one rather than the plugin. ONE
+// definition, so the spawn gate and the dialog's row cannot disagree about
+// which panes the Claude sign-in applies to.
+func UsesClaudeAuthName(name string) bool { return name == ClaudeCodePluginName }

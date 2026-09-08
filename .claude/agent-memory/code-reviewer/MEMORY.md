@@ -8,3 +8,4 @@
 - [bubbletea key decoding](reference_bubbletea_key_decoding.md) — the parser is in `ultraviolet/decoder.go`, not bubbletea; ESC-prefix Meta yields `alt+M` (case in Code, no ModShift)
 - [Go /cpu/classes/* is GC-stale](reference_go_cpu_class_metrics_stale.md) — those metrics advance only at GC mark termination; a no-GC window deltas to 0s. `/gc/cycles` + `/gc/pauses` are live; use GetProcessTimes/Getrusage for real CPU
 - [Plugin TOML capability derivation](project_plugin_toml_capability_derivation.md) — deriving daemon capabilities from user-editable plugin TOML fields turns a documented option into a silent kill switch
+- [Trace wire fields end to end](project_trace_wire_fields_end_to_end.md) — grep producer AND consumer for every new IPC field / Model flag BEFORE reading logic; docker-sandbox shipped 7k lines whose on-switch was never wired and the suite was green
