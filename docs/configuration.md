@@ -486,14 +486,19 @@ Controls AI panes that run inside a Docker container. Full guide:
 
 ```toml
 [sandbox]
-# "" (default) — sign in inside the container, once per pane.
-# "token"      — forward CLAUDE_CODE_OAUTH_TOKEN from the daemon's own
-#                environment. Recommended with more than one sandbox pane: with
-#                no credential file to share, a per-pane config directory costs
-#                nothing. The pane gives up Remote Control and claude.ai
-#                connectors. Quil never reads, copies, stores or refreshes a
-#                credential in either mode, and the token never reaches a
-#                command line or a log.
+# "" or "token" (default) — forward CLAUDE_CODE_OAUTH_TOKEN from the daemon's
+#                own environment. A pane with no token signs in for you: it runs
+#                `claude setup-token`, saves the result to your user environment
+#                and starts the container. Costs the pane Remote Control and
+#                claude.ai connectors, and Fable is absent from /model, because
+#                the credential authenticates as "Claude API" rather than as
+#                your subscription.
+# "browser"    — sign in inside the container instead, once per pane. Slower to
+#                set up, but the pane gets the full subscription.
+#
+# Each pane can override this in the create dialog; this is only the default.
+# Quil never reads, copies, stores or refreshes a Claude credential in either
+# mode, and the token never reaches a command line or a log.
 auth = ""
 
 # One Claude config directory for every sandbox pane, so you sign in once.

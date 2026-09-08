@@ -17,11 +17,13 @@ headline: Run an AI pane inside a Docker container
   keep working**, through a Linux hook binary Quil fetches once per release and
   mounts into the container. Each pane gets its own hook spool and its own Claude
   config directory, so one sandboxed pane cannot read or write another's.
-- **Authentication follows Anthropic's dev-container guidance.** Sign in inside the
-  container once per pane, or set `[sandbox] auth = "token"` to forward
-  `CLAUDE_CODE_OAUTH_TOKEN` from the daemon's own environment — Quil never reads,
-  copies, stores or refreshes a credential, and the token never reaches a command
-  line or a log.
+- **Authentication follows Anthropic's dev-container guidance**, and each pane
+  picks its own in the create dialog. The default forwards
+  `CLAUDE_CODE_OAUTH_TOKEN` from the daemon's own environment; the alternative
+  signs in inside the container, once per pane, and is what a pane needs for
+  Remote Control, claude.ai connectors and Fable. Quil never reads, copies,
+  stores or refreshes a Claude credential in either mode, and the token never
+  reaches a command line or a log.
 - **`scripts/sandbox-image.sh` builds the image**, locally, from
   `docker/sandbox/Dockerfile`, and then verifies it actually satisfies what a pane
   needs — a non-root user, a working `claude`, and `git` — rather than reporting

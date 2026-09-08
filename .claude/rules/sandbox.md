@@ -1,8 +1,14 @@
 ---
+description: Docker sandbox panes — the mount set as a security boundary, the per-pane object store and its ordered teardown, the sign-in flows, and refusals that never soften.
 paths:
   - internal/sandbox/**
   - internal/daemon/sandbox*.go
   - internal/tui/sandbox*.go
+  - internal/claudetoken/**
+  - internal/userenv/**
+  - cmd/quil/sandbox*.go
+  - docker/sandbox/**
+  - scripts/sandbox-image.sh
 ---
 
 # Docker sandbox panes
