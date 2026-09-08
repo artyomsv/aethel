@@ -379,7 +379,7 @@ Quil normalizes what you write before matching it, so several spellings of the s
 - **Named keys fold and alias.** `escape`/`esc`, `pageup`/`pgup`, `pagedown`/`pgdown`/`pgdn`, `return`/`enter` are interchangeable, in any case. `meta` and `hyper` are accepted as spellings of `super` (Cmd on macOS, Win on Windows).
 - **A single-character key keeps its case.** `alt+m` and `alt+M` are *different* chords, because on macOS with Option-as-Meta they are different key presses (`Option+M` vs `Option+Shift+M`). Write the case you mean.
 - **Control characters are rejected.** A binding containing an escape sequence fails to parse; that one action falls back to its default and F1 shows an `unreadable binding` warning. Your other bindings are unaffected.
-- **Space separates a multi-step sequence** (`"ctrl+b c"`). The syntax parses today but nothing dispatches it yet — F1 reports it as `not yet dispatched`. See [Keybindings → Coming for tmux users](keybindings.md#coming-for-tmux-users).
+- **Space separates a multi-step sequence** (`"ctrl+b c"`) — press `Ctrl+B`, then `c`. Sequences dispatch, and the status bar shows the keys typed so far while one is pending. See [Keybindings → Key sequences](keybindings.md#key-sequences).
 
 ### When two bindings collide
 

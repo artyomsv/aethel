@@ -2,7 +2,7 @@
 
 Detailed progress tracker and future plans for Quil.
 
-**Reflects shipped state as of v1.42.1.** Completed entries are ordered roughly
+**Reflects shipped state as of v1.69.0.** Completed entries are ordered roughly
 chronologically and tagged with the release that shipped them; anything below the
 `In Progress` divider is unimplemented unless it says otherwise. When a feature
 ships, update this file in the same PR — the `Completed` section is the answer to
@@ -31,8 +31,8 @@ Session resume infrastructure is complete. The `preassign_id` strategy generates
 ### M4: Plugin System
 > Typed panes with TOML plugins, plugin registry, pane creation dialog.
 
-The plugin system is fully operational. 9 built-in plugins ship with Quil — two Go
-built-ins plus seven embedded TOML defaults written to `~/.quil/plugins/` on first
+The plugin system is fully operational. 11 built-in plugins ship with Quil — two Go
+built-ins plus nine embedded TOML defaults written to `~/.quil/plugins/` on first
 run (user copies override them):
 
 | Plugin | Status | Persistence | Shipped |
@@ -41,10 +41,11 @@ run (user copies override them):
 | **Terminal (wide canvas)** | Production | `cwd_only` — keeps content on squeeze | v1.34.0 |
 | **Claude Code** | Production | `preassign_id` / `--resume` — session resume | M4 |
 | **OpenCode** | Production | `session_scrape` via JS plugin hook | v1.12.0 |
+| **Codex** | Production | `preassign_id` — hook-recorded id, `codex resume <id>` | v1.67.0 |
 | **SSH** | POC | `rerun` — reconnect with same args | M4 |
 | **Stripe** | POC | `rerun` — re-listen with same webhook URL | M4 |
 | **lazygit** | Tool | `rerun` — plus per-tab `Alt+G` overlay | v1.22.0 |
-| **hunk** | Tool | `rerun` — plus per-tab `Alt+D` overlay, sharing lazygit's slot | Unreleased |
+| **hunk** | Tool | `rerun` — plus per-tab `Alt+D` overlay, sharing lazygit's slot | v1.57.0 |
 | **k9s** | Tool | `rerun` — kube-context pick via `discover = "kube"` | v1.27.0 |
 | **lazysql** | Tool | `rerun` — connections stay in lazysql's manager | v1.28.0 |
 
@@ -63,11 +64,11 @@ Key capabilities:
 Ctrl+E toggles the active pane to fill the entire tab content area. Other panes keep running in the background, receiving PTY output. The layout tree stays intact — focus mode is a pure rendering toggle on `TabModel.focusMode`.
 
 Key behaviors:
-- **Ctrl+E** toggles focus on/off (configurable via `focus_pane` keybinding)
+- **Ctrl+E** toggles focus on/off (rebindable as the `pane.focus_toggle` action)
 - Active pane resized to full tab dimensions; VT emulator + daemon PTY updated
 - `[focus]` indicator in status bar
-- Pane navigation (Tab/Shift+Tab) disabled in focus mode
-- Split (Alt+H/V) and close (Ctrl+W) auto-exit focus mode
+- Pane navigation (`Alt+Arrow`) disabled in focus mode
+- Split (`Alt+Shift+H` / `Alt+Shift+V`) and close (`Ctrl+W`) auto-exit focus mode
 - Focus state is NOT persisted — restarting Quil returns to normal layout
 
 ### M8: Bubble Tea v2 Migration + Text Selection
@@ -133,7 +134,7 @@ Key capabilities:
 ### M13: Memory Reporting
 > Per-pane memory accounting with status-bar segment, F1 dialog, and MCP tools.
 
-A daemon-side 5 s collector (`internal/memreport/`) snapshots per-pane Go-heap (output ring buffer + ghost snapshot + plugin state) and PTY child resident memory. Surfaces it three ways: a `mem <n>` segment in the status bar refreshed every 5 s, an F1 → Memory tab/pane tree with expand/collapse and per-pane notes-editor byte accounting, and two MCP tools for external agents.
+A daemon-side 5 s collector (`internal/memreport/`) snapshots per-pane Go-heap (output ring buffer + ghost snapshot + plugin state) and PTY child resident memory. Surfaces it three ways: a `mem <n>` segment in the status bar refreshed every 5 s, an F1 → Memory tab/pane tree with expand/collapse and per-pane notes-editor byte accounting, and two MCP tools for external agents. *(The dialog was replaced by F1 → Processes in v1.63.0 — see below. The collector, the status-bar segment and both MCP tools are unchanged.)*
 
 Key capabilities:
 - **Cross-platform PTY RSS** — `/proc/<pid>/status` on Linux, `ps -o rss=` batched on Darwin, `GetProcessMemoryInfo` on Windows. No-op stub elsewhere
@@ -320,7 +321,177 @@ Tabs were a flat list, so six tabs across three repositories were visually indis
 
 **Deferred, each to its own plan:** per-project MCP scoping (a breaking change to shipped tools; wants a `scope: "all"` opt-out and its own release note) and listening-port detection (three platform implementations, named the first thing to cut). The sidebar's `✗ exited-nonzero` glyph is unimplemented — `PaneInfo` carries no exit field.
 
-### M19: Sandbox Panes — [ADR-26](architecture.md#adr-26-docker-sandbox-panes--the-mount-set-as-the-security-boundary), [guide](sandbox-panes.md)
+### v1.48.0–v1.49.0: One Project Per Remote Host
+
+> A host arrived holding a `Default` nobody asked for, and creating your own project left it sitting beside the tabs you cared about.
+
+- **A remote host holds exactly one project, and naming it is how you get it.** A daemon must have a tab and a tab must belong to a project, so the `Default` is structural. Naming a project on such a host now **renames** that one, so the host's existing tabs land under your name. A host whose project you have already named refuses a second. The local daemon is unchanged and holds as many as you like
+- **A host that already holds several folds them into the one you name.** Enter describes what it will do — how many projects, the resulting name, how many tabs move, and that **nothing is closed** — and a second Enter carries it out. Every tab moves onto the survivor and the emptied records are dropped. This is the repair path for a host connected before v1.48.0, where each disconnect-and-recreate cycle left another row behind (disconnect is client-side only; the remote daemon keeps every project and replays them on the next connect)
+- **The fold leaves the survivor's root directory alone** — the dialog fills that field in by itself once the listing arrives, so overwriting a root you had picked was a change nobody asked for. **Rename** is the way to move one
+- **The New Project dialog fills in the host it is aimed at.** Opened over a remote project it showed **Remote (ssh)** unticked and an empty Host while already targeting that machine — it read "this machine" and acted on the far one
+- **The message line is coloured by what it means** — red only for a host that cannot be reached or an install that failed, amber while connecting or provisioning, green once connected. Everything used to render as a red ✗, so "installing…" looked identical to "cannot reach that host"
+
+### v1.50.0–v1.54.0: Attention Marks That Survive a Restart
+
+> The sidebar's marks are only useful if they outlive the session that set them.
+
+- **Mark attention is daemon-owned** (v1.54.0) — it lived in TUI memory, so every mark was gone on the next launch, which is most of what a mark that never auto-clears is for. It now sits beside the pane's mute setting and survives a TUI restart, a daemon restart and a reboot, reading the same in every attached client. A `◆N` count on the project row and a `◆` on the tab
+- **Mark for deletion** (v1.65.0) — the opposite statement: a red `⌫` recording that you are finished with a pane you deliberately keep alive. Mutually exclusive with Mark attention, enforced daemon-side. It deliberately does **not** recolour the tab — a pane you have decided to throw away must not compete with the three states that want you to act
+- **Clear attention** (v1.50.0) — the right-click escape hatch for a mark whose clearing event never arrived. Drops blocked, finished-unseen and pinned together; the pane's next hook event works the truth out again
+- **Manual and automatic marks no longer share a colour** — pinned is purple everywhere, green means only "finished while you were away"
+- **Sidebar scrolling, numbering and colour** (v1.53.0) — the PANES section scrolls with the wheel with hidden-row markers, tab headings carry their `Alt+N` number and colour, and each roll-up count takes its pane rows' colour instead of a flat grey
+- **Blocked classification fixes** (v1.53.1, v1.53.3) — Claude reuses one notification for a permission prompt and its own idle nudge; the nudge is now exempt once the turn has ended. Answering a prompt clears the mark, since approving fires no hook of its own
+- **Emoji-safe glyphs** (v1.50.0) — every sidebar state symbol is checked against having no emoji presentation, because a colour-emoji fallback draws two cells wide while advancing one and painted over the count beside it
+
+### v1.51.0–v1.59.0: Worktree-Owned Panes — [plan](superpowers/plans/2026-08-05-worktree-panes-stage-a.md)
+
+> An agent, a shell and lazygit parked in the same checkout — and a route to remove it again.
+
+- **Open a pane in an existing worktree** (v1.51.0) — the create-pane dialog lists the worktrees under the directory you pick, so the sidebar's git row shows that pane's real branch instead of repeating the main checkout's
+- **Create one** (v1.52.0) — `+ new branch…` runs `git worktree add -b <branch>` and spawns the pane inside the result, at `<parent>/<repo>-worktrees/<branch>`. Nothing nests inside your checkout, so no tool that walks the tree finds a second one
+- **A failed add creates no pane** — git's own message is shown and Quil never falls back to the repository root, because a pane on `master` you believe is isolated is worse than no pane. The same on restart: a pane whose worktree is gone comes back unspawned, naming the directory, with `Alt+R`
+- **Branched off the repository's default branch** (v1.53.2), not off whatever the main checkout is on — `origin/HEAD`, then `origin/main`/`origin/master`, then the local pair, then HEAD. Created with no upstream, so `git push -u` behaves normally
+- **Replace-a-pane path** (v1.52.2) — the worktree is created before the pane being replaced is touched, so a branch git rejects leaves that pane where it was
+- **Delete it when you close the pane** (v1.59.0) — never automatic. The close confirm carries an unticked `Also delete its worktree` row, armed with `space`, off every time the dialog opens. Only a worktree **Quil created**, named by the directory Quil created rather than wherever the shell has since wandered. The dialog asks the daemon what the tree holds and shows `clean` or `⚠ 3 uncommitted or ignored files will be lost` — **ignored files count**, since a `.env` or a `build/` is exactly what a forced removal destroys. The branch is kept
+- **A worktree being created is visible** (v1.61.1, v1.63.2) — the tab holds a placeholder naming the branch with a spinner for as long as the checkout runs, rather than a shell prompt in the repository root, which on a monorepo is minutes and is indistinguishable from a create that finished in the wrong tree
+
+### v1.55.0–v1.55.1, v1.63.3–v1.63.4: Remote Upgrade From Inside the TUI
+
+> After every client update a configured host is on the old version and cannot be attached to.
+
+- **A host running an older Quil offers to upgrade itself** (v1.55.0), at startup and whenever a live link drifts out of version. It names both versions and says the remote daemon restarts. Previously the only way forward was `quil remote setup <host>` in a shell
+- **The offer survives the launch** (v1.63.3) — it was raised before the provisioner was wired and discarded, so the host stayed unusable for the whole session; and every dialog now hands the offer back on the way out, since the what's-new dialog used to swallow it on the one launch where it matters most
+- **A completed push hands the host to the reconnect ladder** (v1.63.4). The completion message was filtered against a field only the New Project dialog sets, so the host was left updated, daemonless and stuck reading "upgrading…". A push that fails now says so, and `r` retries any offline host from inside the client
+- **An offline project says what is wrong** — it used to render the same "No tabs — Ctrl+T opens one" as an empty live project, which reads as the tabs having been deleted. It now names the host and whether the cause is version drift, a missing install, or a reconnect in flight
+- **Overlay retention** (v1.55.1) — `Alt+G` only hid the overlay, so a session that opened it in several tabs carried one live lazygit per tab indefinitely (~116 MB each). Hidden overlays close after five minutes, at most five stay alive, least-recently-shown dropped first. `[overlay]` in `config.toml`
+
+### v1.56.0: Desktop Notifications (Windows) — [plan](superpowers/plans/2026-08-13-desktop-notifications.md)
+
+> The sidebar is a log. This is the alert.
+
+- **A toast when an agent parks waiting on you, or finishes a turn while you were away** — naming the project, tab and pane, and only while you are not looking at that pane. Six agents finishing together give six separately clickable toasts rather than a storm; answering a prompt withdraws its toast
+- **Clicking one switches Quil to that exact pane and focuses it**, over a `quil://` URI handled by `quil-activate.exe` — a windowless seventh binary, because a console binary gets a console window per click that takes the foreground and then disappears
+- **Registration is explicit and reversible** — `quil notify setup` writes a Start Menu shortcut and the handler and prints what it wrote; `--remove` undoes both. `notify status` and `notify test` for diagnosis. Nothing is written as a side effect of a config flag
+- **The click can only move your cursor** — the handler validates a pane id and forwards it over a per-PID named pipe, with no path to spawning a pane, sending input, or running a command
+- **Being seen requires window focus**, not just being on screen — a pane you left visible when you switched to your browser used to count as watched, so the commonest sequence there is produced no toast at all
+- **Windows only.** No transport on macOS or Linux carries a click back to a specific pane. **Raising the terminal window was built and removed**: Windows hands the foreground to the notification host, which holds it (measured 5.5 s, then >10 s) and refuses every documented way of taking it back — `SetForegroundWindow`, `AttachThreadInput` queue borrowing, `SwitchToThisWindow` and hotkey injection were each implemented and each verified refused. Windows highlights the taskbar button instead
+
+### v1.57.0: hunk — Review-First Diff Viewer
+
+Reading what an agent just wrote is most of what a Quil workspace produces. `Ctrl+N` → Tools → Hunk opens it as an ordinary pane; **`Alt+D`** toggles a full-tab review of the working tree for the repo resolved from the active pane's directory. `Alt+G` and `Alt+D` **share one overlay slot per tab**, so pressing the other tool's key swaps the tools rather than stacking them. `alt+d` rather than `alt+h` because plain `Alt+H` is left unbound so it reaches the running program, and vim-style layouts rebind it to pane-left.
+
+*(v1.57.1: the release pipeline had been tagging without publishing since v1.56.0 — this Windows-only helper shares one archive definition with `quil` and `quild`, so the archive holds three binaries on Windows and two elsewhere, and packaging rejects an uneven count unless told the difference is deliberate.)*
+
+### v1.58.0, v1.63.5: `Ctrl+T` Asks What the Tab Opens With
+
+A new tab always came up holding a shell, so opening one for an agent meant creating the tab and then replacing its pane — every time. `Ctrl+T` now opens the same picker as `Ctrl+N`, setup step included, so a tab can start as Claude Code in a chosen directory, on a chosen kube context, resuming a chosen session, or on a fresh worktree branch. The tab and its pane are created in **one** IPC frame, so no tab flickers through a shell nobody asked for.
+
+`Esc` **cancels and creates nothing** (v1.63.5) — it used to close the picker and make a plain terminal tab anyway, so the one key that means "back out" everywhere else was the one key that could not. The two-keystroke path to a shell tab is `Ctrl+T` `Enter` `Enter`.
+
+A new branch is the deliberate exception: the tab opens with a PTY-less placeholder naming the branch while `git worktree add` runs, and the requested pane replaces it on success — spawning the requested type as the placeholder would start an agent in the main checkout, the isolation failure the worktree exists to prevent.
+
+### v1.60.0, v1.62.0: Keybinding Registry, Sequences and Presets — [plan](superpowers/plans/2026-08-16-keybinding-sequences-presets.md)
+
+> Keys resolve to named actions, and the keymap moved to its own file.
+
+- **`F1` → Shortcuts is derived from the binding table itself** (v1.60.0). The list was maintained by hand beside the bindings and had drifted — seven of the eight project shortcuts were missing. Each key is now spelled the way it is actually matched (`ctrl+v`, not `Ctrl+V`)
+- **A binding that cannot work says so**, in a warning row at the top of that dialog: a duplicate, a cross-tier shadow, a chord Quil reserves, an unparseable spec, an unknown action, an unreachable sequence opener, an unusable `${prefix}`. Each names which side wins and what will never fire
+- **`Option+Shift+<letter>` reaches the shell again on macOS** — chord parsing lowercased the key while the same parser read the incoming press, so on Terminal.app with Option-as-Meta ten letters were swallowed by the binding on their lowercase twin. `alt+M` and `alt+m` are distinct chords now
+- **Key sequences** (v1.62.0) — `Ctrl+B` then `c`, tmux style. The status bar shows the keys typed so far; `Esc` cancels; a combination bound to nothing says so. **Pressing the opening key twice sends it through to the pane**, which is what keeps a tmux *inside* a Quil pane reachable
+- **Keymap presets in `~/.quil/bindings.toml`** — `preset = "tmux"` for a tmux-compatible layout, `prefix = "ctrl+a"` to move the prefix in one line, `[bindings]` keyed by **action ID** to override anything. Presets **replace** rather than add; any action a preset does not name keeps its usual key
+- **Existing `[keybindings]` migrate on first launch** — only settings that differ from the shipped defaults are carried across, so a binding you never changed stays free to follow future default changes rather than being frozen at today's value. Keybindings live in their own file because `config.toml` is rewritten in full whenever any setting changes, which would freeze a resolved keymap as literal strings
+- **Tab switching, next/previous tab and the shortcuts list became rebindable** — `Alt+1`–`9` used to be fixed keys no setting could reach
+
+### v1.59.2, v1.62.1–v1.62.6: Performance — [plan](superpowers/plans/2026-06-10-perf-leak-remediation.md)
+
+> A 37-tab workspace measured 1.13 GB of client memory and held a core in kernel time while idle.
+
+- **IPC frame encoding is ~35× faster to encode and ~10× to receive** (v1.59.2) — the envelope re-scanned the already-marshalled payload from start to finish before putting it on the wire. A pane streaming output used to occupy about half a core just formatting messages; it is now closer to 1%. The bytes on the wire are identical, so mixed versions interoperate unchanged
+- **Frames are ~34% cheaper to draw** (v1.62.6) — Quil was re-measuring the width of every line it had just drawn, roughly half the work of assembling a screen
+- **`[ui] scrollback_lines`, then an adaptive default** (v1.62.1, v1.62.6) — depth multiplies by pane count, since every pane holds its own emulator whether visible or not. The default now spends a workspace-wide budget: ten panes or fewer are unchanged, more get proportionally less, with a floor. A value you set always wins and is never adapted, and a chosen depth is written to the log rather than applied silently. Editable in F1 → Settings
+- **Inert messages reuse the previous frame** (v1.62.1, v1.62.4) — Bubble Tea asks for a frame per message, and timers drove most of them. Output from a pane you are not looking at was ~65% of all redraws on a 41-tab workspace. The spinner moved from 100 ms to 200 ms, which still reads as motion at half the cost
+- **Stale hook spools are unlinked, not truncated** (v1.62.1) — one measured workspace had 349 spool files for 37 live panes, 332 empty husks surviving every restart for the life of the install, driving ~7 000 file-handle operations a second and 21% of a core with the session idle
+- **Two same-moment attaches no longer race** (v1.62.1) — `SnapshotState` copied projects out under the lock but handed back live tab pointers
+- **A quil parked after an in-session update releases its memory** (v1.62.1) — it stayed holding every pane's emulator and scrollback, measured at 326 MB and 436 MB on a machine that had updated twice without quitting
+- **The MCP bridge declines the pane-output broadcast** (v1.62.1) — it decoded every frame only to discard it. Opt-in `subscribe` message; a client that never sends it, including any older build, receives exactly what it did before
+
+### v1.61.0: Changelog Fragments and the What's New Dialog — [plan](superpowers/plans/2026-08-16-changelog-presenter.md)
+
+- **Launching a new version shows what changed** — features and changes in full, fixes collapsed to a count `→` expands. Also at `F1` → What's New. The marker it compares against is the version you last **ran**, not the last one you were told about, so dismissing an update offer never suppresses the summary for a version you never installed
+- **One changelog file per PR** — entries used to go under the single `## [Unreleased]` heading, the same anchor line for every PR, so two open PRs conflicted the moment the first merged. Git has no conflict concept for two distinct *added* paths. `changelog.d/<type>-<slug>.md`, collected and deleted by the release workflow
+- **Each fragment carries a one-line `headline:`**, appended at release to a file the binary embeds — so the dialog stays in the register you can read in half a minute rather than repeating a full entry. Deliberately not JSON: a headline is single-line by definition, so newline is the only delimiter a POSIX-sh writer needs
+
+### v1.62.2–v1.62.3, v1.62.5, v1.66.3: AI-Pane Correctness
+
+> Four ways a Claude pane could lose or hide its own conversation.
+
+- **A Claude pane no longer clears itself** (v1.62.2). Quil asks a pane to repaint with `Ctrl+L`, and claude-code v2.1.126+ runs `/clear` on two within two seconds — a daemon restart, a reattach or two quick resizes delivered exactly that pair, wiping every AI pane at once with nobody at the keyboard. Deliveries of a plugin's `redraw_key` are now kept three seconds apart and coalesced
+- **Reconnecting no longer paints a torn frame into a full-screen pane** (v1.62.3). Replaying recent output reproduces history for a shell but not for a program on the alternate screen, which sends only what changed — so once the buffer wraps there is no complete frame left. Quil now detects the alternate screen and asks those programs to repaint instead
+- **The session hook registers reliably on Windows** (v1.62.5) — the settings were passed as inline JSON, and `claude` is an npm `.cmd` shim that Windows re-parses, splitting it at the wrong quote boundaries. A file path is passed now
+- **`Alt+R` resumes the conversation** (v1.66.3) — restart respawned with `--session-id` and an id that already had a transcript, which Claude refuses (exit 129), so every restart of a pane that had exchanged a message landed on an error screen. It now passes `--resume` the way a daemon restart does
+- **A restored pane shows what its process drew** (v1.66.3) — the replay was skipped for Claude panes on the assumption the respawned process repaints itself, which is wrong once it has drawn a screen that ignores `Ctrl+L`: the first-run setup, the login prompt, a startup error. The pane stayed black with nothing saying why
+
+### v1.59.3, v1.66.2: Work-Indicator Truthfulness
+
+> A spinner that lies in either direction is worse than no spinner.
+
+- **A turn the agent starts by itself now shows** (v1.59.3) — Claude only announced a turn a human began, so an orchestrator resuming after a teammate reported back went dark while it worked. One measured pane reported three finished turns against one started, with a fourteen-minute stretch of ~60 tool calls showing nothing. A tool call now counts as proof, throttled to one spooled event per pane per 15 s of silence, and never a notification card
+- **A turn killed by an API error, and one stopped with `esc`, both end the indicator** — an interrupt produces no announcement at all, and one reported pane showed as working for 43 minutes after being stopped
+- **A tab no longer spins forever after a subagent dies** (v1.66.2) — a failed subagent turn fires `StopFailure` with the agent's id and never a `SubagentStop`. Quil read it as the pane's own turn ending and kept the dead agent on its books; two production tabs sat lit for days after a usage limit hit
+- **Hook events arrive in the order they happened** (v1.66.2) — two events for one pane landing in the same 200 ms spool read were delivered last-first on Windows, because each coalesce key ran its own timer and Go schedules the newest timer goroutine first. A stop applied before its start left a pane lit until session end
+- **The green finished-unseen mark survives a restart** (v1.66.2) — it lived only in TUI memory. The daemon keeps a copy in the workspace snapshot, and the clear is remembered too
+- **Indicator traffic no longer crowds the sidebar** (v1.59.3) — the driving signals were filed as notifications the sidebar never showed, and because the queue moves a repeat back to the top they steadily pushed genuine events, a permission prompt among them, out of the list. They also woke `watch_notifications` every ~15 s, turning a blocking call into a poll
+
+### v1.63.0, v1.66.0: Process Dialog and pprof — [spec](superpowers/specs/2026-08-20-process-dialog-design.md)
+
+- **`F1` → Processes shows the real process tree under each pane** (v1.63.0) — the shell or agent Quil started and everything it went on to spawn, with memory and CPU for each. `K` stops a process *below* the pane's own shell and everything it started; the pane's own shell is `Restart pane`, and Quil's own processes are never offered. **Replaces `F1` → Memory**; both MCP tools are untouched. Read on the **daemon's** machine, so it works unchanged when the daemon is remote
+- **It also lists Quil's own processes** with version, uptime, PID — and, since v1.66.0, memory and CPU. Each process measures and reports itself over the socket rather than anything being inferred from the OS process table, which is also the only thing that works remotely. A bridge on an older binary is flagged
+- **Honest sentinels, never a fabricated zero** — a process not yet sampled twice shows `—`, not `0%`, because an unknown is not an idle; a total covering one shows `~4%`. macOS CPU is the kernel's decaying average and is not comparable with a Linux host's, and the dialog says so
+- **`QUIL_PPROF` serves Go profiles on demand** (v1.66.0), for both binaries, each needing its own port. Nothing listens when unset. The listener binds loopback only and **refuses** any other address — a bare port becomes `127.0.0.1:<port>`, a hostname is an error rather than something the resolver decides. It is **unauthenticated**, and loopback is a machine boundary rather than a user boundary, so set it for an investigation rather than leaving it in a shell profile. `scripts/pprof.sh` / `scripts/pprof-view.sh`
+
+### v1.64.0, v1.66.0: Unfocused-Window Dim
+
+Typing into a window that only *looked* focused is now visible before the first keystroke lands: on OS blur every colour blends toward the terminal's own background — panes, tab bar, sidebar, borders, status bar alike — and snaps back on focus. Only colours move; text, layout and cell widths are identical. Quil asks the terminal for its real default foreground and background (OSC 10/11) and fades toward those, so the effect follows your theme. A terminal without DEC 1004 focus reporting never dims, since it never reports losing focus.
+
+v1.66.0 added the off switch (`[ui] unfocused_dim_enabled`) as a key **separate** from the level, F1 → Settings rows, and three command-palette presets. Separate keys are the point: with one key, switching the dim off has to write `0` over the level, so switching it back on can only restore the default — a customised `0.35` is destroyed by an off/on round trip.
+
+### v1.66.1: Per-Destination Plugin Availability
+
+Every daemon is asked which plugins its own machine can run, but the client kept **one** answer for all of them — so the last host to reply spoke for every project. Connect a remote box without `claude` and `Ctrl+N` offered "Claude Code (not installed)" in your local project too, on a machine where `claude` was running at that moment. Nothing recovered from it either: detection only ever turns a tool *on*, so the grey-out survived until the client restarted and returned as soon as that host attached again.
+
+Each daemon's answer is now filed against the daemon that gave it, and every consumer — the `Ctrl+N` list and its Enter gate, the palette, the context menu, the `Alt+G` / `Alt+D` overlays, `F1` → Plugins — names the machine it means. `Registry.SetAvailability`, the one global override, was deleted rather than merely left unused.
+
+### v1.67.0: Codex — [plan](superpowers/plans/2026-09-04-codex-plugin.md)
+
+`Ctrl+N` → Codex opens OpenAI's coding agent CLI in a folder of your choice, with setup toggles like Claude Code's. Quil registers its hook per pane through a `-c hooks=…` override carrying its own trust hash — codex runs only trusted hooks, and the hash is computed by Quil — so nothing under `~/.codex` is read or written and no trust prompt appears.
+
+Everything the Claude Code plugin derives from hooks works for Codex: the notification sidebar, the work spinner and tab marks, subagent tracking, the model and context-token status segment, `Alt+Shift+I` input history, and per-pane session resume (`codex resume <id>`). A pane with no recorded session starts fresh — `resume --last` is never used, because on restore it finds the sibling pane that respawned a second earlier. Tier knob: `[notification.hooks] codex`.
+
+### v1.68.0: Tab and Project Reordering
+
+- **Dragging a tab no longer jumps around** — a tab moves only once the pointer passes the middle of the tab it is over. A narrow tab dragged over a wide one used to swap back and forth on every mouse move
+- **`Alt+Shift+PgUp` / `Alt+Shift+PgDn`** slide the active tab one slot (`tab.move_left` / `tab.move_right`), also in the palette and F1 → Shortcuts
+- **The project sidebar reorders too** — drag a tab name in the PANES list, or a project row, by the same midpoint rule measured in rows. `Alt+Shift+Up` / `Alt+Shift+Down` move the active project. Each daemon saves the order of its own projects; how several hosts' rows interleave is kept for the running session only
+- **The Shortcuts list shows which row you are on** — `↑`/`↓` moved an invisible cursor, so the only sign a key had done anything was the list sliding once the cursor reached the edge
+- **Wider dialogs force a repaint on open** — Shortcuts, Processes and What's New are drawn in a wider box than the About menu and asked for no repaint, so the old menu's border was left standing inside the new box
+
+### v1.68.1: The 1x1 Resize Guard
+
+A `quil` started with no terminal attached — from a script, or via an unrecognised flag such as `--version` — is reported by Bubble Tea as 1x1, and that size was pushed to every pane on every daemon. Claude Code, lazygit and every shell re-wrapped their entire transcript to a single column, permanently. Observed twice in production.
+
+The TUI already refused to *paint* below 40x10; it now refuses to *send* pane sizes below the same threshold, at the boundary the value enters rather than where the symptom showed — the poisoned size had four doors, including the overlay outside the layout tree and the pair persisted in `workspace.json`. The daemon additionally declines a resize collapsing a pane to 1x1 in **both** dimensions, which no genuine split can ask for.
+
+### v1.69.0: Notification Sidebar as a Timeline — [plan](superpowers/plans/2026-09-06-notification-timeline.md)
+
+> Eight of twelve visible cards were "Output idle", with repeat counts past 2400.
+
+- **`Output idle` and `Command completed` are off by default.** Both describe machine state rather than news, and because the queue merges repeats and re-prepends the merged entry, a repeat carrying a constant title jumps back to position 1 each time it fires — so the two of them permanently occupied the handful of rows the sidebar can draw
+- **What is left is the timeline** — turns starting and finishing, permission prompts, processes exiting, panes closed or pinned, MCP agents taking a pane, worktrees finishing their checkout
+- **Click a card to jump to its pane; scroll the list with the wheel.** Both gestures were previously swallowed. Cards name the project and tab they will take you to, shrink when they carry no excerpt so about twice as many fit, and read `(closed)` rather than offering a jump that silently does nothing
+- **Ten event groups in `F1` → Settings → Notifications**, plus the desktop-toast switches, two of which were previously reachable only by hand-editing `config.toml`. Changes apply immediately; `a` reveals everything for a moment without changing the setting
+- **Hiding a group never hides it from MCP agents** — an agent polling for "has this pane gone quiet" wants exactly what a human does not
+
+### M19: Sandbox Panes — [ADR-31](architecture.md#adr-31-docker-sandbox-panes--the-mount-set-as-the-security-boundary), [guide](sandbox-panes.md)
 
 > An AI pane running inside a Docker container, editing your real checkout.
 > Unreleased.
@@ -446,7 +617,14 @@ anything web-facing (M18 #18–19).
 
 **Remaining:**
 - JSON transformer (`Ctrl+J`) — format and highlight JSON in terminal output
-- Encrypted token storage — OS keyring integration for sensitive scraped values
+- Encrypted token storage — OS keyring integration for sensitive scraped values.
+  The `[security]` config section that reserved a name for this
+  (`encrypt_tokens`, alongside `redact_secrets`) was **removed**: both defaulted
+  to `true` and neither was ever read, so the file advertised two guarantees
+  nothing provided. Whoever builds this introduces the key then. `redact_secrets`
+  is not coming back — MCP log redaction is unconditional on purpose, and an off
+  switch for secret redaction is an anti-feature. An old `config.toml` still
+  carrying the section loads fine; the table is ignored
 - Tab dock positions (top/bottom/left/right)
 - OS service integration (`quil service install` — systemd/launchd/Task Scheduler)
 
@@ -484,11 +662,22 @@ GitHub repo as registry, `quil plugin install/search/update` CLI. lazygit, k9s, 
 
 [quil.cc](https://quil.cc) (Astro under `site/`, deployed to GitHub Pages by `site.yml` on master pushes touching `site/**`) already covers marketing: landing, features catalog, install, plugins, blog, comparisons. Its `/docs` page is a **link hub** that points back to the markdown on GitHub. The gap: render `docs/*.md` natively on the site (Astro content collections over the existing tree) so keybindings, configuration, plugin reference, and MCP guide are searchable, linkable pages with site navigation — no GitHub round-trip. Requires keeping `docs/` as the single source of truth (site consumes, never forks, the markdown). Also add a docs-freshness check: site deploys only trigger on `site/**`, so feature PRs that touch `docs/` or the feature catalog data layer must remember quil.cc (this PR added the drag-resize entry to `site/src/data/features.ts` by hand — content collections would make `docs/` changes flow automatically).
 
-### tmux Migration Path — [PRD](roadmap/tmux-migration.md)
+### tmux Migration Path — [PRD](roadmap/tmux-migration.md) · **keymap half shipped**
 
 > Import keybindings and session layouts from tmux.
 
-`quil import-keybindings tmux` reads `~/.tmux.conf`, maps to `config.toml`. `quil import-session` snapshots a running tmux session into an Quil workspace. tmux has millions of users — making switching painless is the fastest acquisition channel.
+**The keymap half shipped in v1.62.0**, as a *preset* rather than an importer:
+`preset = "tmux"` in `~/.quil/bindings.toml` selects a tmux-compatible layout,
+`prefix = "ctrl+a"` moves the prefix in one line, and `[bindings]` overrides any
+single action. A shipped preset beats parsing `~/.tmux.conf`: one readable line,
+no parser for tmux's config grammar, and it follows future Quil defaults. See
+[tmux comparison](tmux-comparison.md) for how it lines up against tmux's own
+prefix table.
+
+**Still planned:** reading a *customised* `.tmux.conf` on top of the preset, and
+`quil import-session` — snapshotting a running tmux session's windows, panes and
+directories into a Quil workspace. tmux has millions of users; making the switch
+painless is the fastest acquisition channel.
 
 ---
 
@@ -566,11 +755,23 @@ The starkest deficit: rivals detect 13–18 agents out of the box; Quil ships 2.
 The most-cited reason people adopt these tools: parallel agents on branches, then
 review the diff.
 
-5. **Git worktree-per-session** — auto branch + worktree on create, cleanup on
-   delete (both rivals). Quil already has the `gitdiscover` primitives; the
-   automation layer is missing. Extends [workspace-files](roadmap/workspace-files.md).
-6. **Built-in diff viewer** — review, edit, and commit agent changes without
-   leaving the TUI (AoE).
+5. ~~**Git worktree-per-session**~~ — **shipped, v1.51.0–v1.59.0.** The
+   create-pane and new-tab dialogs list a repository's existing worktrees and
+   offer `+ new branch…`, which runs `git worktree add -b` off the repository's
+   *default* branch and spawns the pane inside the result. Cleanup is offered on
+   close rather than automatic — an unticked, `space`-armed row on the confirm,
+   only for a worktree Quil created, with a live count of what would be lost
+   (ignored files included) and the branch always kept. See
+   [Features → Spawn a pane in a worktree](features.md#spawn-a-pane-in-a-worktree).
+   **Still open:** the automation layer proper — a session template that opens
+   branch, agent, shell and diff viewer together, which extends
+   [workspace-files](roadmap/workspace-files.md).
+6. ~~**Built-in diff viewer**~~ — **shipped as an integration, v1.57.0.** `Alt+D`
+   toggles a full-tab [hunk](https://github.com/modem-dev/hunk) review of the
+   working tree for the repo behind the active pane, sharing one overlay slot
+   with lazygit's `Alt+G`. Reviewing and committing happen in those tools rather
+   than in a viewer Quil owns, which is the deliberate trade: no diff engine to
+   maintain, but no place to hang #7 either.
 7. **Inline diff comments → prompt to agent** — annotate a diff; comments assemble
    into one prompt back to the agent (AoE). Builds on #6.
 8. **Multi-repo workspaces** — one session/branch spanning several repos (AoE).
@@ -644,7 +845,7 @@ is a major surface and cuts against Quil's TUI/Windows-native focus.
 19. **Remote phone access** — expose the dashboard over a Tailscale/Cloudflare
     tunnel with QR + passphrase pairing and Web Push (AoE). Builds on #18.
 20. ~~**Container sandboxing**~~ — **shipped**, see
-    [M19: Sandbox Panes](#m19-sandbox-panes--adr-26-guide) above. Docker only;
+    [M19: Sandbox Panes](#m19-sandbox-panes--adr-31-guide) above. Docker only;
     Podman is untested. Auth is per-pane rather than a shared volume: Claude
     Code forwards a token by name or signs in in-container (your choice per
     pane), Codex has its credential copied in, OpenCode signs in per container.

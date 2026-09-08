@@ -117,34 +117,74 @@ type Session interface {
 
 **Decision:** Pane types are defined as TOML plugin files in `~/.quil/plugins/`. No compiled plugins or scripting engine.
 
-**Plugin schema:**
+**Plugin schema:** six tables, all optional except `[plugin]` and `[command]`.
+The authoritative list of fields is the decode struct in
+`internal/plugin/registry.go`; [plugin-reference.md](plugin-reference.md)
+documents every one of them. A representative plugin:
 
 ```toml
 [plugin]
-name = "ai"
-display_name = "AI Assistant"
+name = "claude-code"
+display_name = "Claude Code"
+category = "ai"                  # terminal | ai | remote | tools
+schema_version = 11              # bumped to raise the migration dialog
 
-[scraper]
-patterns = ['(?P<SessionID>Conversation ID: [a-f0-9-]+)']
+[command]
+cmd = "claude"
+detect = "claude --version"      # decides whether the plugin is offered
+prompts_cwd = true               # ask for a working directory at spawn
+record_history = true            # capture submitted prompts (Alt+Shift+I)
+sessions = "claude"              # offer a resume picker in the setup dialog
 
-[resume]
-command = "claude --resume {{.SessionID}}"
-fallback = "claude"
+[[command.toggles]]              # rendered as checkboxes / radio buttons
+name = "dangerously_skip_permissions"
+label = "Dangerously skip permissions (no confirmations)"
+args_when_on = ["--dangerously-skip-permissions"]
+group = "permission_mode"        # same group = mutually exclusive
+
+[persistence]
+strategy = "preassign_id"        # cwd_only | rerun | preassign_id | session_scrape | none
+start_args = ["--session-id", "{session_id}"]
+resume_args = ["--continue"]
+ghost_buffer = true
+redraw_key = "\f"                # stdin bytes that make this program repaint
+
+[[error_handlers]]               # regex over PTY output → help dialog
+pattern = '(?i)ANTHROPIC_API_KEY.*not set'
+title = "API Key Missing"
+message = "Set ANTHROPIC_API_KEY in your environment or run 'claude auth'."
+action = "dialog"
+
+[[idle_handlers]]                # regex over the last lines when a pane goes quiet
+pattern = '(?i)waiting for (confirmation|input|approval|permission)'
+title = "Needs your approval"
+severity = "warning"
 
 [display]
-border_rules = [
-  { pattern = "Error", color = "red" },
-  { pattern = "Success", color = "green" },
-]
+wide_canvas = true               # PTY stays window-sized; small panes show a preview
 ```
+
+`[[instances]]`, `[[command.form_fields]]` and `[[notification_handlers]]` round
+out the schema — saved presets, a spawn-time form, and extra notification
+patterns respectively.
 
 **Consequences:**
 
 - Users create custom pane types without recompiling
-- Hot-reload — daemon watches plugin directory for changes
+- Hot-reload on save — the registry reloads from `~/.quil/plugins/` and prunes
+  entries whose file was deleted
 - No arbitrary code execution — plugins are declarative config
-- Scraper patterns use Go regex, resume commands use Go `text/template`
-- Ships with 4 built-in plugins: `ai`, `webhook`, `infrastructure`, `build`
+- Patterns are Go regex; `{session_id}` and `{{.Field}}` are the only
+  substitutions
+- Ships with **11 built-in plugins** — two compiled into the binary (`terminal`,
+  `terminal-wide`) and nine embedded TOML defaults written to
+  `~/.quil/plugins/` on first run (`claude-code`, `opencode`, `codex`,
+  `lazygit`, `hunk`, `k9s`, `lazysql`, `ssh`, `stripe`). A user's copy of a file
+  overrides the embedded default; `schema_version` is what raises the migration
+  dialog when the shipped definition moves ahead of the copy on disk
+- Availability is per machine. Each daemon reports what its own host can run, so
+  a remote project greys out what that host lacks rather than what your laptop
+  lacks
 
 ## ADR-7: Workspace State Persistence Strategy
 
@@ -479,6 +519,14 @@ Each init script sources the user's original shell config first, then appends th
 
 ## ADR-21: Memory Reporting (v1.9.0–v1.9.1)
 
+> **Surfacing superseded in v1.63.0.** The `F1` → Memory dialog was replaced by
+> `F1` → Processes, which shows the real process tree under each pane — the
+> shell or agent Quil started plus everything it went on to spawn — with memory
+> *and* CPU per row, a `K` key to stop a process below the pane's own shell, and
+> a section listing Quil's own processes. The collector, the IPC pair, the
+> status-bar segment and both MCP tools below are unchanged; only the dialog
+> that renders them is different.
+
 **Decision:** A daemon-side 5-second collector (`internal/memreport/`) snapshots per-pane Go-heap (output ring buffer + ghost snapshot + plugin state) and PTY child resident memory; results are surfaced via a `mem <n>` segment in the status bar, an F1 → Memory tree dialog, and two MCP tools.
 
 **Context:** Quil keeps long-running PTY children and per-pane ring buffers — both are silent leak risks. Without an in-app accounting view, users had to attach a debugger or read OS-level process listings to spot a misbehaving plugin. The same data is also valuable to AI agents that drive Quil over MCP (e.g., "the assistant pane's RSS jumped 800 MB after that last run — it's leaking").
@@ -623,7 +671,302 @@ The TOML plugin editor renders at a fixed 70-col width inside a centred dialog �
 - A third-party MIT binary (Microsoft OpenConsole) ships inside Quil — attributed in [`THIRD_PARTY_LICENSES.md`](https://github.com/artyomsv/quil/blob/master/THIRD_PARTY_LICENSES.md).
 - Fail-safe: a missing or unloadable bundle degrades automatically to the inbox host.
 
-## ADR-26: Docker Sandbox Panes — the Mount Set as the Security Boundary
+## ADR-26: SSH stdio Transport for Remote Attach (v1.44.0–v1.46.0)
+
+**Decision:** A client reaches a daemon on another machine by running
+`ssh -T <dest> "quil --stdio"` and speaking the ordinary IPC protocol over that
+child's stdin/stdout, adapted to `net.Conn`. No port is opened on the remote, and
+no new protocol is defined.
+
+**Context:** The machine doing the work and the machine you sit at are
+increasingly not the same one, and an AI agent mid-task is exactly the workload
+you least want tied to a laptop lid. The alternatives were a listening daemon
+(a new port, a new authentication story, and a new attack surface on every host)
+or a bespoke tunnel. SSH is already installed, already authenticated, already
+trusted with a shell on that host, and already solves bastions, jump hosts,
+hardware tokens and certificates.
+
+**Implementation:**
+
+- `internal/transport/` supplies two backends behind one seam, `ipc.DialFunc`
+  (`func(ctx) (net.Conn, error)`): `Local(socketPath)` dials the Unix socket,
+  `SSH(dest, opts)` starts the child. The `Client` took a dialer rather than a
+  path, so nothing above the transport knows which it has.
+- The destination string is passed to `ssh` **verbatim** and never parsed, which
+  is what makes an `~/.ssh/config` `Host` alias keep its `HostName`, `Port`,
+  `User` and `ProxyJump`. It is also the routing key everything else carries.
+- The remote command is `quil --stdio`, not `quild`: the daemon-ensure logic
+  (`startDaemon`, `waitForDaemonReady`, `findDaemonBinary`) lives in the TUI
+  binary, and release archives ship both binaries together.
+- `stdioConn` adapts the child's pipes to `net.Conn`. **Reads go through a pump
+  goroutine rather than straight to the pipe**, because on Windows the handles
+  are non-overlapped and `SetReadDeadline` fails with `os.ErrNoDeadline` — and
+  three call sites depend on read deadlines. One uniform implementation beats a
+  platform split. Write deadlines are honestly unsupported.
+- `forcedSSHOptions` disable agent forwarding, X11, `PermitLocalCommand` and all
+  port forwarding ahead of the user's own config, since OpenSSH takes the first
+  obtained value and processes command-line `-o` first. Deliberately **not**
+  forced: `ProxyCommand` / `ProxyJump` (bastion hops are a core requirement),
+  identity and crypto policy, and `StrictHostKeyChecking` — `accept-new` is
+  weaker than the default prompt, so the user's host-key policy is left intact.
+- `ServerAliveInterval=15` / `CountMax=3` is the **only** liveness check once the
+  session is up: `ipc.MsgHeartbeat` is declared but never sent. `ConnectTimeout`
+  is forced too, because the dial runs before `tea.NewProgram` — there is no UI
+  to press Ctrl+C in and no deadline on the call site, so an unbounded OS connect
+  timeout on a dropped SYN is an unkillable hang.
+- `LinkFailure` classifies a failed dial as retryable or not. A rejected or
+  changed host key stops the ladder rather than retrying, because every retry is
+  a full login and an overnight loop gets the laptop banned by the server's
+  brute-force protection.
+
+**Consequences:**
+
+- Anything SSH reaches works with no setup on the remote beyond having `quil`
+  installed — bastions, Tailscale addresses, public-internet hosts.
+- The security model is SSH's. Quil adds no authentication of its own and needs
+  none, but it also cannot be reached by anything that is not an SSH client —
+  which is why a browser UI is gated on the mTLS backend the seam anticipates.
+- A dropped link is a pause, not an ending: the panes never stopped, so there is
+  nothing to resume. Keystrokes are **dropped** rather than queued while the link
+  is down — a key typed at a dead connection would otherwise arrive minutes later
+  in a live agent session, answering a question that had moved on.
+- Every local-daemon lifecycle command (`quil daemon *`, `quil restart`,
+  `quil status`, the update controls) **refuses** under `--remote` rather than
+  acting on the wrong machine.
+
+## ADR-27: Projects and the Multi-Daemon Router (v1.47.0)
+
+**Decision:** A **project** is a named, rooted grouping that owns tabs, is stored
+and enforced by the daemon, and belongs to exactly one daemon. One client can
+hold several daemon connections at once; a `Router` multiplexes them behind the
+same two-method client interface the `Model` already consumed.
+
+**Context:** Tabs were a flat list, so six tabs across three repositories were
+visually indistinguishable, and an agent parked on a permission prompt in a
+background tab stayed invisible until you happened to look. Separately,
+`quil --remote <host>` bound a whole TUI process to one daemon. Both were the
+same missing piece — nowhere to hang *which work is this* or *which machine is
+this*.
+
+**Implementation:**
+
+- Projects are **daemon-owned and persisted**, not client state, so a second
+  client attached to the same daemon sees the same grouping. An existing
+  `workspace.json` migrates into a single `Default` project with tab order
+  preserved — no prompt, no data loss.
+- `Project.Bootstrap` marks a project the daemon *invented* rather than one a
+  user named. The name cannot be the signal — a user may legitimately name a
+  project `Default`, and renaming the invented one is exactly what stops it being
+  a bootstrap. The flag is what lets naming a project on a fresh remote host
+  **rename** the structural default in place, so the host's existing tabs land
+  under the chosen name instead of beside it.
+- `Router` (`internal/tui/router.go`) is a third implementation of the client
+  interface, beside `*ipc.Client` and the test fakes — which is why the `Model`
+  needed no transport change to gain multi-daemon support. Connections are keyed
+  by destination; the empty key is the local daemon.
+- Messages carry `Origin`, stamped by the router on receive and tagged
+  `json:"-"` so it never reaches the wire. **No protocol bump was needed** —
+  "which daemon said this" is a client-side fact.
+- `Router.activeDest` is an `atomic.Value`, not a closure over the `Model`. A
+  closure built in `main` would capture the value `tea.NewProgram` copies, and
+  the program mutates only its own copy — so it would report zero projects
+  forever and route every unstamped send, keystrokes included, to the local
+  daemon.
+- Liveness is keyed off the router's **stop channel, not its conn map**. Retiring
+  a conn to express deadness made `Conn(dest)` nil for exactly the destination a
+  redial was about to run for, so the dialer was handed nothing to close and
+  every reconnect leaked an `ssh` child plus its remote `quil --stdio`.
+
+**Consequences:**
+
+- One daemon dying no longer ends the session; each destination carries its own
+  reconnect state, and its projects stay in the sidebar marked offline rather
+  than appearing deleted.
+- Anything that describes a machine must now name **which** machine. Plugin
+  availability, filesystem browsing, git discovery, kube contexts and the recent
+  directory list all had to move onto the wire or be filed per destination — see
+  `.claude/rules/remote-dialogs.md`.
+- A broadcast is one daemon's full state and says nothing about another's tabs,
+  so every client-side diff (layout, pane sizes) has to be scoped to the
+  broadcasting destination.
+- Per-project MCP scoping is deliberately **not** done: it is a breaking change
+  to shipped tools and wants its own opt-out and release note.
+
+## ADR-28: Worktree-Owned Panes (v1.51.0–v1.59.0)
+
+**Decision:** A pane may be created into a git worktree Quil made for it. The
+daemon records both **whether** it created that worktree and **which** directory
+it created, as two separate persisted fields, and offers removal only at close
+time behind an explicitly armed toggle.
+
+**Context:** Running several agents on branches in parallel is the most-cited
+reason people adopt this class of tool, and the failure mode is silent: an agent
+that believes it is isolated but is actually writing to the main checkout.
+
+**Implementation:**
+
+- New worktrees land in a **sibling** directory, `<parent>/<repo>-worktrees/<branch>`
+  with `/` flattened to `-`, so nothing nests inside the checkout and no tool that
+  walks the repo finds a second one. No `.gitignore` entry is needed.
+- The branch is created off the repository's **default** branch — `origin/HEAD`
+  where set and still resolving, then `origin/main` / `origin/master`, then the
+  local pair, then HEAD — not off whatever the main checkout is on. A fix
+  worktree created while the main checkout sat on a feature branch otherwise
+  carries that feature's unmerged commits, so the pane is isolated in its
+  directory but not in its history.
+- `ValidateBranch` enforces **two grammars, neither subsuming the other**: the
+  name reaches `git worktree add -b` as argv, so a leading dash reads as a flag
+  and git's ref rules bar the rest; and it becomes a path segment, so it must not
+  escape its parent and is capped at 255 bytes. git would refuse most of these
+  itself — the point is that the refusal arrives beside the field the user typed
+  into, rather than as a failed subprocess after a permit and a single-flight
+  slot have been spent.
+- **A failed add creates no pane.** git's own message is shown and Quil never
+  falls back to the repository root: a pane on `master` you believe is isolated
+  is worse than no pane. Every abandonment after a *successful* add runs
+  `removeWorktreeFn`, or the next attempt at the same name fails against a
+  directory nobody made.
+- `Pane.WorktreeOwned` (may this be removed?) and `Pane.WorktreePath` (which
+  directory?) are **both** persisted, and `CWD` cannot stand in for the second:
+  CWD is a live cursor OSC 7 rewrites on every `cd`, so a pane created in
+  `feat-a` whose shell walks into `feat-b` would have close-time removal
+  force-delete a checkout this daemon never made — reachable by a pane's own
+  child with one escape sequence. A pane restored from a snapshot predating
+  `WorktreePath` is never offered removal at all.
+- `PreparingWorktree` is **runtime-only and deliberately not persisted**. A tab
+  opened on a new branch holds a PTY-less placeholder naming the branch, with a
+  spinner, for as long as the checkout runs — on a monorepo, minutes. Spawning
+  the *requested* pane type as the placeholder would start an agent in the main
+  checkout, which is the failure this exists to prevent.
+- `worktreeAddTimeout` is 120 s, far longer than any other git budget, because an
+  add checks out a tree. Holding a blocking-FS permit that long would normally be
+  the pool-drain hazard, but the `worktreeAdding` single-flight *is* the budget:
+  at most one add runs daemon-wide however many clients ask.
+
+**Consequences:**
+
+- Removal is never automatic. The close confirm carries an unticked row, armed
+  with `space`, off every time the dialog opens, with a live count of what would
+  be lost — **ignored files included**, since a `.env` or a `build/` is exactly
+  what a forced removal destroys with no branch to recover from. The branch is
+  always kept.
+- Quil deletes only what Quil created. A worktree you made by hand never gets the
+  offer.
+- A worktree that goes missing restores the pane **unspawned**, naming the gone
+  directory, with `Alt+R` to retry — never quietly reopened in the main checkout,
+  which for an AI pane would resume the recorded conversation against the wrong
+  tree.
+
+## ADR-29: Zero-Copy IPC Frame Encoding (v1.59.2)
+
+**Decision:** Encoding and decoding an IPC frame takes a fast path that writes an
+already-marshalled payload into the envelope verbatim, falling back to the
+pre-existing `encoding/json` path whenever the shape is not certainly identical.
+The bytes on the wire are unchanged.
+
+**Context:** `EncodeFrame` marshalled a `Message` whose `Payload` was already
+encoded JSON, and `encoding/json` compacts and validates every `RawMessage` on
+the way out — walking an 8 KB `pane_output`'s ~11 KB of base64 through its
+scanner at ~10 ns/byte. That second pass was **99% of encode time** and cost 7×
+the base64 encode that produced the bytes it re-scanned. A pane streaming output
+occupied about half a CPU core purely formatting messages, and the cost
+multiplied by the number of busy panes.
+
+**Implementation:**
+
+- Every fast-path function returns a bool meaning *I handled it*. False means the
+  caller runs the JSON path, which stays the sole definition of correct
+  behaviour including its exact error values. **When a shape is not certainly
+  identical, decline** — a slower correct frame costs microseconds, a wrong one
+  corrupts a length-prefixed stream.
+- `fastStringSafe` rejects `<`, `>` and `&` because `json.Marshal` escapes them
+  by default and `respondTo` echoes whatever ID an IPC client sent. Bytes above
+  0x7E are rejected not because valid non-ASCII needs escaping — `café` survives
+  verbatim — but because *invalid* UTF-8 is silently replaced with U+FFFD, and
+  rejecting all non-ASCII is cheaper than checking validity.
+- `payloadInlinable` must establish the payload is **one complete JSON value with
+  nothing after it**, and that is a security property rather than tidiness. The
+  payload is concatenated between `,"payload":` and the closing brace, so
+  trailing content becomes *sibling envelope keys* and `encoding/json` resolves
+  duplicates last-wins: a payload of `{},"type":"shutdown","x":{}` turns a
+  `pane_output` frame into a `shutdown` frame, decoding cleanly. An earlier
+  version checked only the first and last byte.
+- The check is split by cost: `paneOutputSpan` is the hot path and is already
+  injection-proof by construction (exactly one `{` and one `}`, at the two ends),
+  so it is free; `json.Valid` covers everything else at ~5.8 ns/byte, measured at
+  1.4 µs for a two-pane `list_panes_resp` — deliberately *not* applied to
+  `pane_output`, where 47 µs on an 8 KB payload would give back most of the win.
+
+**Consequences:**
+
+- Encoding a pane-output frame is ~35× faster and receiving one ~10× faster, with
+  roughly half the allocations. The half-core became closer to 1%.
+- **Nothing changed on the wire**, so mixed versions of the TUI, the daemon and
+  the MCP bridge interoperate exactly as before — the property that made this
+  shippable without a protocol bump.
+- A fuzz target (`fastframe_fuzz_test.go`) pins the fast and slow paths to
+  identical output, which is the only durable defence for an optimisation whose
+  failure mode is a corrupted stream rather than a wrong answer.
+
+## ADR-30: Keybinding Action Registry, Dispatch Tiers and Presets (v1.60.0–v1.62.0)
+
+**Decision:** Keys resolve to **named actions**, not to config fields. The
+registry, the resolution rules and the presets live in `internal/keymap`, which
+imports neither `config` nor `tui`; the keymap is read from its own file,
+`~/.quil/bindings.toml`, keyed by action ID.
+
+**Context:** `F1` → Shortcuts was maintained by hand beside the bindings and had
+drifted — seven of the eight project shortcuts were missing from it. Adding an
+action meant touching a config struct, a dispatch switch and a display list, with
+nothing tying the three together. Separately, tmux users wanted a whole layout,
+not a field-by-field rebind.
+
+**Implementation:**
+
+- `internal/keymap` is stdlib + `BurntSushi/toml` only. No `config`, no `tui`, no
+  `QuilDir()` — so the whole package tests without a `Model` or a `QUIL_HOME`.
+  Path-derived reads live in `internal/config/bindings.go`.
+- Each `Action` carries a `Tier` saying **which of `handleKey`'s two switches it
+  dispatches from**, because `tryPluginRawKey` runs between them: an early action
+  beats a plugin's `raw_keys` claim, a late action loses to it. This is a real
+  dispatch-order fact, not a category label, and putting it in the registry is
+  what lets the conflict checker see cross-tier shadowing.
+- `Resolve` merges layers with **replace, not union** semantics, lowest first:
+  shipped defaults → preset → the user's `[bindings]`. Absence inherits, presence
+  replaces, and `""` is a *value* — an explicit unbind — rather than a deletion
+  that propagates upward. Treating `""` as removal would let a preset veto an
+  explicit user override, inverting the model.
+- Keybindings live in **their own file** because `config.toml` is rewritten in
+  full whenever any setting changes. A keymap resolved into it would be frozen as
+  literal strings the first time the user edited an unrelated option, and no
+  future preset or default change could ever reach them.
+- Presets are embedded TOML (`internal/keymap/presets/`). They **replace rather
+  than add**: a preset that keeps both key sets is neither keymap and doubles the
+  conflict surface. An action a preset does not name keeps its default.
+- Anything unhonourable is reported rather than dropped — duplicates, cross-tier
+  shadowing, collisions with built-in keys, unparseable specs, unreachable
+  sequence openers, and an unusable `${prefix}` — as warning rows at the top of
+  `F1` → Shortcuts and in the client log, so a binding that breaks the dialog
+  itself is still diagnosable.
+
+**Consequences:**
+
+- `F1` → Shortcuts is **derived from the registry**, so the list cannot drift
+  from the bindings again, and it is where you read a binding's canonical
+  spelling back.
+- Migration from the old `[keybindings]` table carries across **only settings
+  that differ from the shipped defaults**, so a binding the user never changed
+  stays free to follow future default changes rather than being frozen at
+  today's value.
+- A bad line never costs the rest of the keymap: only the affected action falls
+  back to its default.
+- Sequences (`"ctrl+b c"`) become expressible, and pressing the opening key twice
+  sends it through to the pane — which is what keeps a tmux *inside* a Quil pane
+  reachable.
+- `bindings.toml` is read once at startup with no hot reload. `F1` → Shortcuts
+  always renders the live keymap, which is how a user confirms an edit took.
+
+## ADR-31: Docker Sandbox Panes — the Mount Set as the Security Boundary
 
 **Context:** An AI agent with `--dangerously-skip-permissions` can reach every file the user can. Running it in a container is the obvious answer, but a container that bind-mounts a git checkout is only as safe as the mount set: git reads *executable* configuration out of `.git` (`core.fsmonitor`, `core.hooksPath`, `.git/hooks/`, `config.worktree`, `.git/modules/<sub>/`), and Quil's own git ticker runs those on the host every few seconds. Two further constraints shaped the design. Anthropic's Commercial Terms make a vendor that ships Claude Code preinstalled in its own image "preinstalling or running Claude Code in your products or services", and its authentication policy forbids collecting, storing or intermediating credentials — so Quil can neither publish an image nor copy `~/.claude/.credentials.json`.
 
@@ -654,8 +997,10 @@ The TOML plugin editor renders at a fixed 70-col width inside a centred dialog �
 ```
 ~/.quil/                           (or ./.quil/ in dev mode — see .claude/rules/dev-environment.md)
 ├── config.toml                    # User configuration (TOML)
+├── bindings.toml                  # Keymap: preset, prefix, per-action overrides (ADR-30)
 ├── quil.log                       # TUI client log (slog text format)
 ├── quild.log                      # Daemon log
+├── quild.stderr.log               # Daemon stderr — SIGQUIT dumps and panics survive here
 ├── quild.sock                     # IPC socket (Unix) / Named Pipe (Windows)
 ├── quild.pid                      # Daemon PID file
 ├── shellinit/                     # Auto-generated shell integration scripts
@@ -664,16 +1009,24 @@ The TOML plugin editor renders at a fixed 70-col width inside a centred dialog �
 │   └── zsh/
 │       ├── .zshenv
 │       └── .zshrc
-├── workspace.json                 # Tab/pane/layout state
+├── workspace.json                 # Project/tab/pane/layout state
 ├── workspace.json.bak             # Previous snapshot (rollback)
 ├── buffers/                       # Ghost buffer binary files
 │   └── pane-XXXXXXXX.bin
 ├── window.json                    # Window size/position persistence
 ├── instances.json                 # Saved plugin instances (SSH connections, etc.)
-├── plugins/                       # User TOML plugin definitions
+├── recent-cwds.json               # Recent directory quick-pick — local daemon
+├── recent-cwds-<dest>.json        # …and one per remote destination (ADR-27)
+├── remote-projects.json           # Last-seen project list, so an offline host
+├── remote-projects-<dest>.json    #   still shows by name instead of vanishing
+├── plugins/                       # User TOML plugin definitions (ADR-6)
 │   └── *.toml
 ├── notes/                         # Pane notes (M7) — one file per pane
 │   └── pane-XXXXXXXX.md
+├── history/                       # Per-pane submitted-prompt history (Alt+Shift+I)
+│   └── pane-XXXXXXXX.jsonl
+├── events/                        # Hook event spools, polled every 200 ms
+│   └── pane-XXXXXXXX.jsonl        #   unlinked at daemon start, never truncated
 ├── paste/                         # Clipboard image proxy output (ADR-17)
 │   └── quil-paste-<ts>-<rand>.png
 ├── conpty/                        # Bundled OpenConsole host — Windows 10 only (ADR-25)
@@ -684,15 +1037,23 @@ The TOML plugin editor renders at a fixed 70-col width inside a centred dialog �
 │   ├── quil-session-hook.sh       # Unix
 │   ├── quil-session-hook.ps1      # Windows
 │   └── hook.log                   # Hook validation failure log
-├── sessions/                      # Per-pane Claude session ids (ADR-23)
-│   └── pane-XXXXXXXX.id
-├── sandbox/                       # Docker sandbox panes (ADR-26)
+├── opencodehook/                  # Embedded OpenCode JS plugin
+│   └── *.js
+├── codexhook/                     # Codex hook log
+│   └── hook.log
+├── sandbox/                       # Docker sandbox panes (ADR-31)
 │   ├── empty/                     # Read-only shadow directory for pinned mounts
 │   ├── empty-file                 # Read-only shadow file for pinned mounts
 │   ├── overlays/<pane-id>/        # Never mounted into the container
 │   └── panes/<pane-id>/           # Mounted at /quil — hook spool, claude/, codex/, objects/
-└── secrets/                       # (planned)
-    └── tokens.enc
+├── sessions/                      # Per-pane agent session ids (ADR-23)
+│   ├── pane-XXXXXXXX.id           #   Claude Code
+│   ├── opencode-pane-XXXXXXXX.id
+│   └── codex-pane-XXXXXXXX.id
+└── update/                        # Auto-update staging
+    ├── notified.json              # a version the user was TOLD about
+    └── lastrun.json               # a version the user actually RAN — the
+                                   #   What's New marker, deliberately not the above
 ```
 
 ## Project Rules

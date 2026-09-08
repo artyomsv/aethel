@@ -4,7 +4,7 @@ Quil follows [Semantic Versioning](https://semver.org/) (SemVer).
 
 ## Version Format
 
-`MAJOR.MINOR.PATCH` (e.g., `0.2.0`)
+`MAJOR.MINOR.PATCH` (e.g., `1.69.0`)
 
 | Component | Incremented when |
 |-----------|-----------------|
@@ -28,11 +28,11 @@ If no bumpable commits are found since the last tag, no release is created.
 
 ## Version Sources
 
-- **`VERSION`** file at repo root — single source of truth (`0.2.0`)
-- **`cmd/quil/main.go`** — build-time injection via `-ldflags "-X main.version=..."`
+- **`VERSION`** file at repo root — single source of truth (e.g. `1.69.0`)
+- **`cmd/quil/main.go`** and **`cmd/quild/main.go`** — build-time injection via `-ldflags "-X main.version=..."`
 - **`CHANGELOG.md`** — written by the release workflow, never by hand
 - **`changelog.d/`** — one fragment per PR, collected into `CHANGELOG.md` on release
-- **Git tags** — `v0.2.0` format, created by the release workflow
+- **Git tags** — `v1.69.0` format, created by the release workflow
 
 ## Release Process
 
@@ -47,8 +47,11 @@ If no bumpable commits are found since the last tag, no release is created.
      deletes the consumed fragments
    - Commits `chore(release): vX.Y.Z`
    - Creates git tag `vX.Y.Z`
-   - Cross-compiles binaries (Linux + macOS, amd64 + arm64)
-   - Creates GitHub Release with changelog and `.tar.gz` assets
+   - Cross-compiles binaries for five targets — Linux and macOS on amd64 +
+     arm64, and Windows on amd64
+   - Creates a GitHub Release with the changelog, SHA-256 checksums, and
+     `.tar.gz` archives (`.zip` for Windows). The Windows archive also carries
+     `quil-activate.exe`, the windowless notification click handler.
 
 ## Dry Run Mode
 

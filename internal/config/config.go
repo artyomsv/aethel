@@ -20,7 +20,6 @@ type Config struct {
 	Daemon       DaemonConfig       `toml:"daemon"`
 	GhostBuffer  GhostBufferConfig  `toml:"ghost_buffer"`
 	Logging      LoggingConfig      `toml:"logging"`
-	Security     SecurityConfig     `toml:"security"`
 	UI           UIConfig           `toml:"ui"`
 	Keybindings  KeybindingsConfig  `toml:"keybindings"`
 	MCP          MCPConfig          `toml:"mcp"`
@@ -372,11 +371,6 @@ type LoggingConfig struct {
 	MaxFiles  int `toml:"max_files"`
 }
 
-type SecurityConfig struct {
-	EncryptTokens bool `toml:"encrypt_tokens"`
-	RedactSecrets bool `toml:"redact_secrets"`
-}
-
 type UIConfig struct {
 	TabDock          string `toml:"tab_dock"`
 	Theme            string `toml:"theme"`
@@ -611,10 +605,6 @@ func Default() Config {
 			Level:     "info",
 			MaxSizeMB: 5,
 			MaxFiles:  10,
-		},
-		Security: SecurityConfig{
-			EncryptTokens: true,
-			RedactSecrets: true,
 		},
 		UI: UIConfig{
 			TabDock:             "top",
