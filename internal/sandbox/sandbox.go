@@ -27,6 +27,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -116,6 +117,14 @@ type Mapping struct {
 	// HostEmptyFile is a permanently empty FILE, used to shadow individual
 	// executable-config files read-only. Shared by every pane.
 	HostEmptyFile string
+	// HostGitModules is the repository's .git/modules when it EXISTS, and
+	// empty when it does not.
+	//
+	// Recorded here because Mounts is pure path arithmetic with no filesystem
+	// access, and that purity is what lets the mount set — the security
+	// boundary of this feature — be table-tested with no Docker and no
+	// repository. See hostModulesSource for why the distinction matters.
+	HostGitModules string
 
 	// Slug is the container working-directory name under /work.
 	Slug string
@@ -174,19 +183,19 @@ func (m Mapping) HostObjects() string { return joinHost(m.HostPaneRoot, "objects
 // instead of once per pane. The trade is the user's to make and is spelled out
 // in the config comment and the docs; what must not happen is the knob
 // existing and doing nothing.
+func (m Mapping) HostClaudeConfig() string {
+	if m.SharedClaudeRoot != "" {
+		return m.SharedClaudeRoot
+	}
+	return joinHost(m.HostPaneRoot, "claude")
+}
+
 // HostCodexHome is the pane's CODEX_HOME on the host. Always per-pane: codex
 // writes refreshed credentials and session state there, so one shared directory
 // would put every sandbox pane in one trust domain — the trade
 // shared_claude_config makes explicit for Claude and nothing has asked for here.
 func (m Mapping) HostCodexHome() string {
 	return joinHost(m.HostPaneRoot, "codex")
-}
-
-func (m Mapping) HostClaudeConfig() string {
-	if m.SharedClaudeRoot != "" {
-		return m.SharedClaudeRoot
-	}
-	return joinHost(m.HostPaneRoot, "claude")
 }
 
 // HostDotGitOverlay is the file mounted over the worktree's own .git.
@@ -275,6 +284,13 @@ func NewMapping(ctx context.Context, quilDir, hostCWD, paneID string) (Mapping, 
 		m.Kind = KindWorktree
 		m.HostAdminDir = gitDir
 		m.AdminName = filepath.Base(filepath.FromSlash(gitDir))
+	}
+
+	// Only when it EXISTS. Mounting a missing source makes docker invent one,
+	// and on a Linux host that is a root-owned directory left inside the
+	// user's own .git.
+	if modules := joinHost(common, "modules"); dirExistsFn(modules) {
+		m.HostGitModules = modules
 	}
 
 	sub, err := containerSubdir(top, hostCWD)
@@ -418,3 +434,24 @@ func slug(hostPath string) string {
 // separators, so this is filepath.Join — the container-side counterpart is a
 // plain "/" join and must never come here.
 func joinHost(elem ...string) string { return filepath.Join(elem...) }
+
+// hostModulesSource is what to bind over .git/modules: the real directory when
+// the repository has submodules, otherwise the shared empty one.
+//
+// Never the real path when it is absent. Docker INVENTS a missing bind source,
+// and on a Linux host that is a root-owned directory left inside the user's
+// own .git — which they may then be unable to remove.
+func (m Mapping) hostModulesSource() string {
+	if m.HostGitModules != "" {
+		return m.HostGitModules
+	}
+	return m.HostEmptyDir
+}
+
+// dirExistsFn is the one filesystem question NewMapping asks that is not git's
+// answer, kept as a seam so the mount-set tables stay filesystem-free — the
+// whole reason this package can be tested without Docker or a repository.
+var dirExistsFn = func(p string) bool {
+	st, err := os.Stat(filepath.FromSlash(p))
+	return err == nil && st.IsDir()
+}

@@ -129,9 +129,64 @@ func Mounts(m Mapping) []mount {
 		// them on its next `git status`.
 		ms = append(ms,
 			mount{m.HostWorktree, m.ContainerWorkdir(), false},
+			// `.git` ITSELF is a mount, and that is what makes the read-only
+			// pins below mean anything.
+			//
+			// Without it `.git` is a plain directory inside the read-write
+			// checkout, so the pins protect four LEAF paths while their
+			// PARENT stays writable — and MEASURED, on Docker Desktop against
+			// real host files: `mv .git .git.old` succeeds, the read-only
+			// submounts move away with the old name, and a freshly created
+			// `.git/config` carrying `core.fsmonitor` lands on the host's own
+			// checkout. Host git executes that value on its next `git status`,
+			// which quil's own gitinfo ticker runs on a timer. A sandbox
+			// escape to host code execution, on the DEFAULT shape for an
+			// ordinary clone.
+			//
+			// A mountpoint cannot be renamed or removed — both answer EBUSY,
+			// verified on the same setup — so making `.git` one closes it by
+			// construction rather than by guarding a list of names. Read-WRITE
+			// because git must still write the index, HEAD and refs; the
+			// executable pieces are pinned read-only ON TOP, which nesting
+			// preserves (also verified: a write to `config` through the RW
+			// parent still answers "Read-only file system").
+			mount{m.HostGitCommon, m.ContainerGitCommon(), false},
 			mount{joinHost(m.HostGitCommon, "objects"), m.ContainerAlternate(), true},
 			mount{joinHost(m.HostGitCommon, "hooks"), m.ContainerGitCommon() + "/hooks", true},
 			mount{joinHost(m.HostGitCommon, "config"), m.ContainerGitCommon() + "/config", true},
+			// config.worktree, shadowed for exactly the reason the linked
+			// worktree shadows its own copy: with extensions.worktreeConfig
+			// enabled git reads per-worktree configuration from it, including
+			// core.fsmonitor and core.hooksPath, and this one belongs to the
+			// MAIN worktree. `.git` is writable above, so the file has to be
+			// pinned rather than merely left alone — and it is pinned whether
+			// or not it exists, because CREATING one is the attack.
+			//
+			// Known side effect, measured: when the repository has no
+			// config.worktree, docker creates the mount target — and since
+			// `.git` is itself a bind mount, that empty file appears in the
+			// user's own .git. It is inert (git reads the file only under
+			// extensions.worktreeConfig, and an empty one sets nothing) and it
+			// is the price of closing the hole; skipping the mount when the
+			// file is absent would leave exactly the case the attack uses.
+			mount{m.HostEmptyFile, m.ContainerGitCommon() + "/config.worktree", true},
+			// modules/ holds one gitdir per submodule, each with its OWN
+			// config and hooks that host git executes whenever it touches
+			// that submodule. Measured reaching host files through the
+			// read-write `.git` above, so it is the same escape one directory
+			// over, narrowed to repositories that have submodules.
+			//
+			// Pinned wholesale rather than per-submodule: the cost is that a
+			// commit made INSIDE a submodule from the container does not
+			// persist, and submodules are already documented as unsupported
+			// here. Per-submodule pinning would need the mapping to enumerate
+			// them, which is more machinery than an unsupported case earns.
+			//
+			// The source is HostGitModules, which is EMPTY when the
+			// repository has none — mounting a missing path makes docker
+			// invent the source, and on a Linux host that is a root-owned
+			// directory inside the user's own .git.
+			mount{m.hostModulesSource(), m.ContainerGitCommon() + "/modules", true},
 			// worktrees/ holds the admin directory of every OTHER worktree of
 			// this repository, and it is inside the read-write tree here
 			// because the whole checkout is mounted. Left writable, a
@@ -158,6 +213,18 @@ func Mounts(m Mapping) []mount {
 		// host git error on every command.
 		mount{m.HostEmptyDir, m.ContainerAlternate() + "/info", true},
 		mount{m.HostEmptyDir, ContainerObjects + "/info", true},
+		// The pane's own object store, mounted for the same reason `.git` is
+		// on the checkout path: without it, `/quil/objects` is a plain
+		// directory inside the writable `/quil`, so the agent renames it and
+		// the read-only `info` shadow above moves away with it. The host's own
+		// alternates line points HERE, so a planted `info/alternates` then
+		// makes host git fail on every command in that repository — the exact
+		// outcome the shadow exists to prevent, reached around it.
+		//
+		// Read-write: this IS the pane's store, and GIT_OBJECT_DIRECTORY
+		// points at it. Making it a mountpoint costs nothing and removes the
+		// rename.
+		mount{m.HostObjects(), ContainerObjects, false},
 		// The pane's own subtree: hook spool, Claude config, object store.
 		mount{m.HostPaneRoot, ContainerQuil, false},
 	)

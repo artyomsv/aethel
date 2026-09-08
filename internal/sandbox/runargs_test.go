@@ -54,6 +54,11 @@ func TestMounts_MainWorkingTreeNeverEntersTheContainer(t *testing.T) {
 		m.HostEmptyDir:                     true,
 		m.HostEmptyFile:                    true, // shadows config.worktree
 		m.HostPaneRoot:                     true,
+		// The pane's own object store, mounted a second time at its own path
+		// so it is a MOUNTPOINT rather than a renameable directory inside
+		// /quil — otherwise the read-only info shadow above it can be moved
+		// away. Already inside HostPaneRoot, so it exposes no new host path.
+		m.HostObjects(): true,
 	}
 	for _, mt := range Mounts(m) {
 		if !allowed[filepath.ToSlash(mt.host)] {
@@ -465,5 +470,116 @@ func TestNewMapping_RefusesACommaInAHostPath(t *testing.T) {
 	stubGit(t, "/projects/a,b/wt", "/projects/main/.git", "/projects/main/.git/worktrees/wt")
 	if _, err := NewMapping(context.Background(), "/home/u/.quil", "/projects/a,b/wt", "p1"); err == nil {
 		t.Fatal("a host path containing a comma was accepted")
+	}
+}
+
+// A read-only pin is worth nothing if the agent can rename the DIRECTORY that
+// holds it, and that was a real sandbox escape rather than a theoretical one.
+//
+// The KindCheckout arm mounted the whole checkout read-write and pinned four
+// paths under `.git` read-only — but `.git` itself was a plain directory
+// inside that writable mount. Measured on Docker Desktop against real host
+// files: `mv .git .git.old` succeeded, the read-only submounts went with the
+// old name, and a freshly created `.git/config` carrying `core.fsmonitor`
+// landed on the host's checkout. Host git executes that on its next `git
+// status`, which quil's own gitinfo ticker runs on a timer.
+//
+// The rule, stated so it generalises rather than naming the one path that
+// broke: a read-only pin is safe when its parent is ITSELF a mountpoint (a
+// mountpoint answers EBUSY to rename and to remove — verified), or when
+// nothing writable contains it, so there is no writable directory to rename.
+func TestMounts_NoReadOnlyPinSitsInARenameableDirectory(t *testing.T) {
+	// containedBy reports the innermost mount whose target is a proper
+	// ancestor of p.
+	containedBy := func(ms []mount, p string) (mount, bool) {
+		var best mount
+		found := false
+		for _, cand := range ms {
+			if cand.container == p || !strings.HasPrefix(p, cand.container+"/") {
+				continue
+			}
+			if !found || len(cand.container) > len(best.container) {
+				best, found = cand, true
+			}
+		}
+		return best, found
+	}
+
+	for _, tc := range []struct {
+		name string
+		m    Mapping
+	}{
+		{"checkout", testCheckoutMapping(t)},
+		{"worktree", testMapping(t)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := Mounts(tc.m)
+			isMount := make(map[string]bool, len(ms))
+			for _, mt := range ms {
+				isMount[mt.container] = true
+			}
+
+			for _, mt := range ms {
+				if !mt.readOnly {
+					continue
+				}
+				i := strings.LastIndex(mt.container, "/")
+				if i <= 0 {
+					continue
+				}
+				parent := mt.container[:i]
+				if isMount[parent] {
+					continue // a mountpoint cannot be renamed
+				}
+				if holder, ok := containedBy(ms, parent); ok && !holder.readOnly {
+					t.Errorf("read-only pin %q sits in %q, a plain directory inside the "+
+						"WRITABLE mount %q — the agent renames %q and the pin moves away with "+
+						"it, which is a sandbox escape to host code execution",
+						mt.container, parent, holder.container, parent)
+				}
+			}
+		})
+	}
+}
+
+// The files host git EXECUTES values from must be pinned on an ordinary
+// checkout too. config.worktree is the one that is easy to miss: it belongs to
+// the MAIN worktree there, `.git` is writable, and "it does not exist yet" is
+// not protection — creating it IS the attack.
+func TestMounts_CheckoutPinsTheExecutableConfig(t *testing.T) {
+	m := testCheckoutMapping(t)
+	byTarget := map[string]mount{}
+	for _, mt := range Mounts(m) {
+		byTarget[mt.container] = mt
+	}
+	gitDir := m.ContainerGitCommon()
+
+	// The parent must be mounted, and read-WRITE: git writes the index, HEAD
+	// and refs there on an ordinary checkout.
+	parent, ok := byTarget[gitDir]
+	if !ok {
+		t.Fatalf("%s is not mounted; every pin under it protects a renameable directory", gitDir)
+	}
+	if parent.readOnly {
+		t.Errorf("%s is read-only; git cannot write the index, HEAD or refs", gitDir)
+	}
+
+	for _, target := range []string{
+		gitDir + "/config",
+		gitDir + "/config.worktree",
+		gitDir + "/hooks",
+		gitDir + "/worktrees",
+		// Each submodule gitdir carries its own config and hooks, which host
+		// git executes whenever it touches that submodule.
+		gitDir + "/modules",
+	} {
+		mt, ok := byTarget[target]
+		if !ok {
+			t.Errorf("%s is not mounted at all", target)
+			continue
+		}
+		if !mt.readOnly {
+			t.Errorf("%s is writable; host git executes values from it", target)
+		}
 	}
 }
