@@ -640,6 +640,7 @@ type Model struct {
 	worktreeReplaced  map[string]*PaneModel
 	worktreeCursor    int                // row cursor in the worktree field's expanded list; row 0 = "off"
 	worktreeScroll    int                // scroll offset for the visible window of the expanded worktree list
+	worktreeFilter    string             // type-to-search text narrowing the worktree list; "" = the whole list
 	reqGen            int                // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
 	sessionScanCWD    string             // directory sessionRows belong to
 	sessionState      sessionScanState   // request lifecycle for the session field

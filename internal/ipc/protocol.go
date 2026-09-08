@@ -1321,14 +1321,22 @@ type WorktreeListReqPayload struct {
 // WorktreeInfo is one entry of the repository's worktree list, as the daemon
 // sees it. A mirror of gitworktree.Worktree rather than a reuse of it: this is
 // a wire type, and the internal one is free to change shape.
+//
+// CommitTime is the committer date (unix seconds) of the checked-out branch's
+// tip, joined daemon-side from the branch listing, so the setup dialog can
+// order worktrees by recency. Zero when unknown — a detached checkout, a branch
+// the listing did not carry, or a daemon too old to send it — and a client
+// ORDERS by it only; nothing is hidden or refused for lacking one, and a
+// listing of all zeros keeps git's own order.
 type WorktreeInfo struct {
-	Path     string `json:"path"`
-	Branch   string `json:"branch,omitempty"`
-	Detached bool   `json:"detached,omitempty"`
-	Main     bool   `json:"main,omitempty"`
-	Locked   bool   `json:"locked,omitempty"`
-	Prunable bool   `json:"prunable,omitempty"`
-	Bare     bool   `json:"bare,omitempty"`
+	Path       string `json:"path"`
+	Branch     string `json:"branch,omitempty"`
+	Detached   bool   `json:"detached,omitempty"`
+	Main       bool   `json:"main,omitempty"`
+	Locked     bool   `json:"locked,omitempty"`
+	Prunable   bool   `json:"prunable,omitempty"`
+	Bare       bool   `json:"bare,omitempty"`
+	CommitTime int64  `json:"commit_time,omitempty"`
 }
 
 // WorktreeListRespPayload carries the repository's worktrees, main checkout

@@ -1226,6 +1226,32 @@ would be a per-keystroke cost for an answer that is always empty. A failure is
 non-fatal: the worktree list is what the dialog needs to function, and losing the
 branches degrades to git's own refusal at create time.
 
+**The same `for-each-ref` call carries each branch's committer date**
+(`gitworktree.Branch.CommitTime`, `%09%(committerdate:unix)` — a tab, which no
+ref name may contain), and the daemon JOINS it onto `WorktreeInfo.CommitTime` by
+branch name before the response leaves. Joined daemon-side because the join key
+is git's spelling on both sides only on the machine that ran git; the wire's
+`Branches` stays a list of names for the collision check and for older clients.
+The TUI ORDERS by it and never gates on it: `worktreeRows` puts the worktree the
+pane being split sits in first (tagged `(current)`, matched by
+`worktreePathInside` — separators unified and case folded on BOTH sides, because
+the pane's CWD is OSC 7's spelling and the path is git's, and on Windows they
+differ in both; boundary on a separator like the daemon's `pathWithin`), then
+newest commit first, `sort.SliceStable` so an all-zero listing from an older
+daemon keeps git's admin-directory order. The reason it exists: on a 58-worktree
+repository the checkout being worked on that day sat at row 49 of a six-row
+window, labelled by a branch that shared no word with its folder, with the folder
+name truncated off the row's tail. Hence also `worktreeRowText`, which cuts the
+PATH at its head (`elideHead`) so the folder survives, and `worktreeFilter` —
+type-to-search on the focused field, matching branch OR path case-insensitively,
+routed through `handleCreatePaneSetupKey`'s Esc pre-check exactly as the name
+field is. The search replaces the two fixed rows while it is non-empty; Enter on
+a match clears it and lands the cursor on the chosen row of the full list. `j`/`k`
+stopped being cursor keys in that list for the reason the name field gives.
+Bounded at `worktreeFilterCap`. Tests: `internal/tui/worktree_find_test.go`,
+`TestBranches_RealGit_CarriesEachBranchesCommitTime` (real git only —
+the container has none, so run it natively).
+
 **`refs/heads` ONLY.** A remote-tracking ref of the same name is not a collision,
 so including `refs/remotes` would refuse names `git worktree add -b` accepts —
 the false-positive direction, which blocks legitimate work with a message that is
