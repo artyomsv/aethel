@@ -35,6 +35,10 @@ func TestNeedsSandboxSignIn(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(oauthTokenEnv, tt.token)
+			// Without this, adoptPersistedToken reads the DEVELOPER's own HKCU
+			// token on Windows and every "no token → want true" row fails.
+			// Invisible on Linux CI, which has no per-user store at all.
+			stubNoSavedToken(t)
 			d := &Daemon{cfg: config.Default()}
 			d.cfg.Sandbox.Auth = tt.auth
 			if got := d.needsSandboxSignIn(nil); got != tt.want {
@@ -90,6 +94,11 @@ func TestSpawnPane_SandboxWithNoTokenStartsTheSignIn(t *testing.T) {
 	pane.Type = "claude-code"
 	t.Setenv(oauthTokenEnv, "")
 	d.cfg = config.Default() // token flow by default
+	// Stubbed like every sibling in this file: without it adoptPersistedToken
+	// reads the DEVELOPER's own HKCU token on Windows, concludes no sign-in is
+	// needed, and this test fails deterministically — invisible on Linux CI,
+	// where there is no per-user store to read.
+	stubNoSavedToken(t)
 
 	prevFind := findClaudeFn
 	findClaudeFn = func() (string, error) { return "/fake/claude", nil }
@@ -351,4 +360,102 @@ func TestSandboxTokenAvailable_OnlyForClaudeCode(t *testing.T) {
 			t.Errorf("a %s pane reports a Claude token available", name)
 		}
 	}
+}
+
+// A pane that asks TWICE must be spawned once.
+//
+// Alt+R on a pane standing down for a sign-in is ordinary — it shows "a
+// browser window is opening" for minutes — and re-enters through
+// handleRestartPaneReq → spawnPane. Recorded twice, it was respawned twice
+// when the token landed, and the second prepareSandbox runs `docker rm -f` on
+// the pane's own container: it killed the container the first respawn had just
+// started, mid-task, and leaked that docker CLI behind an overwritten PTY.
+func TestSandboxSignIn_APaneIsNeverRecordedTwice(t *testing.T) {
+	var s sandboxSignIn
+
+	if !s.begin("owner") {
+		t.Fatal("the first caller did not get ownership")
+	}
+	// The owner asking again — Alt+R on the pane that started the flight.
+	s.begin("owner")
+	s.begin("waiter")
+	s.begin("waiter") // and a waiter asking again
+	s.begin("owner")
+
+	waiters := s.end()
+	if len(waiters) != 1 || waiters[0] != "waiter" {
+		t.Errorf("waiters = %v, want exactly [waiter] — a duplicate respawn force-removes "+
+			"the container the first one started", waiters)
+	}
+}
+
+// The claim must outlive the token's publication.
+//
+// Released first, there is a window where the flight is over and the
+// environment is still empty: a pane created in it passes needsSandboxSignIn,
+// wins begin(), and mints a SECOND long-lived token that supersedes the one
+// the panes about to spawn are holding — the failure adoptPersistedToken
+// exists for, observed three times in one session.
+//
+// Observed from inside the PUBLISH, which is the only place the ordering is
+// visible: by the time the token is being written, the claim must still be
+// held, and the environment must already carry it.
+func TestRunSandboxSignIn_ClaimIsHeldUntilTheTokenIsPublished(t *testing.T) {
+	t.Setenv(oauthTokenEnv, "")
+	prevGet := userenvGet
+	userenvGet = func(string) (string, error) { return "", nil }
+	t.Cleanup(func() { userenvGet = prevGet })
+
+	d := &Daemon{cfg: config.Default(), session: NewSessionManager(1024), events: newEventQueue(50)}
+
+	var claimHeldAtPublish, envSetAtPublish bool
+	prevSet := userenvSetFn
+	userenvSetFn = func(string, string) error {
+		// If the claim were already released, a newcomer would win it here
+		// and start a second `claude setup-token`.
+		claimHeldAtPublish = !d.sandboxSignIn.begin("late-pane")
+		envSetAtPublish = os.Getenv(oauthTokenEnv) != ""
+		return nil
+	}
+	t.Cleanup(func() { userenvSetFn = prevSet })
+
+	prevCap := captureTokenFn
+	captureTokenFn = func(string, claudetoken.Options) (string, error) { return "sk-ant-fresh", nil }
+	t.Cleanup(func() { captureTokenFn = prevCap })
+
+	prevSpawn := signInSpawnFn
+	signInSpawnFn = func(*Daemon, *Pane) error { return nil }
+	t.Cleanup(func() { signInSpawnFn = prevSpawn })
+
+	if !d.sandboxSignIn.begin("owner") {
+		t.Fatal("precondition: the owner must hold the claim")
+	}
+	d.runSandboxSignIn("/fake/claude", "owner")
+
+	if !claimHeldAtPublish {
+		t.Error("the claim was released BEFORE the token was published — a pane created in " +
+			"that window mints a second token and supersedes the one the spawning panes hold")
+	}
+	if !envSetAtPublish {
+		t.Error("the process environment did not carry the token at publish time")
+	}
+	// And released afterwards, or no later sign-in could ever start.
+	if !d.sandboxSignIn.begin("after") {
+		t.Error("the claim was never released")
+	}
+}
+
+// stubNoSavedToken makes adoptPersistedToken find nothing in the OS store.
+//
+// Required by every test that asserts a sign-in IS or is NOT needed. Without
+// it the code reads the developer's real per-user environment — on Windows,
+// HKCU — so a machine where `quil sandbox login` has ever run reports "already
+// signed in" and the assertion fails for a reason that has nothing to do with
+// the code under test. Linux CI has no such store, which is exactly why this
+// class of failure is invisible there.
+func stubNoSavedToken(t *testing.T) {
+	t.Helper()
+	prev := userenvGet
+	userenvGet = func(string) (string, error) { return "", nil }
+	t.Cleanup(func() { userenvGet = prev })
 }

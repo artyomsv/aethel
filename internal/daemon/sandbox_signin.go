@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/artyomsv/quil/internal/claudetoken"
@@ -29,6 +30,7 @@ import (
 var (
 	findClaudeFn   = claudetoken.Find
 	userenvGet     = userenv.Get
+	userenvSetFn   = userenv.Set
 	captureTokenFn = claudetoken.Capture
 	// signInSpawnFn is NIL by default, and the nil is load-bearing rather than
 	// lazy: initialising it to a closure over spawnPane is an initialisation
@@ -47,6 +49,9 @@ var (
 type sandboxSignIn struct {
 	mu      sync.Mutex
 	running bool
+	// owner is the pane that started the flight. Held so it cannot also enter
+	// its own waiter list — see begin.
+	owner string
 	// waiting holds the panes that asked while a sign-in was already in
 	// flight, so the winner can spawn them too rather than leaving them
 	// sitting with a message and no child.
@@ -55,14 +60,25 @@ type sandboxSignIn struct {
 
 // begin claims the sign-in. It reports whether the caller OWNS it; a caller
 // told false has been recorded as a waiter and must not start its own.
+//
+// A pane is recorded AT MOST ONCE, and never when it is the owner. Alt+R on a
+// pane that stood down is an ordinary thing to do — it sits showing "a browser
+// window is opening" for minutes — and it re-enters here through
+// handleRestartPaneReq → spawnPane. Appending unconditionally meant that pane
+// was spawned TWICE when the token landed, and the second prepareSandbox runs
+// `docker rm -f` on the pane's own container: it killed the container the
+// first respawn had just started, mid-task, and left the first docker CLI and
+// its output goroutine leaked behind an overwritten pane.PTY.
 func (s *sandboxSignIn) begin(paneID string) (owner bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running {
-		s.waiting = append(s.waiting, paneID)
+		if paneID != s.owner && !slices.Contains(s.waiting, paneID) {
+			s.waiting = append(s.waiting, paneID)
+		}
 		return false
 	}
-	s.running = true
+	s.running, s.owner = true, paneID
 	return true
 }
 
@@ -70,7 +86,7 @@ func (s *sandboxSignIn) begin(paneID string) (owner bool) {
 func (s *sandboxSignIn) end() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.running = false
+	s.running, s.owner = false, ""
 	w := s.waiting
 	s.waiting = nil
 	return w
@@ -240,10 +256,10 @@ func (d *Daemon) runSandboxSignIn(claudePath, ownerPaneID string) {
 	// would persist the token. Progress is reported in our own words instead.
 	token, err := captureTokenFn(claudePath, claudetoken.Options{})
 
-	waiters := d.sandboxSignIn.end()
-	panes := append([]string{ownerPaneID}, waiters...)
-
 	if err != nil {
+		// Released HERE on the failure path: nothing was published, so a pane
+		// created now SHOULD start its own attempt.
+		panes := append([]string{ownerPaneID}, d.sandboxSignIn.end()...)
 		log.Printf("sandbox: sign-in failed: %v", err)
 		for _, id := range panes {
 			d.tellPane(id, fmt.Sprintf("\r\nSign-in did not complete: %v\r\n"+
@@ -254,13 +270,32 @@ func (d *Daemon) runSandboxSignIn(claudePath, ownerPaneID string) {
 		return
 	}
 
-	// The daemon's OWN environment first: it is what dockerCLIEnv reads and
-	// what every pane spawned from here inherits. The persistent write is what
-	// makes the next daemon start find it.
+	// The daemon's OWN environment BEFORE the claim is released, and that
+	// order is the whole point. Releasing first left a window where the flight
+	// was over and the environment was still empty, so a pane created in it
+	// passed needsSandboxSignIn, won begin(), and started a SECOND
+	// `claude setup-token` — which mints a new long-lived token that
+	// supersedes the one the panes about to spawn are holding. That is exactly
+	// the failure adoptPersistedToken exists for, observed three times in one
+	// session.
+	//
+	// It is what dockerCLIEnv reads and what every pane spawned from here
+	// inherits; the persistent write below is what makes the NEXT daemon start
+	// find it.
 	if err := os.Setenv(oauthTokenEnv, token); err != nil {
-		log.Printf("sandbox: sign-in: setting %s: %v", oauthTokenEnv, err)
+		// Nothing downstream can work without this: every respawn would find
+		// an empty environment and start its own sign-in, one per pane.
+		// Reported and abandoned rather than half-applied.
+		log.Printf("sandbox: sign-in: setting %s failed, abandoning: %v", oauthTokenEnv, err)
+		panes := append([]string{ownerPaneID}, d.sandboxSignIn.end()...)
+		for _, id := range panes {
+			d.tellPane(id, "\r\nSigned in, but the token could not be published to this "+
+				"daemon. Restart the pane to try again.\r\n")
+			d.failSandboxSignIn(id, err)
+		}
+		return
 	}
-	switch err := userenv.Set(oauthTokenEnv, token); {
+	switch err := userenvSetFn(oauthTokenEnv, token); {
 	case err == nil:
 		log.Printf("sandbox: signed in; %s saved to the user environment", oauthTokenEnv)
 	case errors.Is(err, userenv.ErrUnsupported):
@@ -274,7 +309,9 @@ func (d *Daemon) runSandboxSignIn(claudePath, ownerPaneID string) {
 		log.Printf("sandbox: signed in, but persisting %s failed: %v", oauthTokenEnv, err)
 	}
 
-	for _, id := range panes {
+	// Released only now, with the token published: a pane created from here on
+	// finds it and never starts a second flight.
+	for _, id := range append([]string{ownerPaneID}, d.sandboxSignIn.end()...) {
 		d.tellPane(id, "Signed in. Starting the container…\r\n")
 		d.respawnAfterSignIn(id)
 	}
