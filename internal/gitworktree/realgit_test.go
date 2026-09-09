@@ -43,6 +43,13 @@ func realGitRepo(t *testing.T) string {
 // the whole setup for the base-branch tests below.
 func runGitIn(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	return runGitInEnv(t, dir, nil, args...)
+}
+
+// runGitInEnv is runGitIn with extra environment entries appended AFTER the
+// fixed ones, so a test can pin a committer date without restating the rest.
+func runGitInEnv(t *testing.T, dir string, extraEnv []string, args ...string) string {
+	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	// A worktree add reads user.name/user.email when it creates the
@@ -56,6 +63,7 @@ func runGitIn(t *testing.T, dir string, args ...string) string {
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
@@ -640,9 +648,45 @@ func TestBranches_RealGit_ListsShortLocalNames(t *testing.T) {
 		t.Fatalf("Branches() = %v, want exactly %v", got, want)
 	}
 	for _, b := range got {
-		if !want[b] {
-			t.Errorf("Branches() returned %q, which is not one of the branches created", b)
+		if !want[b.Name] {
+			t.Errorf("Branches() returned %q, which is not one of the branches created", b.Name)
 		}
+	}
+}
+
+// The commit time is what the setup dialog ORDERS by, and only real git can
+// say whether the format string yields one: a stub agrees with any format. Two
+// branches whose tips are a second apart must come back in that order, and a
+// branch created just now must not read as never committed to.
+func TestBranches_RealGit_CarriesEachBranchesCommitTime(t *testing.T) {
+	repo := realGitRepo(t)
+	runGitIn(t, repo, "branch", "old")
+	// A later commit on master, dated explicitly so the two tips differ
+	// without the test having to sleep.
+	if err := os.WriteFile(filepath.Join(repo, "later"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGitIn(t, repo, "add", "later")
+	runGitInEnv(t, repo, []string{"GIT_COMMITTER_DATE=2030-01-02T03:04:05Z"}, "commit", "-q", "-m", "later")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	got, _, err := Branches(ctx, repo)
+	if err != nil {
+		t.Fatalf("Branches: %v", err)
+	}
+	times := map[string]int64{}
+	for _, b := range got {
+		times[b.Name] = b.CommitTime
+	}
+	if times["old"] <= 0 {
+		t.Errorf("CommitTime for old = %d, want the tip's committer date", times["old"])
+	}
+	if times["master"] != 1893553445 { // 2030-01-02T03:04:05Z
+		t.Errorf("CommitTime for master = %d, want the committer date set on its tip", times["master"])
+	}
+	if times["master"] <= times["old"] {
+		t.Errorf("master (%d) does not sort after old (%d)", times["master"], times["old"])
 	}
 }
 
@@ -664,8 +708,8 @@ func TestBranches_RealGit_ExcludesRemoteTrackingRefs(t *testing.T) {
 		t.Fatalf("Branches: %v", err)
 	}
 	for _, b := range got {
-		if strings.Contains(b, "only-on-remote") {
-			t.Errorf("Branches() returned the remote-tracking ref %q — it would refuse a branch name git accepts", b)
+		if strings.Contains(b.Name, "only-on-remote") {
+			t.Errorf("Branches() returned the remote-tracking ref %q — it would refuse a branch name git accepts", b.Name)
 		}
 	}
 }
@@ -689,7 +733,7 @@ func TestBranches_RealGit_WorksFromASubdirectory(t *testing.T) {
 	}
 	var found bool
 	for _, b := range got {
-		if b == "feat/x" {
+		if b.Name == "feat/x" {
 			found = true
 		}
 	}
@@ -716,11 +760,11 @@ func TestBranches_RealGit_UnaffectedByASameNamedTag(t *testing.T) {
 	}
 	var found bool
 	for _, b := range got {
-		if b == "dup" {
+		if b.Name == "dup" {
 			found = true
 		}
-		if strings.Contains(b, "heads/") {
-			t.Errorf("Branches() returned %q — the refs/heads/ prefix leaked through", b)
+		if strings.Contains(b.Name, "heads/") {
+			t.Errorf("Branches() returned %q — the refs/heads/ prefix leaked through", b.Name)
 		}
 	}
 	if !found {

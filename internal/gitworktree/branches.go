@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -26,9 +27,20 @@ import (
 // rather than the byte cap.
 const maxBranchList = 2000
 
-// Branches reports the local branch names of the repository containing dir,
-// short (no refs/heads/ prefix), plus whether the list was clipped at
-// maxBranchList.
+// Branch is one local branch: its short name and the committer date (unix
+// seconds) of the commit it points at.
+//
+// CommitTime is zero when git printed no date — a ref under refs/heads that
+// points at a non-commit object — and callers order by it, never gate on it: a
+// row with no date sorts last, and nothing is refused or hidden for lacking one.
+type Branch struct {
+	Name       string
+	CommitTime int64
+}
+
+// Branches reports the local branches of the repository containing dir, short
+// (no refs/heads/ prefix) and each with its last commit time, plus whether the
+// list was clipped at maxBranchList.
 //
 // It exists so the setup dialog can refuse a branch name git would refuse. The
 // worktree LISTING cannot answer that question: it reports branches that have a
@@ -50,13 +62,18 @@ const maxBranchList = 2000
 // binary (exec.ErrNotFound) and a call that ran out of time are returned as
 // errors, or all three would render as "this repository has no branches", which
 // reads as "every name is free".
-func Branches(ctx context.Context, dir string) ([]string, bool, error) {
+func Branches(ctx context.Context, dir string) ([]Branch, bool, error) {
 	// lstrip=2 rather than %(refname:short): "short" is git's shortest
 	// UNAMBIGUOUS form, so a repository holding a TAG of the same name gets
 	// `heads/foo` instead of `foo` — and branchTaken compares with ==, so the
 	// collision it exists to catch would be missed. lstrip=2 drops exactly
 	// `refs/heads/` and is deterministic whatever else the ref store holds.
-	out, err := runGit(ctx, dir, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads")
+	//
+	// The committer date rides the SAME call (%09 is a tab, which no ref name
+	// may contain) so the setup dialog can order worktrees by recency without
+	// one `git log` per branch — 283 branches was measured on the user's own
+	// monorepo, and a subprocess each is a per-focus cost on the dialog.
+	out, err := runGit(ctx, dir, "for-each-ref", "--format=%(refname:lstrip=2)%09%(committerdate:unix)", "refs/heads")
 	// A truncated read is NOT an error here, unlike in List and Status. This
 	// output is one independent name per line, so losing the tail yields a
 	// SHORTER list rather than a wrong one — and "shorter" is precisely what
@@ -86,7 +103,7 @@ func Branches(ctx context.Context, dir string) ([]string, bool, error) {
 	// The READ is bounded too, by runGit's own maxGitOutput — so a repository
 	// with a very large packed-refs never reaches this loop as one enormous
 	// string in the first place.
-	var list []string
+	var list []Branch
 	rest := out
 	for rest != "" && len(list) < maxBranchList {
 		line, remainder, found := strings.Cut(rest, "\n")
@@ -99,8 +116,8 @@ func Branches(ctx context.Context, dir string) ([]string, bool, error) {
 		// no ReplaceAll pass. git appends a trailing newline, so the last field
 		// is always empty — and an empty entry would match the branch field's
 		// own initial state and refuse it before a character has been typed.
-		if name := strings.TrimSpace(line); name != "" {
-			list = append(list, name)
+		if b, ok := parseBranchLine(line); ok {
+			list = append(list, b)
 		}
 	}
 	// Truncated if the ENTRY cap stopped the scan (something is left in rest) or
@@ -111,4 +128,22 @@ func Branches(ctx context.Context, dir string) ([]string, bool, error) {
 	// which is complete — hence the test on what is left rather than on the
 	// count.
 	return list, truncatedRead || strings.TrimSpace(rest) != "", nil
+}
+
+// parseBranchLine reads one "<name>\t<unix seconds>" line. The date is
+// optional both ways: a line with no tab is a bare name (an older stub, or a
+// format someone trims), and an empty or unparseable date is zero — the name
+// is what the collision check needs, and losing it over a date would refuse
+// nothing and hide a real branch from the ordering it was meant to improve.
+func parseBranchLine(line string) (Branch, bool) {
+	name, date, _ := strings.Cut(line, "\t")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Branch{}, false
+	}
+	b := Branch{Name: name}
+	if secs, err := strconv.ParseInt(strings.TrimSpace(date), 10, 64); err == nil && secs > 0 {
+		b.CommitTime = secs
+	}
+	return b, true
 }

@@ -2570,6 +2570,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	m.worktreeNewBranch = ""
 	m.worktreeNaming = false
 	m.worktreeErr = ""
+	m.worktreeFilter = ""
 	m.worktreeCursor = 0
 	m.worktreeScroll = 0
 	m.worktrees = worktreeState{}
@@ -4351,6 +4352,12 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		return m.handleWorktreeNameKey(key)
 	}
 
+	// A live search takes Esc for the same reason: the first Esc clears it,
+	// and only an Esc on an empty search backs out of pane creation.
+	if kind == "worktree" && m.worktreeFilter != "" && key == "esc" {
+		return m.handleSetupWorktreeKey(p, key)
+	}
+
 	// Esc and Tab/Shift+Tab work the same regardless of which field is focused.
 	switch key {
 	case "esc":
@@ -4789,12 +4796,19 @@ func (m Model) handleSetupKubeKey(p *plugin.PanePlugin, key string) (tea.Model, 
 // Enter here only COMMITS the choice — unlike the kube/session/pick fields it
 // does not submit the dialog, since a chosen worktree is still one of several
 // fields the user may want to adjust (toggles, session) before Continue.
+//
+// Any other printable key TYPES INTO THE SEARCH (worktreeFilter), which narrows
+// the rows to the worktrees whose branch or path contains the text. That costs
+// j/k as cursor keys — the same trade the name field makes, for the same reason:
+// a list that can be typed into cannot also move on two of the letters a name
+// contains. Up/Down still move.
 func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
-	rows := m.worktreeRows()
-	// Empty means the field is in one of its four one-line states — the same
-	// gate the renderer applies. Inert rather than silently accumulating
-	// keystrokes into a name nothing is displaying.
-	if len(rows) == 0 {
+	// Inert in the four one-line states — the same gate the renderer applies —
+	// rather than silently accumulating keystrokes into a search or a name
+	// nothing is displaying. Gated on the STATE and not on an empty row list: a
+	// search that matches nothing has no rows either, and the way out of it is
+	// a backspace this handler must still take.
+	if !m.worktreeFieldInteractive() {
 		return m, nil
 	}
 	// Naming a new branch swallows the list keys: j/k are letters a branch name
@@ -4803,16 +4817,26 @@ func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Mod
 	if m.worktreeNaming {
 		return m.handleWorktreeNameKey(key)
 	}
+	rows := m.worktreeRows()
+	// The listing can be replaced under a cursor set against the old one
+	// (applyWorktreeList does not reset it), so the index is clamped before it
+	// is ever used as one.
+	if m.worktreeCursor > len(rows)-1 {
+		m.worktreeCursor = max(len(rows)-1, 0)
+	}
 	switch key {
-	case "up", "k":
+	case "up":
 		if m.worktreeCursor > 0 {
 			m.worktreeCursor--
 		}
-	case "down", "j":
+	case "down":
 		if m.worktreeCursor < len(rows)-1 {
 			m.worktreeCursor++
 		}
 	case "enter":
+		if len(rows) == 0 {
+			return m, nil // a search with nothing to commit
+		}
 		row := rows[m.worktreeCursor]
 		if row.disabled {
 			return m, nil
@@ -4834,8 +4858,60 @@ func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Mod
 		// submitSetupDialog's guard is the load-bearing one, since the user
 		// can reach Continue without re-focusing the session field.
 		m.selectedSessionID = ""
+		// A search that found its row is done. It is dropped here rather than
+		// left standing, and the cursor lands on the chosen row of the FULL
+		// list, so what the field shows next is the choice in its context — a
+		// narrowed list with one mark in it says nothing about what else there
+		// was.
+		if m.worktreeFilter != "" {
+			m.worktreeFilter = ""
+			rows = m.worktreeRows()
+			m.worktreeCursor = 0
+			for i, r := range rows {
+				if r.path == row.path {
+					m.worktreeCursor = i
+					break
+				}
+			}
+			m.worktreeScroll, _ = historyWindow(len(rows), m.worktreeCursor, 0, m.worktreeVisibleRows())
+		}
+		return m, nil
+	case "backspace":
+		if n := len(m.worktreeFilter); n > 0 {
+			// Rune-safe, for the reason the name field's backspace is.
+			_, size := utf8.DecodeLastRuneInString(m.worktreeFilter)
+			m.worktreeFilter = m.worktreeFilter[:n-size]
+		}
+		m.worktreeCursor, m.worktreeScroll = 0, 0
+		return m, nil
+	case "esc":
+		// Reached only with a search on screen: handleCreatePaneSetupKey
+		// routes Esc here ahead of its own dialog-closing branch exactly then.
+		m.worktreeFilter = ""
+		m.worktreeCursor, m.worktreeScroll = 0, 0
 		return m, nil
 	default:
+		// BOTH spellings of the space key, the pair handleConfirmKey and
+		// handleRenameKey already match: Bubble Tea v2 reports a real press as
+		// the NAME "space" while a pasted or synthesised one arrives as " ".
+		// The rune-count test below accepts the second and silently drops the
+		// first, and a directory name may legitimately contain a space — so
+		// without this the search can never reach such a worktree.
+		if key == "space" {
+			key = " "
+		}
+		// One rune per key is what separates a typed character from a named
+		// key ("f5", "ctrl+a") — the same test the name field applies.
+		// Bounded at ingest: the value is rendered on every frame, and the
+		// row it renders on truncates rather than wraps, so an unbounded one
+		// would be invisible past the edge and costly to draw regardless.
+		if utf8.RuneCountInString(key) == 1 && utf8.RuneCountInString(m.worktreeFilter) < worktreeFilterCap {
+			m.worktreeFilter += key
+			// Every change starts the cursor over on the first match: the row
+			// it was on may no longer be in the list, and the first match is
+			// the one Enter is most often meant for.
+			m.worktreeCursor, m.worktreeScroll = 0, 0
+		}
 		return m, nil
 	}
 	// Reuses historyWindow rather than a second, near-identical
@@ -5138,7 +5214,24 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 		return b.String()
 	}
 
-	b.WriteString(dialogNormal.Render(label))
+	// The search rides the LABEL row, so it costs no list row and the budget
+	// worktreeVisibleRows computes is untouched. With nothing typed the row
+	// says the list can be typed into — nothing on screen said so before, and a
+	// list that can be searched but does not look it is one nobody searches.
+	// The search text is the user's own typing, but it goes through the same
+	// sanitizer as every other value on these rows: this is its one draw site,
+	// and a C1 introducer or a bidi override is printable.
+	switch {
+	case m.worktreeNaming:
+		b.WriteString(dialogNormal.Render(label))
+	case m.worktreeFilter != "":
+		b.WriteString(dialogNormal.Render(label + "    "))
+		b.WriteString(dialogEditStyle.Render(truncateToWidth(
+			"search: "+sanitizeRemoteText(m.worktreeFilter)+"│", m.setupTextWidth()-lipgloss.Width(label)-4)))
+	default:
+		b.WriteString(dialogNormal.Render(label + "    "))
+		b.WriteString(dialogSubtle.Render("type to search"))
+	}
 	b.WriteString("\n")
 	// Naming REPLACES the list rather than sitting under it, so focusing the
 	// field cannot grow the dialog — the same constraint worktreeVisibleRows
@@ -5166,6 +5259,14 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 		return b.String()
 	}
 	rows := m.worktreeRows()
+	if len(rows) == 0 {
+		// Only a search can empty an interactive list. Said in words rather
+		// than drawn as nothing: a blank list under a search reads as a list
+		// that has not answered.
+		b.WriteString(dialogSubtle.Render("    no worktree matches"))
+		b.WriteString("\n")
+		return b.String()
+	}
 	visible := m.worktreeVisibleRows()
 	// Re-derives the window from the cursor rather than trusting the stored
 	// scroll, like renderCommandHistory: render must not depend on Update
@@ -5188,23 +5289,85 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 		case rows[i].path == m.selectedWorktree:
 			mark = setupRowIdleMark
 		}
-		text := sanitizeRemoteText(rows[i].label)
+		text := worktreeRowText(rows[i], m.setupTextWidth()-setupRowIndent)
 		if rows[i].disabled {
-			b.WriteString(dialogSubtle.Render(mark + truncateToWidth(text, m.setupTextWidth()-setupRowIndent)))
+			b.WriteString(dialogSubtle.Render(mark + text))
 		} else {
-			b.WriteString(dialogNormal.Render(mark + truncateToWidth(text, m.setupTextWidth()-setupRowIndent)))
+			b.WriteString(dialogNormal.Render(mark + text))
 		}
 		b.WriteString("\n")
 	}
 	return b.String()
 }
 
+// worktreeRowText fits one row to w cells.
+//
+// A worktree row is "<branch>  <path>", and the PATH is cut at its HEAD, never
+// its tail. The head is the same for every row — every worktree of one
+// repository shares a parent — and the tail is the folder name, the one part
+// of the row the user recognises from the pane header and from disk. A tail
+// cut threw exactly that away: on a 58-worktree repository the wanted row
+// read `feature/verification-996-followups  E:/Projects/Stukans/monorepo-wo…`
+// and the user scrolled past it looking for `fix-verification-service`. The
+// branch keeps its full text; when it leaves no room for any of the path the
+// row degrades to the plain cut rather than to a bare ellipsis.
+//
+// The fixed rows and the disabled ones carry no path and take the plain cut.
+func worktreeRowText(r worktreeRow, w int) string {
+	if r.branch == "" || r.disabled {
+		return truncateToWidth(sanitizeRemoteText(r.label), w)
+	}
+	head := sanitizeRemoteText(r.branch)
+	if r.current {
+		head += " " + worktreeCurrentNote
+	}
+	head += "  "
+	rest := w - lipgloss.Width(head)
+	if rest < 4 {
+		return truncateToWidth(sanitizeRemoteText(r.label), w)
+	}
+	return head + elideHead(sanitizeRemoteText(r.path), rest)
+}
+
+// elideHead shortens s to w cells by dropping its HEAD, keeping the tail.
+// elideMiddle's opposite, for values whose identity lives at the end.
+func elideHead(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	if w == 1 {
+		return "…"
+	}
+	return "…" + lastCellsToWidth(s, w-1)
+}
+
 // worktreeRow is one selectable line: row 0 is always "off".
 type worktreeRow struct {
+	// label is the whole row as text: what the two fixed rows and the
+	// disabled rows render, and what tests read.
 	label    string
 	path     string // "" for the off row
 	disabled bool
+	// branch is the display name of the checked-out branch ("(detached)"
+	// when there is none); "" on the two fixed rows, which is how
+	// worktreeRowText tells them apart.
+	branch string
+	// current marks the worktree the pane being split sits in.
+	current bool
+	// commitTime orders the list; see worktreeRows.
+	commitTime int64
 }
+
+// worktreeCurrentNote tags the row of the worktree the active pane sits in.
+const worktreeCurrentNote = "(current)"
+
+// worktreeFilterCap bounds the search text, in runes. Generous against any
+// name a user would type to find a worktree, and small against the row that
+// renders it.
+const worktreeFilterCap = 64
 
 // worktreeRows builds the field's rows. The MAIN checkout is excluded: it is
 // not a worktree to attach to, it is the directory the CWD field already
@@ -5231,9 +5394,69 @@ func (m Model) worktreeFieldInteractive() bool {
 	return !m.worktrees.pending && m.worktrees.loaded && m.worktrees.err == "" && m.worktrees.repo
 }
 
+// worktreeRows builds the field's rows; the doc comment above worktreeNewRowPath
+// says what is excluded and why.
+//
+// ORDER: the worktree the pane being split sits in first, then newest commit
+// first, ties in git's own order. git lists linked worktrees in admin-directory
+// order — alphabetical by folder — which puts the one being worked on today
+// wherever its name falls; on a 58-worktree repository that was row 49 of a
+// six-row window. The current one outranks even a newer commit because it is
+// the row this dialog is most often opened for: a second agent beside the
+// first, on the same checkout. CommitTime is zero from a daemon too old to
+// send it, and all-zero ties leave the listing order intact.
+//
+// A SEARCH (worktreeFilter) replaces the whole list with the worktrees whose
+// branch or path contains the text, case-insensitively. The two fixed rows go
+// too: a search is a search for a worktree, and a cursor that starts on "off"
+// is two keystrokes from every result. The path matches because that is where
+// the FOLDER name lives, and the folder is what the user scans for — it can
+// share no word with the branch.
 func (m Model) worktreeRows() []worktreeRow {
 	if !m.worktreeFieldInteractive() {
 		return nil
+	}
+	here := m.setupDiscoveryBase()
+	var trees []worktreeRow
+	for _, w := range m.worktrees.list {
+		if w.Main {
+			continue
+		}
+		name := w.Branch
+		if name == "" {
+			name = "(detached)"
+		}
+		row := worktreeRow{branch: name, path: w.Path, commitTime: w.CommitTime}
+		row.current = here != "" && worktreePathInside(here, w.Path)
+		head := name
+		if row.current {
+			head += " " + worktreeCurrentNote
+		}
+		switch {
+		case w.Prunable:
+			row.label, row.disabled = head+"  (directory is gone)", true
+		case w.Locked:
+			row.label, row.disabled = head+"  (locked)", true
+		default:
+			row.label = head + "  " + w.Path
+		}
+		trees = append(trees, row)
+	}
+	sort.SliceStable(trees, func(i, j int) bool {
+		if trees[i].current != trees[j].current {
+			return trees[i].current
+		}
+		return trees[i].commitTime > trees[j].commitTime
+	})
+	if m.worktreeFilter != "" {
+		q := strings.ToLower(m.worktreeFilter)
+		var hits []worktreeRow
+		for _, r := range trees {
+			if strings.Contains(strings.ToLower(r.branch), q) || strings.Contains(strings.ToLower(r.path), q) {
+				hits = append(hits, r)
+			}
+		}
+		return hits
 	}
 	rows := []worktreeRow{{label: "off — use the directory above", path: ""}}
 	// FIRST of the actionable rows, directly under the neutral default.
@@ -5244,24 +5467,33 @@ func (m Model) worktreeRows() []worktreeRow {
 	// and "off" is the only row that earns its place above it by being the
 	// default rather than a choice. The fixtures moved instead.
 	rows = append(rows, worktreeRow{label: "+ new branch…", path: worktreeNewRowPath})
-	for _, w := range m.worktrees.list {
-		if w.Main {
-			continue
-		}
-		name := w.Branch
-		if name == "" {
-			name = "(detached)"
-		}
-		row := worktreeRow{label: name + "  " + w.Path, path: w.Path}
-		switch {
-		case w.Prunable:
-			row.label, row.disabled = name+"  (directory is gone)", true
-		case w.Locked:
-			row.label, row.disabled = name+"  (locked)", true
-		}
-		rows = append(rows, row)
+	return append(rows, trees...)
+}
+
+// worktreePathInside reports whether dir is root or sits under it.
+//
+// Both strings describe the DAEMON's disk, so filepath — which speaks for the
+// CLIENT's platform — cannot be used. Separators are unified and case is
+// folded on both sides: the pane's CWD is whatever OSC 7 reported and the
+// worktree path is what git printed, and on Windows the two differ in both
+// (`e:\Projects\...\Fix-X` against `E:/Projects/.../fix-x`). Folding case on a
+// case-sensitive host can misfile only two directories that differ by case
+// alone, and the cost is a wrong "(current)" tag and a row out of order —
+// nothing that spawns anything reads this.
+//
+// Boundary on a separator, or a pane in feat-ab reads as inside feat-a — the
+// same rule the daemon's pathWithin applies before a force-delete.
+func worktreePathInside(dir, root string) bool {
+	norm := func(s string) string {
+		s = strings.ReplaceAll(s, `\`, "/")
+		s = strings.TrimRight(s, "/")
+		return strings.ToLower(s)
 	}
-	return rows
+	d, r := norm(dir), norm(root)
+	if d == "" || r == "" {
+		return false
+	}
+	return d == r || strings.HasPrefix(d, r+"/")
 }
 
 // worktreeLabel resolves a stored path back to its display name for the
@@ -5315,6 +5547,8 @@ func (m *Model) onSetupCWDChanged(dir string) tea.Cmd {
 	m.worktreeNewBranch = ""
 	m.worktreeNaming = false
 	m.worktreeErr = ""
+	// The search belongs to the listing it narrowed, which is being dropped.
+	m.worktreeFilter = ""
 	m.worktreeCursor = 0
 	m.worktreeScroll = 0
 	m.worktrees = worktreeState{}

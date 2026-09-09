@@ -123,6 +123,10 @@ func worktreeListResponse(req ipc.WorktreeListReqPayload, fallback string) ipc.W
 	// are an extra check whose absence degrades to the behaviour that shipped
 	// before it existed — git's own refusal at create time.
 	branches, truncated, bErr := worktreeBranchesFn(ctx, dir)
+	// commitTimes joins each worktree to its branch's tip date below. Built
+	// HERE, on the machine whose git spelled both sides, rather than shipped
+	// as a second list for the client to match by name.
+	commitTimes := make(map[string]int64, len(branches))
 	if bErr != nil {
 		// %q, not %s: dir comes straight off the wire unvalidated and may carry
 		// ESC/CSI/OSC bytes and newlines, and quild.log is a plain file people
@@ -130,7 +134,13 @@ func worktreeListResponse(req ipc.WorktreeListReqPayload, fallback string) ipc.W
 		// sanitizeRemoteText polices on the render side (CWE-117).
 		log.Printf("worktree list: branches for %q: %v", dir, bErr)
 	} else {
-		out.Branches = branches
+		// The wire keeps a list of NAMES: that is what the client's collision
+		// check reads, and what an older client decodes.
+		out.Branches = make([]string, 0, len(branches))
+		for _, b := range branches {
+			out.Branches = append(out.Branches, b.Name)
+			commitTimes[b.Name] = b.CommitTime
+		}
 		out.BranchesTruncated = truncated
 	}
 
@@ -138,13 +148,14 @@ func worktreeListResponse(req ipc.WorktreeListReqPayload, fallback string) ipc.W
 	out.Worktrees = make([]ipc.WorktreeInfo, 0, len(list))
 	for _, w := range list {
 		out.Worktrees = append(out.Worktrees, ipc.WorktreeInfo{
-			Path:     w.Path,
-			Branch:   w.Branch,
-			Detached: w.Detached,
-			Main:     w.Main,
-			Locked:   w.Locked,
-			Prunable: w.Prunable,
-			Bare:     w.Bare,
+			Path:       w.Path,
+			Branch:     w.Branch,
+			Detached:   w.Detached,
+			Main:       w.Main,
+			Locked:     w.Locked,
+			Prunable:   w.Prunable,
+			Bare:       w.Bare,
+			CommitTime: commitTimes[w.Branch],
 		})
 	}
 

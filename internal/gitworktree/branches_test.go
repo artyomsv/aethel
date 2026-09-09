@@ -23,8 +23,67 @@ func TestBranches_ReturnsShortNames(t *testing.T) {
 		t.Error("truncated = true for a three-branch repository")
 	}
 	want := []string{"master", "feat/x", "fix/nationality-filter"}
+	if names := branchNames(got); !reflect.DeepEqual(names, want) {
+		t.Errorf("Branches() = %v, want %v", names, want)
+	}
+}
+
+// branchNames reduces a listing to the spelling the dialog compares against.
+func branchNames(list []Branch) []string {
+	var out []string
+	for _, b := range list {
+		out = append(out, b.Name)
+	}
+	return out
+}
+
+// The setup dialog orders worktrees by how recently their branch was committed
+// to, so every name carries its committer date — read from the SAME
+// for-each-ref call as the names, never one `git log` per branch.
+func TestBranches_CarriesTheCommitTime(t *testing.T) {
+	stubGit(t, "master\t1700000000\nfeat/x\t1725000000\n", nil)
+
+	got, _, err := Branches(context.Background(), "/repo")
+	if err != nil {
+		t.Fatalf("Branches: %v", err)
+	}
+	want := []Branch{{Name: "master", CommitTime: 1700000000}, {Name: "feat/x", CommitTime: 1725000000}}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Branches() = %v, want %v", got, want)
+		t.Errorf("Branches() = %+v, want %+v", got, want)
+	}
+}
+
+// A line with no date is still a branch. A ref under refs/heads that points at
+// a non-commit leaves the field empty, and the name must not be lost with it —
+// the collision check reads names; only the ordering degrades for that row.
+func TestBranches_MissingCommitTimeIsZeroNotAnError(t *testing.T) {
+	stubGit(t, "master\t1700000000\nodd\t\nplain\n", nil)
+
+	got, _, err := Branches(context.Background(), "/repo")
+	if err != nil {
+		t.Fatalf("Branches: %v", err)
+	}
+	want := []Branch{{Name: "master", CommitTime: 1700000000}, {Name: "odd"}, {Name: "plain"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Branches() = %+v, want %+v", got, want)
+	}
+}
+
+// One git call answers both questions. The format must request the committer
+// date, or every CommitTime is zero and the dialog silently falls back to
+// listing order.
+func TestBranches_AsksForTheCommitterDate(t *testing.T) {
+	calls := stubGit(t, "", nil)
+
+	if _, _, err := Branches(context.Background(), "/repo"); err != nil {
+		t.Fatalf("Branches: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("made %d git calls, want 1", len(*calls))
+	}
+	args := strings.Join((*calls)[0], " ")
+	if !strings.Contains(args, "committerdate:unix") {
+		t.Errorf("git args %q do not request the committer date", args)
 	}
 }
 
@@ -60,8 +119,8 @@ func TestBranches_DropsBlankLines(t *testing.T) {
 		t.Fatalf("Branches: %v", err)
 	}
 	want := []string{"master", "feat/x"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Branches() = %v, want %v", got, want)
+	if names := branchNames(got); !reflect.DeepEqual(names, want) {
+		t.Errorf("Branches() = %v, want %v", names, want)
 	}
 }
 

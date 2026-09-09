@@ -9,16 +9,59 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-func stubWorktreeBranches(t *testing.T, out []string, truncated bool, err error) *int {
+func stubWorktreeBranches(t *testing.T, out []gitworktree.Branch, truncated bool, err error) *int {
 	t.Helper()
 	var calls int
 	prev := worktreeBranchesFn
-	worktreeBranchesFn = func(ctx context.Context, dir string) ([]string, bool, error) {
+	worktreeBranchesFn = func(ctx context.Context, dir string) ([]gitworktree.Branch, bool, error) {
 		calls++
 		return out, truncated, err
 	}
 	t.Cleanup(func() { worktreeBranchesFn = prev })
 	return &calls
+}
+
+// named builds a dateless branch listing, for tests that care about names only.
+func named(names ...string) []gitworktree.Branch {
+	out := make([]gitworktree.Branch, 0, len(names))
+	for _, n := range names {
+		out = append(out, gitworktree.Branch{Name: n})
+	}
+	return out
+}
+
+// Each worktree carries its branch's last commit time, joined from the branch
+// listing, so the dialog can put the recently worked-on ones first. Joined
+// HERE rather than sent as a second list for the client to match, because the
+// join key — the branch name — is git's spelling on both sides only on this
+// machine. A detached checkout has no branch to look up and stays at zero.
+func TestWorktreeListResponse_CarriesEachWorktreesCommitTime(t *testing.T) {
+	stubWorktreeList(t, []gitworktree.Worktree{
+		{Path: "/projects/quil", Branch: "master", Main: true},
+		{Path: "/projects/quil-worktrees/feat-a", Branch: "feat/a"},
+		{Path: "/projects/quil-worktrees/detached", Detached: true},
+	}, nil)
+	stubWorktreeBranches(t, []gitworktree.Branch{
+		{Name: "master", CommitTime: 100},
+		{Name: "feat/a", CommitTime: 200},
+	}, false, nil)
+
+	got := worktreeListResponse(ipc.WorktreeListReqPayload{Path: "/projects/quil"}, "")
+	if len(got.Worktrees) != 3 {
+		t.Fatalf("Worktrees = %+v, want 3 entries", got.Worktrees)
+	}
+	if got.Worktrees[0].CommitTime != 100 || got.Worktrees[1].CommitTime != 200 {
+		t.Errorf("CommitTime = %d, %d, want 100, 200 (joined from the branch listing)",
+			got.Worktrees[0].CommitTime, got.Worktrees[1].CommitTime)
+	}
+	if got.Worktrees[2].CommitTime != 0 {
+		t.Errorf("detached CommitTime = %d, want 0", got.Worktrees[2].CommitTime)
+	}
+	// The wire's branch list stays a list of NAMES: the client's collision
+	// check reads it, and an older client decodes it.
+	if len(got.Branches) != 2 || got.Branches[1] != "feat/a" {
+		t.Errorf("Branches = %v, want the names alone", got.Branches)
+	}
 }
 
 // The dialog refuses a branch name git would refuse, and this listing is where
@@ -29,7 +72,7 @@ func TestWorktreeListResponse_CarriesTheRepositoryBranches(t *testing.T) {
 	stubWorktreeList(t, []gitworktree.Worktree{
 		{Path: "/projects/quil", Branch: "master", Main: true},
 	}, nil)
-	stubWorktreeBranches(t, []string{"master", "fix/nationality-filter"}, false, nil)
+	stubWorktreeBranches(t, named("master", "fix/nationality-filter"), false, nil)
 
 	got := worktreeListResponse(ipc.WorktreeListReqPayload{Path: "/projects/quil"}, "")
 	if len(got.Branches) != 2 || got.Branches[1] != "fix/nationality-filter" {
@@ -50,7 +93,7 @@ func TestWorktreeListResponse_ListsBranchesInTheScannedDirectory(t *testing.T) {
 	}, nil)
 	var sawDir string
 	prev := worktreeBranchesFn
-	worktreeBranchesFn = func(ctx context.Context, dir string) ([]string, bool, error) {
+	worktreeBranchesFn = func(ctx context.Context, dir string) ([]gitworktree.Branch, bool, error) {
 		sawDir = dir
 		return nil, false, nil
 	}
@@ -68,7 +111,7 @@ func TestWorktreeListResponse_ListsBranchesInTheScannedDirectory(t *testing.T) {
 // the single-flight and the permit budget exist to avoid.
 func TestWorktreeListResponse_SkipsTheBranchListingOutsideARepository(t *testing.T) {
 	stubWorktreeList(t, nil, nil)
-	calls := stubWorktreeBranches(t, []string{"master"}, false, nil)
+	calls := stubWorktreeBranches(t, named("master"), false, nil)
 
 	got := worktreeListResponse(ipc.WorktreeListReqPayload{Path: "/tmp"}, "")
 	if *calls != 0 {
@@ -108,7 +151,7 @@ func TestWorktreeListResponse_CarriesTheTruncationFlag(t *testing.T) {
 	stubWorktreeList(t, []gitworktree.Worktree{
 		{Path: "/projects/quil", Branch: "master", Main: true},
 	}, nil)
-	stubWorktreeBranches(t, []string{"master"}, true, nil)
+	stubWorktreeBranches(t, named("master"), true, nil)
 
 	got := worktreeListResponse(ipc.WorktreeListReqPayload{Path: "/projects/quil"}, "")
 	if !got.BranchesTruncated {
