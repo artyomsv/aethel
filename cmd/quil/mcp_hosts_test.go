@@ -282,6 +282,61 @@ func TestMCPRouter_SelfPaneComesFromEnv(t *testing.T) {
 	}
 }
 
+func TestMCPRouter_StatusReadsRetryAfterBackoff(t *testing.T) {
+	for _, read := range []string{"connected", "statuses"} {
+		t.Run(read, func(t *testing.T) {
+			remoteSock := echoServer(t, "pane-recovered")
+			var dials atomic.Int32
+			r := testRouter(t, func(config.Config, config.Destination) (*ipc.Client, error) {
+				if dials.Add(1) == 1 {
+					return nil, errors.New("runs an old version")
+				}
+				return ipc.NewClient(remoteSock)
+			}, "gpu")
+			r.backoff = time.Hour
+			h := r.hosts["gpu"]
+			if err := r.connect(h, true); err == nil {
+				t.Fatal("initial dial should fail")
+			}
+			r.noteHostError("gpu", errors.New("old request failed"))
+			readHosts := func() {
+				if read == "connected" {
+					r.connected()
+				} else {
+					r.statuses()
+				}
+			}
+			readHosts()
+			h.mu.Lock()
+			scheduled := h.retryScheduled || h.dialing
+			// Advance the failed attempt past the backoff without timing sleeps.
+			h.lastTry = time.Now().Add(-2 * r.backoff)
+			h.mu.Unlock()
+			if scheduled || dials.Load() != 1 {
+				t.Fatal("status read retried inside the backoff")
+			}
+			readHosts()
+			if !waitUntil(func() bool {
+				h.mu.Lock()
+				defer h.mu.Unlock()
+				return h.bridge != nil && !h.dialing && !h.retryScheduled
+			}, 2*time.Second) {
+				t.Fatal("status read did not reconnect the recovered host")
+			}
+			if dials.Load() != 2 {
+				t.Fatalf("dials = %d, want 2", dials.Load())
+			}
+			if st := r.statuses(); !st[0].Connected || st[0].Error != "" {
+				t.Fatalf("recovered status retains an error: %+v", st)
+			}
+			all := r.connected()
+			if len(all) != 2 || firstPaneID(t, all[1].bridge) != "pane-recovered" {
+				t.Fatalf("unscoped hosts after recovery: %+v", all)
+			}
+		})
+	}
+}
+
 func waitUntil(cond func() bool, within time.Duration) bool {
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
