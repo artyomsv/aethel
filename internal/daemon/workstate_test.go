@@ -45,7 +45,7 @@ func hasEventType(d *Daemon, paneID, typ string) bool {
 	return false
 }
 
-func waitFor(t *testing.T, cond func() bool, within time.Duration) bool {
+func waitUntilTrue(t *testing.T, cond func() bool, within time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
@@ -98,7 +98,7 @@ func TestEmitEvent_AgentIdleFiresAfterSettle(t *testing.T) {
 	if hasEventType(d, pane.ID, "agent_idle") {
 		t.Fatal("agent_idle queued on the raw Stop, before the settle window")
 	}
-	if !waitFor(t, func() bool { return hasEventType(d, pane.ID, "agent_idle") }, time.Second) {
+	if !waitUntilTrue(t, func() bool { return hasEventType(d, pane.ID, "agent_idle") }, time.Second) {
 		t.Fatal("agent_idle never queued after the settle window")
 	}
 }

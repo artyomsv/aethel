@@ -54,7 +54,7 @@ func agentPane(t *testing.T, d *Daemon, name string) (*Pane, *recordingLiveSessi
 
 func waitWrites(t *testing.T, s *recordingLiveSession, want string) {
 	t.Helper()
-	if !waitFor(t, func() bool { return strings.Contains(s.joined(), want) }, 2*time.Second) {
+	if !waitUntilTrue(t, func() bool { return strings.Contains(s.joined(), want) }, 2*time.Second) {
 		t.Fatalf("stdin never received %q; got %q", want, s.joined())
 	}
 }
@@ -118,7 +118,7 @@ func TestDelegateTask_CompletesOnSettledIdleNotRawStop(t *testing.T) {
 	if st := reg.info(task).State; st != "working" {
 		t.Fatalf("task ended on the raw falling edge, before the settle window: %s", st)
 	}
-	if !waitFor(t, func() bool { return reg.info(task).State == "done" }, 2*time.Second) {
+	if !waitUntilTrue(t, func() bool { return reg.info(task).State == "done" }, 2*time.Second) {
 		t.Fatalf("task never settled done: %+v", reg.info(task))
 	}
 	info := reg.info(task)
@@ -151,7 +151,7 @@ func TestDelegateTask_ResumeInsideSettleKeepsWorking(t *testing.T) {
 		t.Fatalf("task ended although the agent resumed inside the window: %s", st)
 	}
 	d.emitEvent(hookEvent(target, "hook.claude.Stop", nil))
-	if !waitFor(t, func() bool { return reg.info(task).State == "done" }, 2*time.Second) {
+	if !waitUntilTrue(t, func() bool { return reg.info(task).State == "done" }, 2*time.Second) {
 		t.Fatalf("task never finished after the second Stop: %+v", reg.info(task))
 	}
 }
@@ -162,7 +162,7 @@ func TestDelegateTask_ProcessExitFailsAndTimeoutTimesOut(t *testing.T) {
 	reg := d.tasksRegistry()
 
 	r1 := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: target.ID, Prompt: "a", TimeoutMs: 30})
-	if !waitFor(t, func() bool { return reg.info(reg.get(r1.Task.ID)).State == "timeout" }, 2*time.Second) {
+	if !waitUntilTrue(t, func() bool { return reg.info(reg.get(r1.Task.ID)).State == "timeout" }, 2*time.Second) {
 		t.Fatalf("timeout never fired: %+v", reg.info(reg.get(r1.Task.ID)))
 	}
 	r2 := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: target.ID, Prompt: "b"})
@@ -210,7 +210,7 @@ func TestDelegateTask_NotifyBackWaitsForRequesterIdle(t *testing.T) {
 
 	d.emitEvent(hookEvent(to, "hook.claude.UserPromptSubmit", nil))
 	d.emitEvent(hookEvent(to, "hook.claude.Stop", nil))
-	if !waitFor(t, func() bool { return reg.info(task).State == "done" }, 2*time.Second) {
+	if !waitUntilTrue(t, func() bool { return reg.info(task).State == "done" }, 2*time.Second) {
 		t.Fatalf("task never done: %+v", reg.info(task))
 	}
 	time.Sleep(60 * time.Millisecond)
@@ -224,7 +224,7 @@ func TestDelegateTask_NotifyBackWaitsForRequesterIdle(t *testing.T) {
 	d.emitEvent(hookEvent(from, "hook.claude.Stop", nil))
 	waitWrites(t, fromSess, "[quil task "+task.id+"] pane "+to.ID+" (worker) done.")
 	waitWrites(t, fromSess, "get_task with task_id="+task.id)
-	if !waitFor(t, func() bool { return reg.info(task).Notified }, time.Second) {
+	if !waitUntilTrue(t, func() bool { return reg.info(task).Notified }, time.Second) {
 		t.Fatal("Notified never reported")
 	}
 }
