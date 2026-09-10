@@ -198,7 +198,12 @@ func registerSendToPaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 			return textResult(fmt.Sprintf("Pasted %d bytes to %s", len(data), input.PaneID)), nil, nil
 		}
 		if enter {
-			data += "\n"
+			// CR, the byte Enter produces, not LF. LF executed in a Unix
+			// shell only because the tty maps it too; in PowerShell under
+			// ConPTY it is echoed and sits at the prompt, so every
+			// send_to_pane on Windows typed the command and never ran it
+			// (measured 2026-09-10). send_keys "enter" has always sent CR.
+			data += "\r"
 		}
 		if err := sendPaneInput(bridge, input.PaneID, []byte(data)); err != nil {
 			return nil, nil, fmt.Errorf("send_to_pane: %w", err)

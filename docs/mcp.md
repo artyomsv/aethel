@@ -257,7 +257,7 @@ Before: pane A "asked" pane B for work by simulating keystrokes and then polling
 - `failed` — the target's process exited.
 - `timeout` — you set one and it passed.
 
-A terminal target is `done` when its shell reports the command finished (OSC 133, which Quil's shell integration provides).
+A terminal target is `done` when its shell reports the command finished (OSC 133 `D`, which Quil's shell integration emits only after a command actually ran — never for the startup prompt or a bare Enter). The command is sent with a trailing CR, the byte Enter produces; LF is echoed but not executed by PowerShell under ConPTY.
 
 **Hearing about it.** Three ways, pick by what the requester is doing meanwhile:
 

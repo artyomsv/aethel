@@ -23,3 +23,9 @@ headline: MCP gains projects, remote hosts and pane-to-pane tasks
   own prompt once it is idle, so an orchestrator can carry on and react as results land.
   `send_to_pane` gains `paste` for multi-line prompts; a queued `agent_idle` event marks
   every settled turn.
+- **`send_to_pane` now executes commands in PowerShell panes.** It appended LF, which
+  PowerShell under ConPTY echoes but does not run; it now sends CR, the byte Enter
+  produces, which every shell accepts. The shell integration also stops reporting a
+  "Command completed" for the first prompt after startup (and for a bare Enter): OSC 133
+  `D` is emitted only after a command actually ran, which is what lets a delegated task
+  complete on the right prompt.

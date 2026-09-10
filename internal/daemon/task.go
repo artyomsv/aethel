@@ -164,11 +164,17 @@ func (d *Daemon) isAgentPane(pane *Pane) bool {
 
 // deliverPrompt hands text to a pane's stdin the way a human would: an AI
 // pane gets a bracketed paste (so embedded newlines stay inside the prompt)
-// and, after a short settle, a CR; a terminal gets the text and a newline.
+// and, after a short settle, a CR; a terminal gets the text and a CR.
+//
+// CR, never LF: Enter on a keyboard is CR, and that is what every shell's
+// line editor accepts. A Unix tty in cooked mode maps CR to NL (ICRNL), so
+// CR works there too — but LF does NOT execute in PowerShell under ConPTY
+// (measured 2026-09-10: the line is echoed and sits at the prompt), which is
+// how a delegated `echo` printed its own text and never ran.
 // Delivery means QUEUED to the pane's writer, as with every other input.
 func (d *Daemon) deliverPrompt(pane *Pane, text string, agent bool) bool {
 	if !agent {
-		return pane.EnqueueInput([]byte(text + "\n"))
+		return pane.EnqueueInput([]byte(text + "\r"))
 	}
 	if !pane.EnqueueInput([]byte("\x1b[200~" + text + "\x1b[201~")) {
 		return false

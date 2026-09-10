@@ -180,7 +180,9 @@ func TestSendToPane_PasteWrapsAndThenEnters(t *testing.T) {
 	if _, err := callTool(t, session, "send_to_pane", map[string]any{"pane_id": "pane-local", "input": "ls"}); err != nil {
 		t.Fatalf("send_to_pane: %v", err)
 	}
-	if got := local.inputs(); got[len(got)-1] != "ls\n" {
+	// CR, the byte Enter produces: LF is echoed but not executed by
+	// PowerShell under ConPTY.
+	if got := local.inputs(); got[len(got)-1] != "ls\r" {
 		t.Fatalf("plain send = %q", got[len(got)-1])
 	}
 }

@@ -183,7 +183,8 @@ func TestDelegateTask_TerminalTargetCompletesOnCommandComplete(t *testing.T) {
 	}
 	reg := d.tasksRegistry()
 	resp := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: pane.ID, Prompt: "make test"})
-	waitWrites(t, sess, "make test\n")
+	// CR, not LF: LF is echoed but not executed by PowerShell under ConPTY.
+	waitWrites(t, sess, "make test\r")
 	if strings.Contains(sess.joined(), "\x1b[200~") {
 		t.Fatalf("a terminal got a bracketed paste: %q", sess.joined())
 	}
