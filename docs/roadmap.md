@@ -717,6 +717,8 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 > These are the 20 most interesting capabilities they ship that Quil lacks or
 > only partially supports, grouped into candidate milestones. Several extend
 > work already planned above — those are cross-referenced, not duplicated.
+> Ghostty is covered in the same document under *The Ghostty axis*, with its own
+> shortlist (G1–G7); it is not a rival, so its items are not ranked in here.
 
 Both competitors are agent-orchestrators like Quil, but each is broader in one
 axis: herdr on **agent breadth + scriptable extensibility**, AoE on **web/remote

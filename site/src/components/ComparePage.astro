@@ -37,7 +37,9 @@ const seo = {
   // it twice and spend ~7 of the ~60 usable characters doing it.
   seoTitle: info.seoTitle,
   brandSuffix: false,
-  description: `Looking for ${article} ${info.name} alternative? Quil is a reboot-proof terminal multiplexer with AI session resume, typed panes, and an MCP server — see how it compares to ${info.name}.`,
+  description:
+    info.seoDescription ??
+    `Looking for ${article} ${info.name} alternative? Quil is a reboot-proof terminal multiplexer with AI session resume, typed panes, and an MCP server — see how it compares to ${info.name}.`,
   path: `/vs/${slug}/`,
   ogImage: `/og/vs-${slug}.png`,
   keywords: [

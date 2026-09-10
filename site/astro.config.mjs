@@ -95,6 +95,7 @@ const routeToFile = {
   "/vs/screen": "src/pages/vs/screen.astro",
   "/vs/herdr": "src/pages/vs/herdr.astro",
   "/vs/aoe": "src/pages/vs/aoe.astro",
+  "/vs/ghostty": "src/pages/vs/ghostty.astro",
 };
 
 export default defineConfig({
