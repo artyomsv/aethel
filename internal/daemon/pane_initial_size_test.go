@@ -9,13 +9,18 @@ import (
 
 func TestMCPCreatePane_StartsAtKnownSize(t *testing.T) {
 	for _, tc := range []struct {
-		name            string
-		attach, sibling bool
-		want            terminalSize
+		name          string
+		attach        terminalSize
+		sibling       bool
+		want, wantTab terminalSize
 	}{
-		{"no client", false, false, terminalSize{80, 24}},
-		{"attached client", true, false, terminalSize{178, 58}},
-		{"sibling wins", true, true, terminalSize{176, 54}},
+		{"no client", terminalSize{}, false, terminalSize{80, 24}, terminalSize{80, 24}},
+		{"attached client", terminalSize{178, 58}, false, terminalSize{178, 58}, terminalSize{178, 58}},
+		{"degenerate attach", terminalSize{1, 1}, false, terminalSize{80, 24}, terminalSize{80, 24}},
+		{"narrow attach", terminalSize{1, 58}, false, terminalSize{1, 58}, terminalSize{1, 58}},
+		{"short attach", terminalSize{178, 1}, false, terminalSize{178, 1}, terminalSize{178, 1}},
+		{"sibling wins", terminalSize{178, 58}, true, terminalSize{176, 54}, terminalSize{178, 58}},
+		{"sibling wins over degenerate attach", terminalSize{1, 1}, true, terminalSize{176, 54}, terminalSize{80, 24}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, client := mcpTestDaemon(t)
@@ -29,8 +34,8 @@ func TestMCPCreatePane_StartsAtKnownSize(t *testing.T) {
 				p.Cols, p.Rows = 176, 54
 				p.PluginMu.Unlock()
 			}
-			if tc.attach {
-				sendNoID(t, client, ipc.MsgAttach, ipc.AttachPayload{Cols: 178, Rows: 58})
+			if tc.attach != (terminalSize{}) {
+				sendNoID(t, client, ipc.MsgAttach, ipc.AttachPayload{Cols: tc.attach.cols, Rows: tc.attach.rows})
 				roundTrip(t, client, ipc.MsgListTabsReq, ipc.MsgListTabsResp, nil)
 			}
 			prev := newSessionFn
@@ -52,18 +57,14 @@ func TestMCPCreatePane_StartsAtKnownSize(t *testing.T) {
 			if c, r := paneSize(p); c != tc.want.cols || r != tc.want.rows {
 				t.Fatalf("reported size %dx%d", c, r)
 			}
-			// A new tab has no sibling; it must inherit the attached size too.
+			// A new tab has no sibling; it must use a valid attach size or defaults.
 			tabResp := decodeInto[ipc.CreateTabRespPayload](t, roundTrip(t, client, ipc.MsgCreateTabReq, ipc.MsgCreateTabResp,
 				ipc.CreateTabReqPayload{Name: "another hidden tab"}))
 			if tabResp.Error != "" {
 				t.Fatal(tabResp.Error)
 			}
-			wantTab := terminalSize{80, 24}
-			if tc.attach {
-				wantTab = terminalSize{178, 58}
-			}
-			if got := <-sizes; got != wantTab {
-				t.Fatalf("new tab PTY %+v, want %+v", got, wantTab)
+			if got := <-sizes; got != tc.wantTab {
+				t.Fatalf("new tab PTY %+v, want %+v", got, tc.wantTab)
 			}
 		})
 	}

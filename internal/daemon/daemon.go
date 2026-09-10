@@ -1296,7 +1296,7 @@ func newRestoredPTY(cols, rows int) apty.Session {
 // paneVTSize floors at 1 precisely so those keep working. Collapsing to 1x1 in
 // both takes a terminal with no usable area at all.
 //
-// Two callers, and the restore one is not redundant: a workspace persisted
+// The restore guard is not redundant: a workspace persisted
 // while the bug was live holds `"cols": 1, "rows": 1`, and newRestoredPTY would
 // otherwise boot that pane's child at one column on every daemon start
 // thereafter — apty.NewWithSize floors only NON-POSITIVE values, so 1x1

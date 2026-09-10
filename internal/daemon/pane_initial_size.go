@@ -9,7 +9,9 @@ type terminalSize struct{ cols, rows int }
 // build its first screen for the default 80x24 terminal.
 func (d *Daemon) newPaneSession(pane *Pane) apty.Session {
 	cols, rows := 80, 24
-	if size := d.clientSize.Load(); size != nil {
+	// Older or console-less clients can attach at 1x1. Do not inherit that
+	// unusable geometry and permanently reflow the child's first screen.
+	if size := d.clientSize.Load(); size != nil && !degenerateSize(size.cols, size.rows) {
 		cols, rows = size.cols, size.rows
 	}
 	for _, sibling := range d.session.Panes(pane.TabID) {
