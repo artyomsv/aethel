@@ -137,6 +137,35 @@ func TestWorkLedger_ProcessExitAbortsWithoutCounting(t *testing.T) {
 	}
 }
 
+// An abort leaves the level at WorkIdle, so the level cannot be the whole
+// answer: Aborted() is what separates a pane that died from one that finished.
+// It is sticky until the pane demonstrably works again.
+func TestWorkLedger_AbortedOutlivesTheEventThatCausedIt(t *testing.T) {
+	var l WorkLedger
+	l.Apply("hook.claude.UserPromptSubmit", nil, time.Now())
+	if l.Aborted() {
+		t.Fatal("a working pane reports aborted")
+	}
+	l.Apply("process_exit", nil, time.Now())
+	if l.State() != WorkIdle {
+		t.Fatalf("state after exit = %q", l.State())
+	}
+	if !l.Aborted() {
+		t.Fatal("a crashed pane is indistinguishable from a settled one")
+	}
+	// A stop edge is not evidence of a live child: a dead pane's last queued
+	// Stop must not erase the fact.
+	l.Apply("hook.claude.Stop", nil, time.Now())
+	if !l.Aborted() {
+		t.Fatal("a Stop cleared the abort")
+	}
+	// Working again does clear it.
+	l.Apply("hook.claude.UserPromptSubmit", nil, time.Now())
+	if l.Aborted() {
+		t.Fatal("a pane that started a new turn still reports aborted")
+	}
+}
+
 func TestWorkLedger_SessionEndClearsLedgerAndOverflow(t *testing.T) {
 	var l WorkLedger
 	l.Apply("hook.claude.UserPromptSubmit", nil, time.Now())

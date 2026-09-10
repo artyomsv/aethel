@@ -58,6 +58,7 @@ type WorkLedger struct {
 	blockedSince     time.Time
 	blockedReason    string
 	lastIdleAt       time.Time
+	aborted          bool
 }
 
 // State returns the current level. Precedence: blocked > working > idle,
@@ -80,6 +81,24 @@ func (l *WorkLedger) BlockedReason() string { return l.blockedReason }
 
 // LastIdleAt is when the pane last fell idle (zero if never).
 func (l *WorkLedger) LastIdleAt() time.Time { return l.lastIdleAt }
+
+// Aborted reports that the last thing this pane did was DIE — the process
+// exited and no start edge has been seen since.
+//
+// State() cannot answer that question, and the shape of the ledger is why: an
+// abort clears the turn, the subagents and the park, so the level it leaves
+// behind is exactly WorkIdle, and LastIdleAt is stamped as for any other
+// falling edge. A consumer asking "is this pane free" would therefore read a
+// crashed pane as a settled one — which for anything that DELIVERS on idle
+// (the task completion callback, the notify-back) is the difference between
+// reporting a crash and reporting a completed turn. Transition.Aborted says
+// the same thing about ONE event; this says it about the pane's current
+// standing, which is what a subscriber arriving after that event needs.
+//
+// Sticky until the pane demonstrably works again: only a start edge clears it,
+// because only that is evidence of a live child. A stop edge is not — a dead
+// pane's last queued Stop must not erase the fact.
+func (l *WorkLedger) Aborted() bool { return l.aborted }
 
 func (l *WorkLedger) working() bool {
 	return l.turnActive || len(l.subagents) > 0 || l.subagentOverflow
@@ -104,6 +123,9 @@ func (l *WorkLedger) Apply(eventType string, data map[string]string, now time.Ti
 		l.turnActive = true
 		l.blockedSince = time.Time{}
 		l.blockedReason = ""
+		// The pane is working, so whatever exited before it is history — this
+		// is the one edge that proves a live child. See Aborted().
+		l.aborted = false
 	case WorkEventSubagentStart:
 		agentType := data["agent_type"]
 		if agentType == "" {
@@ -162,6 +184,7 @@ func (l *WorkLedger) Apply(eventType string, data map[string]string, now time.Ti
 		l.blockedSince = time.Time{}
 		l.blockedReason = ""
 		abort = true
+		l.aborted = true
 	}
 
 	tr := Transition{Was: was, Now: l.State(), Aborted: abort}

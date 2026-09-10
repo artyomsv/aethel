@@ -350,6 +350,38 @@ func TestDelegateTask_ProcessExitBeatsAPendingCompletion(t *testing.T) {
 	}
 }
 
+// The abort must also beat a completion callback that registers AFTER it.
+//
+// emitEvent applies an event to the ledger and observes it for tasks in two
+// steps, so two goroutines emitting concurrently interleave as apply(Stop),
+// apply(exit), observe(Stop), observe(exit) — the exact order driven here. The
+// abort drains the subscriber list before the Stop's callback joins it, and
+// the ledger then reports plain WorkIdle, so the late callback used to run
+// immediately as a completion and mark a crashed pane done.
+func TestDelegateTask_AbortBeatsACompletionRegisteredAfterIt(t *testing.T) {
+	d := newTestDaemon(t)
+	shortenIdleSettle(t, 5*time.Second)
+	target, _ := agentPane(t, d, "worker")
+	reg := d.tasksRegistry()
+
+	resp := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: target.ID, Prompt: "do it"})
+	if resp.Error != "" {
+		t.Fatalf("delegate: %+v", resp)
+	}
+	d.emitEvent(hookEvent(target, "hook.claude.UserPromptSubmit", nil))
+
+	stop := hookEvent(target, "hook.claude.Stop", nil)
+	exit := hookEvent(target, "process_exit", map[string]string{"exit_code": "1"})
+	trStop := d.applyWorkEvent(target, stop)
+	trExit := d.applyWorkEvent(target, exit)
+	d.taskObserve(target, stop, trStop)
+	d.taskObserve(target, exit, trExit)
+
+	if got := reg.info(reg.get(resp.Task.ID)); got.State != "failed" {
+		t.Fatalf("a crashed pane reported %q: %+v", got.State, got)
+	}
+}
+
 // Destroying a pane ends the tasks aimed at it. Nothing else can: the state
 // machine only advances on events for a pane the session still holds, and
 // every destroy path removes it from the session first — so the task sat at
@@ -380,6 +412,60 @@ func TestDelegateTask_DestroyingTheTargetFailsItsTasks(t *testing.T) {
 	case <-reg.get(resp.Task.ID).done:
 	default:
 		t.Fatal("a waiter would still be blocked")
+	}
+}
+
+// The timeout timer is published under the registry lock. The prompt is queued
+// BEFORE the timer is armed, so a shell that answers at once has finishTask
+// reading and stopping t.timer while delegateTask assigns it. Run with -race:
+// the two accesses have no happens-before edge without the fix.
+func TestDelegateTask_TimeoutTimerIsPublishedUnderTheLock(t *testing.T) {
+	d := newTestDaemon(t)
+	reg := d.tasksRegistry()
+
+	for i := 0; i < 20; i++ {
+		tab := d.session.CreateTab("t")
+		pane, err := d.session.CreatePane(tab.ID, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.spawnPane(pane, newRecordingLiveSession(), false); err != nil {
+			t.Fatalf("spawnPane: %v", err)
+		}
+		// A terminal target completes on command_complete, which needs no
+		// ledger edge — so the completion can land in the window between the
+		// prompt being queued and the timer being armed.
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					d.emitEvent(hookEvent(pane, "command_complete", map[string]string{"exit_code": "0"}))
+				}
+			}
+		}()
+		resp := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: pane.ID, Prompt: "make test", TimeoutMs: 20})
+		close(stop)
+		wg.Wait()
+		if resp.Error != "" {
+			t.Fatalf("delegate: %+v", resp)
+		}
+		// A task the shell already finished must never be flipped to timeout by
+		// a timer armed after the fact.
+		task := reg.get(resp.Task.ID)
+		if !waitUntilTrue(t, func() bool { return taskState(reg.info(task).State).terminal() }, 2*time.Second) {
+			t.Fatalf("run %d: task never ended: %+v", i, reg.info(task))
+		}
+		first := reg.info(task).State
+		time.Sleep(40 * time.Millisecond) // outlive the timeout it was given
+		if got := reg.info(task).State; got != first {
+			t.Fatalf("run %d: terminal state %q was overwritten with %q", i, first, got)
+		}
 	}
 }
 

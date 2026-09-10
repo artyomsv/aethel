@@ -155,6 +155,23 @@ func (r *taskRegistry) advance(t *task, from, to taskState, started time.Time) b
 	return true
 }
 
+// arm publishes t's timeout timer, or declines to start one when the task has
+// already ended.
+//
+// Under the lock like every other field of t: the prompt is queued BEFORE this
+// runs, so a shell that answers at once — command_complete, or a process exit —
+// has finishTask reading and stopping t.timer on another goroutine while this
+// assignment lands. Unsynchronised, that is a data race, and the completion
+// then stops a nil pointer while the timer it could not see stays scheduled.
+func (r *taskRegistry) arm(t *task, after time.Duration, fire func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t.state.terminal() {
+		return
+	}
+	t.timer = time.AfterFunc(after, fire)
+}
+
 // liveTasksTo returns every open task aimed at paneID.
 func (r *taskRegistry) liveTasksTo(paneID string) []*task {
 	r.mu.Lock()
@@ -299,7 +316,7 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 	}
 	if req.TimeoutMs > 0 {
 		id := t.id
-		t.timer = time.AfterFunc(time.Duration(req.TimeoutMs)*time.Millisecond, func() {
+		reg.arm(t, time.Duration(req.TimeoutMs)*time.Millisecond, func() {
 			if tt := reg.get(id); tt != nil {
 				d.finishTask(tt, taskTimeout, "")
 			}

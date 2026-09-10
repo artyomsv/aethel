@@ -79,9 +79,22 @@ func (d *Daemon) settleIdle(paneID string) {
 		pane.workMu.Unlock()
 		return
 	}
+	// An abort leaves the ledger reporting idle, so this window can close on a
+	// pane whose process has since exited (the abort stops the timer, but one
+	// already firing is past that). The subscribers still RUN — dropping them
+	// strands whoever is waiting — but they are told the truth, and no
+	// "Turn finished" is announced for a pane that died.
+	aborted := pane.Work.Aborted()
 	subs := pane.idleSubs
 	pane.idleSubs = nil
 	pane.workMu.Unlock()
+
+	if aborted {
+		for _, fn := range subs {
+			fn(true)
+		}
+		return
+	}
 
 	pane.PluginMu.Lock()
 	name := pane.Name
@@ -120,6 +133,19 @@ type idleSub func(aborted bool)
 // subscriber on such a pane waits for a real idle edge instead, and is simply
 // never delivered if none ever comes: the notify-back needs hook integration,
 // where the task_done event does not.
+//
+// An ABORTED pane is not idle either, and the abort flag in applyWorkEvent
+// cannot cover this on its own: it reaches the subscribers ALREADY in the
+// list, and a subscriber can arrive afterwards. emitEvent applies the event to
+// the ledger and observes it for tasks in two separate steps, so two
+// goroutines emitting concurrently interleave as apply(Stop), apply(exit),
+// observe(Stop) — and by the time that Stop registers its completion callback,
+// the abort has drained the list, cleared the settle timer, and left the
+// ledger reporting WorkIdle. The subscriber then ran immediately, as a
+// completion, and reported a crashed pane as done. Ledger.Aborted() is the
+// pane's standing answer rather than one event's, so a late arrival gets the
+// same truth an early one did. It runs NOW rather than waiting, because
+// nothing will ever fire for a dead pane again.
 func (d *Daemon) onPaneIdle(paneID string, fn idleSub) bool {
 	pane := d.session.Pane(paneID)
 	if pane == nil {
@@ -127,7 +153,13 @@ func (d *Daemon) onPaneIdle(paneID string, fn idleSub) bool {
 	}
 	pane.workMu.Lock()
 	state := pane.Work.State()
+	aborted := pane.Work.Aborted()
 	settling := pane.idleTimer != nil
+	if aborted {
+		pane.workMu.Unlock()
+		fn(true)
+		return true
+	}
 	if state == hookevents.WorkIdle && !settling {
 		pane.workMu.Unlock()
 		fn(false)
