@@ -75,7 +75,7 @@ a **first-class MCP server**, and two unique niceties (**pane notes**,
 
 ## Capability matrix
 
-Legend: ✅ full · 🟡 partial/different · ❌ absent
+Legend: ✅ full · 🟡 partial/different · ❌ absent · ❓ not re-verified
 
 ### Core multiplexer
 
@@ -83,7 +83,7 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent
 |---|:---:|:---:|:---:|
 | Panes / splits (mixed H/V) | ✅ | 🟡 (tmux) | ✅ |
 | Tabs | ✅ | 🟡 (tmux windows) | ✅ |
-| Workspaces (top-level project container) | ✅ | ✅ (profiles/groups) | ✅ (projects, v1.47 — and they may span hosts) |
+| Workspaces (top-level project container) | ✅ | ✅ (profiles/groups) | ✅ (projects, v1.47 — each project is host-scoped; see the multi-host row) |
 | Zoom / focus single pane | ✅ | ✅ | ✅ (Ctrl+E) |
 | Move pane across tabs without killing process | ✅ | 🟡 | ❌ |
 | Mouse-native (drag borders, click, reorder) | ✅ | 🟡 (web) | ✅ |
@@ -117,8 +117,9 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent
 | Status rollup (blocked/working/done/idle) | ✅ | ✅ | ✅ |
 | Screen-content heuristic detection (no hooks) | ✅ (TOML manifests over screen + title + OSC progress) | ✅ | 🟡 (idle patterns only) |
 | Hook/integration-based state | ✅ (authoritative; suppresses the manifest) | ✅ | ✅ (claude, opencode, codex) |
-| Runtime-updatable detection manifests | ✅ (auto remote fetch from herdr.dev, local override, `server update-agent-manifests`) | ❌ | ❌ |
-| Brand-new agent addable without a new binary | ❌ (process detection is compiled in) | ❌ | ❌ |
+| Detection rules editable on disk, no rebuild | ✅ (`~/.config/herdr/agent-detection/<agent>.toml` overrides the bundled manifest) | ❓ | ✅ (embedded defaults are *copied out* to the plugins dir by `internal/plugin/defaults.go`; `LoadFromDir` reads any `.toml` there, and the registry hot-reloads) |
+| Detection rules that **refresh themselves from a URL** | ✅ (auto fetch from herdr.dev, `server update-agent-manifests`) | ❌ | ❌ **— this, and only this, is the real gap** |
+| Brand-new agent addable without a new binary | ❌ (process detection is compiled in) | ❓ | ✅ (a plugin TOML defines the spawn command and its idle handlers; no Go change) |
 | Detection debugger (`agent explain`) | ✅ | ❌ | ❌ |
 | Model/context-token status display | 🟡 | ✅ | ✅ |
 | AI agents with detection | 24+ | ~13 | **3** |
@@ -132,7 +133,7 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent
 | Feature | herdr | aoe | Quil |
 |---|:---:|:---:|:---:|
 | Worktree-per-session (auto branch + worktree) | ✅ | ✅ | ✅ (tab opens onto a new worktree; close offers removal) |
-| Multi-repo workspace (one session, N repos) | ❌ | ✅ | ✅ (projects, v1.47 — and they may span hosts) |
+| Multi-repo workspace (one session, N repos) | ❌ | ✅ | ✅ (projects, v1.47 — each owns one root dir; a client shows projects from several hosts, but one project belongs to exactly one host) |
 | Built-in diff viewer (review + edit) | ❌ | ✅ | ❌ |
 | Inline diff comments → prompt to agent | ❌ | ✅ | ❌ |
 | Lazygit / git-tool integration | 🟡 (plugin) | ✅ (tool sessions) | ✅ (Alt+G overlay) |
@@ -174,7 +175,8 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent
 | Profiles (per-project workspaces) | 🟡 | ✅ | ❌ |
 | Auto-stop idle sessions | 🟡 | ✅ | ❌ |
 | Groups / favorites / snooze / archive / trash | 🟡 | ✅ | ❌ |
-| Self-update command | ✅ | ✅ | ✅ (`internal/update` — check, stage, rename-aside swap + rollback) |
+| Self-update (in-app) | ✅ | ✅ | ✅ (check + stage in the background, prompt in the TUI, rename-aside swap with rollback applied at next launch) |
+| Self-update as a *CLI subcommand* | ✅ | ✅ | ❌ (there is no `quil update`; the CLI switch is daemon/mcp/notify/sandbox/version/remote/restart/status) |
 | Pane notes (per-pane editor) | ❌ | ❌ | ✅ |
 | Memory reporting (heap + PTY RSS) | ❌ | ❌ | ✅ |
 | Windows clipboard image-paste proxy | ⚠️ unverified | ❌ | ✅ |
@@ -234,7 +236,7 @@ hard part built and is missing only the seam.
 
 | # | Borrow | Why it fits Quil specifically | Effort |
 |---|---|---|:---:|
-| A1 | **Detection manifests that update themselves from a URL** | This is the mechanism behind gap #2, and it is the half that matters. herdr's agent list grows without a release because the TOML lives outside the binary, auto-refreshes from herdr.dev, and accepts a local override at `~/.config/herdr/agent-detection/<agent>.toml`. Quil already parses per-agent TOML (`internal/plugin/defaults/*.toml`, `[[idle_handlers]]`) — the gap is that it is `go:embed`-ed. Ship the same files over HTTP with a local override and Quil's agent breadth stops being a release-cadence problem. Note the honest limit worth copying too: herdr still needs a binary release to *process-detect* a brand-new agent, so manifests widen state detection, not the agent list itself. | M |
+| A1 | **Detection manifests that refresh themselves from a URL** | Narrower than it first looks, and worth stating precisely so it is not over-built. Quil is *not* missing on-disk customisation: `internal/plugin/defaults.go` copies the embedded TOML out to the plugins dir, `Registry.LoadFromDir` reads any `.toml` sitting there, and the registry hot-reloads — so a user can already override an idle handler, or add a brand-new agent as a pane type, with no rebuild. herdr cannot do that last part at all (its process detection is compiled in). **The one thing herdr has that Quil does not is self-refresh**: its manifests auto-fetch from herdr.dev, so an agent whose prompt string changed is fixed for every user without anyone editing a file. That is the whole gap — a signed fetch into the plugins dir plus a "don't clobber my edits" rule, not a new plugin format. | S–M |
 | A2 | **`pane.read` with a `source` selector, incl. `detection`** | Quil splits this across `read_pane_output` (ANSI-stripped scrollback) and `screenshot_pane` (VT-emulated screen). herdr has one call with `visible` / `recent` / `recent-unwrapped` / `detection`. Two parts are worth taking: `recent-unwrapped`, which pulls real scrollback out of a full-screen agent that owns the alternate screen — exactly the case Quil's `screenshot_pane` handles worst — and `detection`, which returns *why* the state was classified as it was. | S–M |
 | A3 | **`agent explain` — a detection debugger** | A runner-up in July; A1 promotes it to a prerequisite. The moment detection rules are data the user can override, "it says idle and it is not" becomes unanswerable without a command that prints which manifest, which pattern and which screen rows produced the verdict. Do not ship A1 without it. | S |
 | A4 | **Sidebar row templating + agent-pushed metadata** | herdr's sidebar rows are token templates (`state_icon`, `workspace`, `agent`, custom `$name`), with `rows_by_agent` overrides and conditional rules on text match or numeric compare — and agents fill those custom tokens by calling `pane.report_metadata` with display labels and token maps. Quil's sidebar is fixed, but Quil has the better delivery path: an MCP `report_pane_metadata` tool lets an agent label its own pane ("reviewing PR #213", "82% context") with no plugin at all. Highest ratio of visible payoff to code in this table. | S–M |
