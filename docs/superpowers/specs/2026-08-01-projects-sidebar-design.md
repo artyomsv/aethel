@@ -268,7 +268,7 @@ cadence, a config gate, and its own timeout budget.
 
 ### 7. MCP scoping
 
-Scope is derived from the bridge's parent pane → its tab → its project. All 18 tools
+Scope is derived from the bridge's parent pane → its tab → its project. All MCP tools
 filter to the caller's project by default.
 
 This is a **behavior change to shipped tools**, so `scope: "all"` is an explicit

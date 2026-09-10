@@ -52,10 +52,11 @@ const (
 )
 
 type PaneModel struct {
-	ID            string
-	Type          string // plugin type ("terminal", "claude-code", etc.)
-	WideCanvas    bool   // [display] wide_canvas: VT/PTY stay window-sized; small rects render a wrapped preview
-	MinNativeCols int    // [display] min_native_cols: inner-width threshold for native (non-canvas) rendering; 0 = default 80
+	outputGeneration uint64
+	ID               string
+	Type             string // plugin type ("terminal", "claude-code", etc.)
+	WideCanvas       bool   // [display] wide_canvas: VT/PTY stay window-sized; small rects render a wrapped preview
+	MinNativeCols    int    // [display] min_native_cols: inner-width threshold for native (non-canvas) rendering; 0 = default 80
 	// RestoresViaSession is the plugin capability resolved by Model (which owns
 	// the registry) and copied in by syncPaneMeta. PaneModel.View has no
 	// registry access, so it is resolved once per broadcast rather than looked
@@ -598,6 +599,7 @@ func (p *PaneModel) ResetVT() {
 	w, h := p.vt.Width(), p.vt.Height()
 	p.installVT(p.newVTEmulator(w, h))
 	p.rawBuf.Reset()
+	p.oscFilter = oscTitleFilter{}
 	p.cursorVisible = true
 	// Fresh emulator starts with every mode off; clear the mirrored flags so
 	// a wheel event isn't forwarded — and a paste isn't bracketed — until the
@@ -605,6 +607,25 @@ func (p *PaneModel) ResetVT() {
 	p.mouseX10, p.mouseNormal, p.mouseButton, p.mouseAny, p.mouseSGR = false, false, false, false, false
 	p.bracketedPaste, p.bracketedPasteSeen = false, false
 	p.contentGen++
+}
+
+// acceptOutputGeneration resets at the first output from a replacement child,
+// before any of its startup bytes reach the old emulator's cursor or modes.
+// Old frames may still be queued when a process is replaced; ignore them.
+func (p *PaneModel) acceptOutputGeneration(generation uint64) bool {
+	if generation == 0 {
+		return true
+	} // older daemon or ghost replay
+	if generation < p.outputGeneration {
+		return false
+	}
+	if p.outputGeneration != 0 && generation != p.outputGeneration {
+		p.resetForReattach()
+		p.ghost = false
+		p.reattachReset = false
+	}
+	p.outputGeneration = generation
+	return true
 }
 
 func (p *PaneModel) ResizeVT(cols, rows int) {

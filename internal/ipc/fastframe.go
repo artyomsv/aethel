@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"strconv"
 )
 
 // Fast paths for the IPC hot path.
@@ -185,7 +186,7 @@ func fastString(b []byte) (string, []byte, bool) {
 //
 // This is what makes slicing the payload without parsing it safe, and it works
 // ONLY because the caller has already established the type is pane_output. That
-// payload is flat — {"pane_id":"…","data":"…"[,"ghost":true]} — and neither
+// payload is flat — pane_id, data, optional ghost and generation — and neither
 // field can contain a brace, since base64's alphabet has none and pane IDs are
 // "pane-" plus hex.
 //
@@ -302,9 +303,8 @@ func parseEnvelope(body []byte, m *Message) bool {
 // decodePaneOutput base64-decodes the data field directly instead of running
 // the JSON scanner over the encoded string, returning false to decline.
 //
-// The trailing key set is matched EXACTLY rather than searched: Ghost is
-// `json:"ghost,omitempty"`, so a conforming producer emits either `}` or
-// `,"ghost":true}` and nothing else. An unknown extra key, a reordered pair or
+// The trailing key set is matched EXACTLY rather than searched: optional Ghost
+// precedes optional Generation. An unknown extra key, a reordered pair or
 // a duplicate therefore declines to encoding/json, which is what keeps this
 // agreeing with the fallback on shapes it was never designed for.
 //
@@ -348,13 +348,28 @@ func decodePaneOutput(p []byte, out *PaneOutputPayload) bool {
 		return false
 	}
 
-	var ghost bool
-	switch string(rest[q+1:]) {
-	case `}`:
-	case `,"ghost":true}`:
+	tail := string(rest[q+1:])
+	ghost := false
+	const ghostKey = `,"ghost":true`
+	if len(tail) >= len(ghostKey) && tail[:len(ghostKey)] == ghostKey {
 		ghost = true
-	default:
-		return false
+		tail = tail[len(ghostKey):]
+	}
+	var generation uint64
+	const generationKey = `,"generation":`
+	if tail != `}` {
+		if len(tail) <= len(generationKey)+1 || tail[:len(generationKey)] != generationKey || tail[len(tail)-1] != '}' {
+			return false
+		}
+		number := tail[len(generationKey) : len(tail)-1]
+		if number[0] < '0' || number[0] > '9' || (len(number) > 1 && number[0] == '0') {
+			return false
+		}
+		var err error
+		generation, err = strconv.ParseUint(number, 10, 64)
+		if err != nil {
+			return false
+		}
 	}
 
 	buf := make([]byte, base64.StdEncoding.DecodedLen(len(enc)))
@@ -366,5 +381,6 @@ func decodePaneOutput(p []byte, out *PaneOutputPayload) bool {
 	out.PaneID = paneID
 	out.Data = buf[:n]
 	out.Ghost = ghost
+	out.Generation = generation
 	return true
 }
