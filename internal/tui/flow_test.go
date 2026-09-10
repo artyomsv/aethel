@@ -9,6 +9,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/flow"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
 )
 
 func flowUpdate(t *testing.T, m Model, msg tea.Msg) Model {
@@ -112,6 +113,52 @@ func TestFlowUpdate_AgentChange_SeedsPluginDefaults(t *testing.T) {
 	role := m.flowUI.cfg.Roles[flow.Analyst]
 	if role.Agent != "codex" || len(role.Toggles) != 1 || role.Toggles[0] != "search" {
 		t.Fatal(role)
+	}
+}
+
+func TestFlowUpdate_AgentChange_ShippedPluginsFocusPermissionChoice(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := plugin.EnsureDefaultPlugins(dir); err != nil {
+		t.Fatal(err)
+	}
+	registry := plugin.NewRegistry()
+	if err := registry.LoadFromDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	m := paletteModelWithProjects(t)
+	m.initKeymap()
+	m.dialog = dialogFlowSettings
+	m.flowUI.cfg = config.DefaultFlows()
+	m.flowUI.row = 2
+	for _, name := range []string{"claude-code", "codex"} {
+		p := registry.Get(name)
+		entry := ipc.PluginCatalogEntry{Name: name, Category: "ai", Available: true}
+		for _, toggle := range p.Command.Toggles {
+			entry.Toggles = append(entry.Toggles, ipc.PluginToggleInfo{Name: toggle.Name, Group: toggle.Group, Default: toggle.Default})
+		}
+		m.flowUI.plugins = append(m.flowUI.plugins, entry)
+	}
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	row := m.flowSettingRows()[m.flowUI.row]
+	if row.role != flow.Analyst || row.kind != "toggle" || flowMissingPermissionToggle(m.flowUI.cfg.Roles[flow.Analyst], m.flowUI.plugins) != row.toggle || !strings.Contains(m.renderFlowDialog(), "Select a permission mode for analyst") {
+		t.Fatal("missing visible permission choice", row)
+	}
+	for i, candidate := range m.flowSettingRows() {
+		if candidate.role == flow.Analyst && candidate.toggle == "auto_workspace_write" {
+			m.flowUI.row = i
+		}
+	}
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if strings.Contains(m.renderFlowDialog(), "Select a permission mode") {
+		t.Fatal("hint survived selection")
+	}
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	var req ipc.SaveFlowConfigReqPayload
+	if err := m.client.(*fakeConn).lastSent().DecodePayload(&req); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Config.Roles[flow.Analyst].Toggles; len(got) != 1 || got[0] != "auto_workspace_write" {
+		t.Fatal(got)
 	}
 }
 

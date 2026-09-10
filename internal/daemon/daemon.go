@@ -4006,13 +4006,13 @@ func (d *Daemon) broadcastState() {
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
 	activeTab, tabs, panesByTab, projects, activeProject, flows := d.session.snapshotStateWithFlows()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true, flows)
 	// Broadcast only presentation fields. Features, plans, and notes stay on disk.
 	for i := range flows {
 		flows[i].Feature = ""
 		flows[i].Results.Plan = ""
 		flows[i].Results.Notes = ""
 	}
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true, flows)
 	// Broadcast-only (never persisted): announced newer release, if any.
 	if info := d.currentUpdateInfo(); info != nil {
 		state["update"] = info
@@ -5278,7 +5278,14 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 
 	if flowRole != "" {
 		var err error
-		args, envVars, err = flowMCPSpawn(typ, args, envVars)
+		var codexServers []string
+		if typ == "codex" {
+			codexServers, err = flowCodexServersFn(cmd, pane.CWD, args, envVars)
+			if err != nil {
+				return err
+			}
+		}
+		args, envVars, err = flowMCPSpawn(typ, args, envVars, codexServers)
 		if err != nil {
 			return err
 		}

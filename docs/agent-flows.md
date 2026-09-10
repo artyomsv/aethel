@@ -32,8 +32,9 @@ prompt, maximum review rounds, and step timeout in minutes. Arrow keys select
 rows; Enter edits a prompt or cycles an option; Ctrl+S saves a prompt back to the
 settings page, and Ctrl+S there saves the file atomically and reloads the daemon.
 Unknown `{{placeholders}}` are retained and flagged in the prompt editor.
-Prompts cannot be empty. Changing an agent seeds its plugin's default-on toggles;
-select a permission-mode toggle before saving if the plugin offers that group.
+Prompts cannot be empty. Changing an agent seeds its plugin's default-on toggles.
+If a permission mode still needs selecting, focus moves to that group and a
+hint asks you to choose before saving.
 
 A missing file uses the embedded defaults: Claude Code for analyst/reviewer
 with `dangerously_skip_permissions`, Codex for developer with
@@ -47,6 +48,8 @@ Complete each agent's login and first-use workspace trust prompts in its pane.
 The permission toggles do not dismiss these setup screens. If a step times out
 during setup, finish setup and choose **Resume flow**. A nonzero step timeout
 is useful while setting up agents; the default of zero allows unlimited time.
+With zero timeout, a hookless agent that never reports can wait indefinitely.
+Set a nonzero timeout if unattended steps need a deadline.
 
 Prompts support `{{feature}}`, `{{plan}}`, `{{pr}}`, and `{{review}}`. Substitution
 is one pass so placeholders inside reported text remain literal. Every prompt
@@ -62,6 +65,19 @@ is changed. The bridge is the `quil` executable beside the running `quild`, with
 the same dev/debug suffix. It uses that pane's `QUIL_HOME` and `QUIL_PANE_ID`.
 Codex receives these names in the server's `env_vars` allowlist because it
 filters the environment inherited by MCP subprocesses.
+
+Claude uses `--strict-mcp-config` to exclude inherited MCP servers. Codex first
+runs a read-only `mcp list --json` probe, bounded to ten seconds, with the pane's
+directory and configuration selectors. It disables the discovered servers and
+registers a fresh bridge name. A failed probe refuses the spawn. Server names
+must use letters, digits, underscores or hyphens because Codex's command-line
+overrides cannot address quoted names or names containing dots. Codex merges
+whole-table overrides with existing configuration, so replacing the table alone
+does not exclude inherited servers. OpenCode has no equivalent strict switch;
+its adapter preserves hooks and may retain other configured MCP servers.
+
+The restricted toolset is a role guardrail, not a security boundary. An agent
+with shell access can invoke an unrestricted `quil mcp` process itself.
 
 Call `report_step` with `status: "done"` and string-valued `result` entries:
 

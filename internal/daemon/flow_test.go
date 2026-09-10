@@ -18,6 +18,7 @@ import (
 
 func flowTestDaemon(t *testing.T) (*Daemon, *ipc.Client) {
 	t.Helper()
+	stubFlowCodexProbe(t)
 	d, c := mcpTestDaemon(t)
 	for _, name := range []string{"claude-code", "codex", "opencode"} {
 		d.registry.Get(name).Available = true
@@ -41,7 +42,9 @@ func awaitFlow(t *testing.T, d *Daemon, id string, stage flow.Stage, paused bool
 		for _, f := range d.flowSnapshots() {
 			if f.ID == id {
 				got = f
-				return f.Stage == stage && f.Paused == paused && (paused || stage.Role() == "" || f.TaskID != "")
+				// dispatchFlow reserves an ID before registering the task. Wait
+				// for registration before a test reports or forces completion.
+				return f.Stage == stage && f.Paused == paused && (paused || stage.Role() == "" || d.tasksRegistry().get(f.TaskID) != nil)
 			}
 		}
 		return false
@@ -62,6 +65,7 @@ func startTestFlow(t *testing.T, d *Daemon, c *ipc.Client) flow.Flow {
 
 func TestFlowIPC_WholeEpicReportsAndIdle(t *testing.T) {
 	d, c := flowTestDaemon(t)
+	finish := captureFlowReportTimer(t)
 	old := d.session.CreateTab("keep focus")
 	f := startTestFlow(t, d, c)
 	if d.session.ActiveTabID() != old.ID {
@@ -92,7 +96,7 @@ func TestFlowIPC_WholeEpicReportsAndIdle(t *testing.T) {
 		if resp.Error != "" || resp.TaskID != f.TaskID {
 			t.Fatal(resp)
 		}
-		time.Sleep(40 * time.Millisecond)
+		finish()
 		if !d.tasksRegistry().live(d.tasksRegistry().get(f.TaskID)) {
 			t.Fatal("report advanced a pane with live hooks before idle")
 		}
@@ -145,7 +149,7 @@ func TestFlowIPC_UnreportedIdlePausesAndExplicitResume(t *testing.T) {
 	d.emitEvent(hookEvent(p, "hook.claude.UserPromptSubmit", nil))
 	d.emitEvent(hookEvent(p, "hook.claude.Stop", nil))
 	f = awaitFlow(t, d, f.ID, flow.StagePlan, true)
-	if f.PauseWhy != "agent stopped without reporting" || !hasEventType(d, p.ID, "flow_paused") {
+	if f.PauseWhy != "agent stopped without reporting" || !waitUntilTrue(t, func() bool { return hasEventType(d, p.ID, "flow_paused") }, time.Second) {
 		t.Fatal(f)
 	}
 	r := decodeInto[ipc.StartFlowRespPayload](t, roundTrip(t, c, ipc.MsgResumeFlowReq, ipc.MsgResumeFlowResp, ipc.ResumeFlowReqPayload{FlowID: f.ID}))
@@ -248,6 +252,19 @@ func TestFlowIPC_SaveConfiguration(t *testing.T) {
 	if err != nil || liveErr != nil || disk.MaxReviewRounds != 8 || live.MaxReviewRounds != 8 {
 		t.Fatal(disk, live, err, liveErr)
 	}
+	role := cfg.Roles[flow.Analyst]
+	role.Prompt = " "
+	cfg.Roles[flow.Analyst] = role
+	cfg.MaxReviewRounds = 9
+	r = decodeInto[ipc.FlowConfigRespPayload](t, roundTrip(t, c, ipc.MsgSaveFlowConfigReq, ipc.MsgSaveFlowConfigResp, ipc.SaveFlowConfigReqPayload{Config: cfg.Wire()}))
+	if !strings.Contains(r.Error, "prompt") {
+		t.Fatal("blank prompt accepted", r)
+	}
+	disk, err = config.LoadFlows()
+	live, liveErr = d.flowsConfig()
+	if err != nil || liveErr != nil || disk.MaxReviewRounds != 8 || live.MaxReviewRounds != 8 {
+		t.Fatal("invalid configuration changed disk or live settings", disk, live, err, liveErr)
+	}
 }
 
 func TestFlow_HooksAppearingDuringFallbackKeepTaskLive(t *testing.T) {
@@ -277,7 +294,7 @@ func TestFlow_ClosedStepPanePausesAndResumeRefuses(t *testing.T) {
 	if f.PauseWhy != "pane analyst was closed" {
 		t.Fatal(f)
 	}
-	if !hasEventType(d, f.Panes[flow.Developer], "flow_paused") {
+	if !waitUntilTrue(t, func() bool { return hasEventType(d, f.Panes[flow.Developer], "flow_paused") }, time.Second) {
 		t.Fatal("closed pane lost its pause notification")
 	}
 	if err := d.resumeFlow(f.ID); err == nil || !strings.Contains(err.Error(), "analyst") {

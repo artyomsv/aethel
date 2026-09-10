@@ -10,6 +10,12 @@ import (
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
+func TestEmbeddedFlows_NoCarriageReturns(t *testing.T) {
+	if strings.ContainsRune(defaultFlows, '\r') {
+		t.Fatal("embedded flow prompts contain CR; check .gitattributes eol=lf")
+	}
+}
+
 func TestFlows_Default_RoundTripsWithShippedToggles(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	f, err := LoadFlows()

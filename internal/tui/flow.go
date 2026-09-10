@@ -488,7 +488,43 @@ func (m Model) handleFlowDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if row.role != "" {
 		f.cfg.Roles[row.role] = r
 	}
+	if row.kind == "agent" {
+		if toggle := flowMissingPermissionToggle(r, f.plugins); toggle != "" {
+			for i, candidate := range m.flowSettingRows() {
+				if candidate.role == row.role && candidate.toggle == toggle {
+					f.row = i
+					break
+				}
+			}
+		}
+	}
 	return m, nil
+}
+
+// Shipped plugins intentionally have no default-on permission modes. Keep the
+// choice explicit; the first Codex mode bypasses approvals and the sandbox.
+func flowMissingPermissionToggle(role config.FlowRole, plugins []ipc.PluginCatalogEntry) string {
+	for _, p := range plugins {
+		if p.Name != role.Agent {
+			continue
+		}
+		first := ""
+		for _, toggle := range p.Toggles {
+			if toggle.Group != "permission_mode" {
+				continue
+			}
+			if first == "" {
+				first = toggle.Name
+			}
+			for _, selected := range role.Toggles {
+				if selected == toggle.Name {
+					return ""
+				}
+			}
+		}
+		return first
+	}
+	return ""
 }
 
 func (m Model) renderFlowDialog() string {
@@ -509,6 +545,11 @@ func (m Model) renderFlowDialog() string {
 	if m.dialog == dialogNewFlow {
 		b.WriteString("Project: " + sanitizeRemoteText(f.projectName) + "\nFeature:\n")
 	} else if f.editor == nil {
+		for _, role := range flow.Roles {
+			if flowMissingPermissionToggle(f.cfg.Roles[role], f.plugins) != "" {
+				b.WriteString("Select a permission mode for " + string(role) + " before saving.\n")
+			}
+		}
 		rows := m.flowSettingRows()
 		start, end := historyWindow(len(rows), f.row, 0, max(2, m.height-12))
 		for i := start; i < end; i++ {

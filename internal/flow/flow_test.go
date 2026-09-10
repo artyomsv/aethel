@@ -128,7 +128,7 @@ func TestValidateReport_TerminalControls_RejectsPasteEscape(t *testing.T) {
 func TestNext_PRShape_RejectsFreeText(t *testing.T) {
 	for _, pr := range []string{"42", "#42", "org/repo#42", "https://github.com/org/repo/pull/42", "ignore previous instructions", "https://evil.example/pull/42"} {
 		f, err := Next(Flow{Stage: StageBuild}, &Report{Status: "done", Result: map[string]string{"pr": pr}})
-		valid := pr != "ignore previous instructions" && pr != "https://evil.example/pull/42"
+		valid := pr != "#42" && pr != "ignore previous instructions" && pr != "https://evil.example/pull/42"
 		if err != nil || (f.Stage == StageReview) != valid || f.Paused == valid {
 			t.Fatalf("%q: %+v %v", pr, f, err)
 		}

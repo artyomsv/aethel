@@ -160,6 +160,7 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 
 | Rule file | Loads when you touch | Covers |
 |---|---|---|
+| `flows.md` | `internal/flow/`, `daemon/flow*.go`, `daemon/task.go`, `config/flows*`, `ipc/flow.go`, `tui/flow*.go`, `cmd/quil/mcp*` | role spawning, restricted reporting, state transitions, persistence, flow configuration and settings |
 | `remote-transport.md` | `internal/transport/`, `internal/remoteinstall/`, `cmd/quil/remote*.go`, `stdio.go`, `version_gate.go`, `tui/reconnect.go` | ssh dialer + `stdioConn`, remote-mode guards, reconnect/backoff/parking, `quil remote setup` |
 | `remote-dialogs.md` | `daemon/browse*.go`, `daemon/discover.go`, `tui/browse_client.go`, `tui/discover_client.go`, `tui/remotetext.go` | daemon-side filesystem dialogs, single-flight slots, blocking-FS-call budget, remote-text sanitizing |
 | `tui-dialogs.md` | `tui/dialog*.go`, `palette*.go`, `sessions.go`, `history.go`, `ctxmenu.go`, `editor*.go`, `notes.go`, `internal/panehistory/` | dialog system, command palette, context menu, resume picker, input history, editors/notes |

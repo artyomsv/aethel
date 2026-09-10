@@ -110,7 +110,7 @@ func UnsafePromptText(s string) bool {
 	return strings.ContainsAny(s, "\x1b\u009b\r") || strings.Contains(s, string([]byte{0x9b}))
 }
 
-var prShape = regexp.MustCompile(`^(#?[0-9]{1,10}|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]{1,10}|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]{1,10})$`)
+var prShape = regexp.MustCompile(`^([0-9]{1,10}|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]{1,10}|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]{1,10})$`)
 
 func ValidateReport(r Report) error {
 	if r.Status != "done" && r.Status != "blocked" {

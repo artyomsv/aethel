@@ -1,12 +1,17 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func flowMCPSupported(agent string) bool {
@@ -34,7 +39,7 @@ var flowMCPExeFn = func() (string, error) {
 // These are argv elements, not shell snippets. JSON/TOML encoders preserve
 // Windows paths and spaces without shell interpolation. The pane inherits
 // QUIL_HOME and QUIL_PANE_ID through the existing spawn environment.
-func flowMCPSpawn(agent string, args, env []string) ([]string, []string, error) {
+func flowMCPSpawn(agent string, args, env, codexServers []string) ([]string, []string, error) {
 	exe, err := flowMCPExeFn()
 	if err != nil {
 		return nil, nil, err
@@ -47,13 +52,29 @@ func flowMCPSpawn(agent string, args, env []string) ([]string, []string, error) 
 		if err != nil {
 			return nil, nil, err
 		}
-		args = append([]string{"--mcp-config", string(b)}, args...)
+		args = append([]string{"--strict-mcp-config", "--mcp-config", string(b)}, args...)
 	case "codex":
 		// Codex filters the environment inherited by stdio servers. Explicitly
 		// forward the pane identity and daemon directory or report_step cannot
 		// resolve its caller (and a custom QUIL_HOME would reach another daemon).
-		args = append([]string{"-c", "mcp_servers.quil.command=" + strconv.Quote(exe), "-c", `mcp_servers.quil.args=["mcp","--toolset","flow"]`,
-			"-c", `mcp_servers.quil.env_vars=["QUIL_HOME","QUIL_PANE_ID"]`}, args...)
+		// Keep original transport definitions (including CLI-only servers),
+		// then apply the disabling fields last. -c is global, including resume.
+		end := len(args)
+		for i, arg := range args {
+			if arg == "--" {
+				end = i
+				break
+			}
+		}
+		out := append([]string(nil), args[:end]...)
+		overrides, err := flowCodexMCPConfig(exe, codexServers)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, override := range overrides {
+			out = append(out, "-c", override)
+		}
+		args = append(out, args[end:]...)
 	case "opencode":
 		cfg := make(map[string]any)
 		out := make([]string, 0, len(env))
@@ -81,4 +102,88 @@ func flowMCPSpawn(agent string, args, env []string) ([]string, []string, error) 
 		return nil, nil, fmt.Errorf("agent %q has no per-spawn MCP support", agent)
 	}
 	return args, env, nil
+}
+
+// Codex merges even a whole-table -c override with user/project configuration.
+// List the effective server names without starting servers, then explicitly
+// disable each one. A new name avoids merging a URL or credentials into our
+// stdio server. Never log the probe output: it may contain server credentials.
+var flowCodexServersFn = func(command, cwd string, args, env []string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	probe := flowCodexConfigArgs(args)
+	probe = append(probe, "mcp", "list", "--json")
+	cmd := exec.CommandContext(ctx, command, probe...)
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), env...)
+	cmd.WaitDelay = time.Second
+	hideGitWindow(cmd)
+	data, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("cannot inspect Codex MCP configuration (codex mcp list --json): %w", err)
+	}
+	var servers []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &servers); err != nil {
+		return nil, fmt.Errorf("Codex MCP configuration probe returned invalid JSON")
+	}
+	names := make([]string, 0, len(servers))
+	for _, server := range servers {
+		names = append(names, server.Name)
+	}
+	return names, nil
+}
+
+// Preserve configuration selectors for the read-only probe, without passing
+// interactive options or a resume/session/prompt positional argument to list.
+func flowCodexConfigArgs(args []string) (probe []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		flag, value, inline := strings.Cut(arg, "=")
+		if strings.HasPrefix(arg, "-c") && !strings.HasPrefix(arg, "--") && len(arg) > 2 {
+			flag, value, inline = "-c", arg[2:], true
+		}
+		switch flag {
+		case "-c", "--config", "-p", "--profile", "-C", "--cd", "--enable", "--disable":
+			part := []string{arg}
+			if !inline && i+1 < len(args) {
+				i++
+				value = args[i]
+				part = append(part, value)
+			}
+			probe = append(probe, part...)
+		case "--strict-config":
+			probe = append(probe, arg)
+		}
+	}
+	return probe
+}
+
+var flowCodexServerName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func flowCodexMCPConfig(exe string, servers []string) ([]string, error) {
+	names := make(map[string]bool, len(servers))
+	for _, name := range servers {
+		// Codex splits -c keys on literal dots and keeps quote characters.
+		// Refuse names it cannot address instead of leaving a server enabled.
+		if !flowCodexServerName.MatchString(name) {
+			return nil, fmt.Errorf("cannot isolate Codex MCP server %q: rename it using letters, digits, underscores or hyphens", name)
+		}
+		names[name] = true
+	}
+	bridge := "quil_flow"
+	for i := 2; names[bridge]; i++ {
+		bridge = "quil_flow_" + strconv.Itoa(i)
+	}
+	entries := make([]string, 0, len(names)+1)
+	for name := range names {
+		entries = append(entries, "mcp_servers."+name+".enabled=false")
+	}
+	sort.Strings(entries)
+	entries = append(entries, "mcp_servers."+bridge+"={enabled=true,command="+strconv.Quote(exe)+`,args=["mcp","--toolset","flow"],env_vars=["QUIL_HOME","QUIL_PANE_ID"]}`)
+	return entries, nil
 }
