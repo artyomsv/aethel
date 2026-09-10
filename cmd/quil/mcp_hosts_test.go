@@ -183,6 +183,80 @@ func TestMCPRouter_RedialsADeadBridge(t *testing.T) {
 	}
 }
 
+// targets() reports a named host's failure instead of yielding nothing. An
+// unscoped aggregate still skips whatever is down.
+func TestMCPRouter_TargetsPropagatesANamedHostsError(t *testing.T) {
+	dial := func(cfg config.Config, d config.Destination) (*ipc.Client, error) {
+		return nil, errors.New("ssh: connect timed out")
+	}
+	r := testRouter(t, dial, "gpu")
+
+	if _, err := r.targets("nas"); err == nil || !strings.Contains(err.Error(), "unknown host") {
+		t.Fatalf("unknown host: %v", err)
+	}
+	if _, err := r.targets("gpu"); err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("unreachable host: %v", err)
+	}
+	all, err := r.targets("")
+	if err != nil || len(all) != 1 || all[0].host != "" {
+		t.Fatalf("unscoped aggregate = %+v, err=%v", all, err)
+	}
+}
+
+// The dial runs with the host mutex released. connectAll() dials every
+// configured host in the background, and both connected() and statuses() take
+// that mutex — so holding it across a 60 s ssh parked every unqualified
+// list_panes / list_projects / list_hosts behind the slowest destination.
+func TestMCPRouter_StatusReadsDoNotWaitForADial(t *testing.T) {
+	release := make(chan struct{})
+	dialing := make(chan struct{})
+	var dials atomic.Int32
+	remoteSock := echoServer(t, "pane-remote")
+	dial := func(cfg config.Config, d config.Destination) (*ipc.Client, error) {
+		if dials.Add(1) == 1 {
+			close(dialing)
+		}
+		<-release
+		return ipc.NewClient(remoteSock)
+	}
+	r := testRouter(t, dial, "gpu")
+
+	go r.connectAll()
+	<-dialing
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if c := r.connected(); len(c) != 1 || c[0].host != "" {
+			t.Errorf("connected during a dial = %+v, want the local bridge only", c)
+		}
+		st := r.statuses()
+		if len(st) != 1 || st[0].Connected || st[0].Error != "connecting" {
+			t.Errorf("statuses during a dial = %+v", st)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connected()/statuses() blocked on a dial in progress")
+	}
+
+	// The dial is single-flight: a caller arriving mid-dial waits for the one
+	// in flight rather than starting a second ssh.
+	second := make(chan error, 1)
+	go func() { _, _, err := r.bridgeFor("gpu"); second <- err }()
+	close(release)
+	if err := <-second; err != nil {
+		t.Fatalf("mid-dial caller: %v", err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials = %d, want 1", got)
+	}
+	if c := r.connected(); len(c) != 2 {
+		t.Fatalf("connected after the dial = %+v", c)
+	}
+}
+
 func TestMCPRouter_SelfPaneComesFromEnv(t *testing.T) {
 	t.Setenv("QUIL_PANE_ID", "pane-me")
 	r := testRouter(t, nil)

@@ -76,7 +76,11 @@ func registerListProjectsTool(s *mcp.Server, r *mcpRouter) {
 		Description: "List projects (the grouping above tabs) on every connected host: id, name, root directory, whether it is the active project, and its tab ids.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		var out []hostedProject
-		for _, hb := range r.targets(input.Host) {
+		hosts, err := r.targets(input.Host)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list_projects: %w", err)
+		}
+		for _, hb := range hosts {
 			resp, err := hb.bridge.request(ipc.MsgListProjectsReq, nil)
 			if err != nil {
 				return nil, nil, fmt.Errorf("list_projects%s: %w", hostSuffix(hb.host), err)

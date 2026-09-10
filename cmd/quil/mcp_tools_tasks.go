@@ -39,7 +39,9 @@ func registerDelegateTaskTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 			"failed if its process exits, timeout if you set one. A terminal target is done when its shell reports the command finished. " +
 			"On completion a task_done notification is queued (watch_notifications / get_notifications), wait_task returns, and — " +
 			"with notify — a line like '[quil task task-xxxx] pane <id> done. Last output: ...' is typed into your own pane once you are idle, " +
-			"so you can carry on with other work and react when it arrives. Requester and target must be on the same host.",
+			"so you can carry on with other work and react when it arrives. Requester and target must be on the same host. " +
+			"ONE live task per target pane: a pane that already has a task in flight is refused, naming it — completion comes from the " +
+			"target's agent state, which cannot say which of two prompts finished. Wait with wait_task, or pick another pane.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		bridge, host, err := r.bridgeFor(input.Host, input.PaneID)
 		if err != nil {
@@ -168,7 +170,11 @@ func registerListTasksTool(s *mcp.Server, r *mcpRouter) {
 			}
 		}
 		var out []hostedTask
-		for _, hb := range r.targets(host) {
+		hosts, err := r.targets(host)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list_tasks: %w", err)
+		}
+		for _, hb := range hosts {
 			resp, err := hb.bridge.request(ipc.MsgListTasksReq, ipc.ListTasksReqPayload{PaneID: input.PaneID})
 			if err != nil {
 				return nil, nil, fmt.Errorf("list_tasks%s: %w", hostSuffix(hb.host), err)

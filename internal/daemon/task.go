@@ -80,11 +80,30 @@ func newTaskRegistry(max int) *taskRegistry {
 	return &taskRegistry{byID: make(map[string]*task), max: max}
 }
 
-// add stores t, evicting the oldest TERMINAL task past the cap. A live task is
-// never evicted: a waiter is blocked on its channel.
-func (r *taskRegistry) add(t *task) {
+// addLive stores t unless a live task already targets the same pane, whose id
+// it then returns instead — storing nothing. Storing evicts the oldest
+// TERMINAL task past the cap; a live task is never evicted, because a waiter
+// is blocked on its channel.
+//
+// One live task per target, because completion is read off the TARGET's work
+// ledger and that ledger says nothing about WHICH prompt finished: with two
+// tasks queued to one pane, the first settled idle would mark both done,
+// including the one whose prompt the agent has not looked at yet. The scan and
+// the insert are one critical section, or two clients delegating to the same
+// pane both pass a check made before either insert.
+func (r *taskRegistry) addLive(t *task) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for _, id := range r.order {
+		if old := r.byID[id]; old != nil && old.to == t.to && !old.state.terminal() {
+			return old.id
+		}
+	}
+	r.addLocked(t)
+	return ""
+}
+
+func (r *taskRegistry) addLocked(t *task) {
 	r.byID[t.id] = t
 	r.order = append(r.order, t.id)
 	for len(r.order) > r.max {
@@ -107,6 +126,46 @@ func (r *taskRegistry) get(id string) *task {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.byID[id]
+}
+
+// live reports whether t is still open. Every read of t.state belongs under
+// the lock that writes it: taskObserve runs on whichever goroutine emitted the
+// event, while the timeout callback and finishTask write from theirs.
+func (r *taskRegistry) live(t *task) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !t.state.terminal()
+}
+
+// advance moves t from one state to another and reports whether it applied.
+// Compare-and-set under the lock, never a check followed by a write: a timeout
+// firing between the two would have its terminal state overwritten with
+// `working`, after which the next completion closes t.done a SECOND time and
+// panics the daemon.
+func (r *taskRegistry) advance(t *task, from, to taskState, started time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t.state != from {
+		return false
+	}
+	t.state = to
+	if to == taskWorking {
+		t.started = started
+	}
+	return true
+}
+
+// liveTasksTo returns every open task aimed at paneID.
+func (r *taskRegistry) liveTasksTo(paneID string) []*task {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []*task
+	for _, id := range r.order {
+		if t := r.byID[id]; t != nil && t.to == paneID && !t.state.terminal() {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (r *taskRegistry) all() []*task {
@@ -220,15 +279,23 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 		done:     make(chan struct{}),
 	}
 	reg := d.tasksRegistry()
-	reg.add(t)
+	if busy := reg.addLive(t); busy != "" {
+		return refuse("pane %s already has task %s in flight — wait for it (wait_task) or pick another pane", req.ToPane, busy)
+	}
 	if !d.deliverPrompt(pane, req.Prompt, agent) {
 		reg.mu.Lock()
-		t.state = taskFailed
-		t.errText = "pane input queue is full — its child has stopped reading stdin"
-		t.ended = time.Now()
-		close(t.done)
+		// Guarded like every other transition: the task is published, so an
+		// event arriving between add and here can already have ended it, and
+		// a second close(t.done) panics the daemon.
+		if !t.state.terminal() {
+			t.state = taskFailed
+			t.errText = "pane input queue is full — its child has stopped reading stdin"
+			t.ended = time.Now()
+			close(t.done)
+		}
+		info, errText := t.infoLocked(), t.errText
 		reg.mu.Unlock()
-		return ipc.DelegateTaskRespPayload{Task: reg.info(t), Error: t.errText}
+		return ipc.DelegateTaskRespPayload{Task: info, Error: errText}
 	}
 	if req.TimeoutMs > 0 {
 		id := t.id
@@ -248,7 +315,9 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 func (d *Daemon) taskObserve(pane *Pane, e PaneEvent, tr hookevents.Transition) {
 	reg := d.tasksRegistry()
 	for _, t := range reg.all() {
-		if t.to != pane.ID || t.state.terminal() {
+		// t.to and t.terminal are written once, before the task is published;
+		// t.state is not, so it is read through the registry lock.
+		if t.to != pane.ID || !reg.live(t) {
 			continue
 		}
 		switch {
@@ -258,23 +327,50 @@ func (d *Daemon) taskObserve(pane *Pane, e PaneEvent, tr hookevents.Transition) 
 			// A shell reports its own completion through OSC 133; the ledger
 			// never moves for it.
 			d.finishTask(t, taskDone, "")
-		case !t.terminal && tr.Now == hookevents.WorkWorking && t.state == taskSent:
-			reg.mu.Lock()
-			t.state = taskWorking
-			t.started = e.Timestamp
-			reg.mu.Unlock()
+		case !t.terminal && tr.Now == hookevents.WorkWorking:
+			reg.advance(t, taskSent, taskWorking, e.Timestamp)
 		case !t.terminal && tr.FellIdle:
 			// Not done yet: the settle window decides. onPaneIdle runs the
 			// closure after it, or never if the pane went back to work — in
 			// which case the next FellIdle registers again. The closure
 			// re-checks the state because two edges can register twice.
+			//
+			// An ABORT is not a completion: the pane's process exited, and the
+			// process_exit branch above fails the task instead. Returning here
+			// is what makes that outcome deterministic — both run, on
+			// different goroutines, and whichever reaches finishTask first
+			// decides the state a crashed pane is reported with.
 			id := t.id
-			d.onPaneIdle(pane.ID, func() {
-				if tt := reg.get(id); tt != nil && !tt.state.terminal() {
+			d.onPaneIdle(pane.ID, func(aborted bool) {
+				if aborted {
+					return
+				}
+				if tt := reg.get(id); tt != nil && reg.live(tt) {
 					d.finishTask(tt, taskDone, "")
 				}
 			})
 		}
+	}
+}
+
+// failTasksForPane ends every task aimed at a pane that is being destroyed.
+//
+// Nothing else can: the only path that advances a task is emitEvent, which
+// looks the pane up in the session first — and every destroy path removes it
+// there before (or instead of) the child's process_exit ever lands. Without
+// this a delegated task whose target is closed stays `sent` forever, so
+// wait_task can only keep timing out and no completion notice is ever
+// delivered. Called from cleanupPaneArtifacts, the funnel every destroy path
+// already goes through.
+func (d *Daemon) failTasksForPane(paneID, reason string) {
+	if paneID == "" {
+		return
+	}
+	// Through tasksRegistry, never a bare read of d.tasks: the field is
+	// published by a sync.Once from whichever goroutine delegated first, and
+	// this runs on a destroy path that may never have touched tasks at all.
+	for _, t := range d.tasksRegistry().liveTasksTo(paneID) {
+		d.finishTask(t, taskFailed, reason)
 	}
 }
 
@@ -340,7 +436,11 @@ func (d *Daemon) notifyRequester(t *task) {
 	}
 	reg := d.tasksRegistry()
 	line := taskNotice(t)
-	d.onPaneIdle(t.from, func() {
+	// Delivered on an abort too: the requester's own process exiting is the
+	// one edge that guarantees no idle edge is ever coming, and a subscriber
+	// dropped there is a requester left waiting for a notice forever. If the
+	// pane is really gone, deliverPrompt simply finds no process.
+	d.onPaneIdle(t.from, func(bool) {
 		p := d.session.Pane(t.from)
 		if p == nil {
 			return

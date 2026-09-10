@@ -63,6 +63,11 @@ type hostConn struct {
 	cancel  context.CancelFunc
 	err     error
 	lastTry time.Time
+	// dialing marks a dial in flight, which runs with mu RELEASED; dialDone is
+	// closed when it finishes. Together they keep the dial single-flight
+	// without holding the mutex every status read takes.
+	dialing  bool
+	dialDone chan struct{}
 }
 
 // hostStatus is the list_hosts view.
@@ -127,16 +132,33 @@ func (r *mcpRouter) connectAll() {
 
 // connect ensures h has a live bridge, dialling if needed. `initial` skips
 // the backoff so the startup sweep always tries once.
+//
+// The DIAL runs with h.mu released, and that is the whole shape of this
+// function. An ssh dial is budgeted at extraDialTimeout (60 s), and both
+// connected() and statuses() take the same mutex — so holding it across the
+// dial made the background connectAll() park every unqualified list_panes,
+// list_projects and list_hosts behind the slowest destination configured.
+// `dialing` keeps it single-flight; a caller that arrives mid-dial waits on
+// dialDone rather than starting a second ssh, exactly as it used to wait on
+// the mutex, while the status readers skip it and report "connecting".
 func (r *mcpRouter) connect(h *hostConn, initial bool) error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.bridge != nil && !h.bridge.dead.Load() {
+		h.mu.Unlock()
 		return nil
 	}
+	if h.dialing {
+		wait := h.dialDone
+		h.mu.Unlock()
+		<-wait
+		return r.dialOutcome(h)
+	}
+	// The read loop ended: the link dropped. Release the old client — off the
+	// lock, below, with everything else that can block.
+	var oldClient *ipc.Client
+	var oldCancel context.CancelFunc
 	if h.bridge != nil {
-		// The read loop ended: the link dropped. Release the old client.
-		h.cancel()
-		h.client.Close()
+		oldClient, oldCancel = h.client, h.cancel
 		h.bridge, h.client, h.cancel = nil, nil, nil
 		h.err = errors.New("connection lost")
 		// A LOSS earns one immediate retry: the backoff exists for a host
@@ -144,23 +166,71 @@ func (r *mcpRouter) connect(h *hostConn, initial bool) error {
 		h.lastTry = time.Time{}
 	}
 	if !initial && h.err != nil && time.Since(h.lastTry) < r.backoff {
-		return fmt.Errorf("host %s unreachable: %v (retry in %s)", h.dest.Label(), h.err,
-			(r.backoff - time.Since(h.lastTry)).Round(time.Second))
+		err, retryIn := h.err, (r.backoff - time.Since(h.lastTry)).Round(time.Second)
+		h.mu.Unlock()
+		releaseHostConn(oldClient, oldCancel)
+		return fmt.Errorf("host %s unreachable: %v (retry in %s)", h.dest.Label(), err, retryIn)
 	}
 	h.lastTry = time.Now()
+	h.dialing = true
+	h.dialDone = make(chan struct{})
+	done := h.dialDone
+	h.mu.Unlock()
+
+	releaseHostConn(oldClient, oldCancel)
 	client, err := r.dial(r.cfg, h.dest)
+	var bridge *mcpBridge
+	var cancel context.CancelFunc
+	if err == nil {
+		bridge, cancel = startHostBridge(client, h.dest.Label())
+	}
+
+	h.mu.Lock()
+	h.dialing = false
+	close(done)
 	if err != nil {
 		h.err = err
+		h.mu.Unlock()
 		return fmt.Errorf("host %s unreachable: %w", h.dest.Label(), err)
 	}
+	h.bridge, h.client, h.cancel, h.err = bridge, client, cancel, nil
+	h.mu.Unlock()
+	return nil
+}
+
+// dialOutcome reports the result of a dial another goroutine just finished.
+func (r *mcpRouter) dialOutcome(h *hostConn) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.bridge != nil && !h.bridge.dead.Load() {
+		return nil
+	}
+	err := h.err
+	if err == nil {
+		err = errors.New("dial produced no connection")
+	}
+	return fmt.Errorf("host %s unreachable: %w", h.dest.Label(), err)
+}
+
+// startHostBridge wraps a fresh client in a bridge and starts its read loop,
+// handing the caller the cancel that stops it.
+func startHostBridge(client *ipc.Client, label string) (*mcpBridge, context.CancelFunc) {
 	bridge := newMCPBridge(client)
 	if err := bridge.declinePaneOutput(); err != nil {
-		log.Printf("mcp: host %s: decline pane output: %v", h.dest.Label(), err)
+		log.Printf("mcp: host %s: decline pane output: %v", label, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go bridge.readLoop(ctx)
-	h.bridge, h.client, h.cancel, h.err = bridge, client, cancel, nil
-	return nil
+	return bridge, cancel
+}
+
+func releaseHostConn(client *ipc.Client, cancel context.CancelFunc) {
+	if cancel != nil {
+		cancel()
+	}
+	if client != nil {
+		client.Close()
+	}
 }
 
 // bridgeFor resolves which daemon a tool call is aimed at.
@@ -245,24 +315,28 @@ type hostBridge struct {
 }
 
 // targets is what an aggregating tool iterates: every connected host when no
-// host is named, else that one host (dialling it if needed). An unknown or
-// unreachable named host yields nothing — the tool's per-host request then
-// reports the failure through bridgeFor's error on the next call, and an
-// aggregate never blocks on a dead ssh.
-func (r *mcpRouter) targets(host string) []hostBridge {
+// host is named, else that one host (dialling it if needed).
+//
+// A NAMED host that is unknown or unreachable is an ERROR, never an empty
+// list. Swallowing it turned list_panes, list_tabs, list_projects, list_tasks
+// and get_notifications into successful empty arrays for a misspelled or dead
+// host — an unavailable workspace reported as an empty one, which is the
+// answer an agent acts on. Unscoped aggregation still skips hosts that are
+// down: there the caller asked for whatever is reachable.
+func (r *mcpRouter) targets(host string) ([]hostBridge, error) {
 	if host == "" {
-		return r.connected()
+		return r.connected(), nil
 	}
 	b, h, err := r.bridgeFor(host)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return []hostBridge{{host: h, bridge: b}}
+	return []hostBridge{{host: h, bridge: b}}, nil
 }
 
 // watchTargets picks the hosts a watch spans: the named host; else the hosts
 // the watched pane ids were discovered on; else every connected host.
-func (r *mcpRouter) watchTargets(host string, paneIDs []string) []hostBridge {
+func (r *mcpRouter) watchTargets(host string, paneIDs []string) ([]hostBridge, error) {
 	if host != "" {
 		return r.targets(host)
 	}
@@ -282,7 +356,7 @@ func (r *mcpRouter) watchTargets(host string, paneIDs []string) []hostBridge {
 	}
 	r.mu.Unlock()
 	if len(paneIDs) == 0 {
-		return r.connected()
+		return r.connected(), nil
 	}
 	for _, h := range hosts {
 		b, hh, err := r.bridgeFor(h)
@@ -291,7 +365,7 @@ func (r *mcpRouter) watchTargets(host string, paneIDs []string) []hostBridge {
 		}
 		out = append(out, hostBridge{host: hh, bridge: b})
 	}
-	return out
+	return out, nil
 }
 
 // statuses is the list_hosts answer: every configured host, connected or not.
@@ -302,7 +376,13 @@ func (r *mcpRouter) statuses() []hostStatus {
 		h.mu.Lock()
 		st := hostStatus{Host: dest, Label: h.dest.Name}
 		st.Connected = h.bridge != nil && !h.bridge.dead.Load()
-		if !st.Connected && h.err != nil {
+		switch {
+		case st.Connected:
+		case h.dialing:
+			// A dial in flight is neither connected nor failed, and this read
+			// must never wait for it to decide which.
+			st.Error = "connecting"
+		case h.err != nil:
 			st.Error = h.err.Error()
 		}
 		h.mu.Unlock()

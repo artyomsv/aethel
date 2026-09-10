@@ -43,6 +43,13 @@ func (d *Daemon) applyWorkEvent(pane *Pane, e PaneEvent) hookevents.Transition {
 		// A crash is not a completion, but nothing will ever fire for this
 		// pane again: run the subscribers so a deferred notify-back or a task
 		// waiting on this pane is not stranded.
+		//
+		// They are told the pane ABORTED, and that flag is what makes the
+		// abort beat the completion. emitEvent runs this before taskObserve
+		// marks the pane's tasks failed, and the subscribers run on their own
+		// goroutine — so a completion callback that ignored the flag could
+		// report a crashed pane as done, with scheduling deciding which
+		// answer the requester got.
 		if pane.idleTimer != nil {
 			pane.idleTimer.Stop()
 			pane.idleTimer = nil
@@ -51,7 +58,7 @@ func (d *Daemon) applyWorkEvent(pane *Pane, e PaneEvent) hookevents.Transition {
 		pane.idleSubs = nil
 		go func() {
 			for _, fn := range subs {
-				fn()
+				fn(true)
 			}
 		}()
 	}
@@ -91,15 +98,29 @@ func (d *Daemon) settleIdle(paneID string) {
 		Data:      map[string]string{},
 	}, paneOutputExcerpt(pane, 5)))
 	for _, fn := range subs {
-		fn()
+		fn(false)
 	}
 }
 
+// idleSub is what onPaneIdle registers. aborted=true means the pane's process
+// exited: final, but the opposite of a completion.
+type idleSub func(aborted bool)
+
 // onPaneIdle registers fn to run once the pane next settles idle. If the pane
-// is ALREADY idle (settled or never worked), fn runs immediately on the
-// caller's goroutine — a subscriber must not wait for an edge that already
-// happened. Returns false when the pane does not exist.
-func (d *Daemon) onPaneIdle(paneID string, fn func()) bool {
+// is CONFIRMED idle — the ledger says WorkIdle and no settle window is open —
+// fn runs immediately on the caller's goroutine, because a subscriber must not
+// wait for an edge that already happened. Returns false when the pane does not
+// exist.
+//
+// WorkUnknown is NOT idle, and treating it as idle was a real defect. It means
+// no classified edge has been seen for this pane at all — an AI pane whose
+// hooks never loaded reports it for its whole life while working exactly as
+// hard as any other. Running immediately there types a completion notice into
+// a live turn, which is the input corruption this guard exists to prevent. A
+// subscriber on such a pane waits for a real idle edge instead, and is simply
+// never delivered if none ever comes: the notify-back needs hook integration,
+// where the task_done event does not.
+func (d *Daemon) onPaneIdle(paneID string, fn idleSub) bool {
 	pane := d.session.Pane(paneID)
 	if pane == nil {
 		return false
@@ -107,9 +128,9 @@ func (d *Daemon) onPaneIdle(paneID string, fn func()) bool {
 	pane.workMu.Lock()
 	state := pane.Work.State()
 	settling := pane.idleTimer != nil
-	if state != hookevents.WorkWorking && state != hookevents.WorkBlocked && !settling {
+	if state == hookevents.WorkIdle && !settling {
 		pane.workMu.Unlock()
-		fn()
+		fn(false)
 		return true
 	}
 	pane.idleSubs = append(pane.idleSubs, fn)

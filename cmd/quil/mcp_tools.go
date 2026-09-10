@@ -78,7 +78,11 @@ func registerListPanesTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 			"The pane this bridge runs inside is marked self. Use this to discover pane IDs for other tools.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		var out []hostedPane
-		for _, hb := range r.targets(input.Host) {
+		hosts, err := r.targets(input.Host)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list_panes: %w", err)
+		}
+		for _, hb := range hosts {
 			resp, err := hb.bridge.request(ipc.MsgListPanesReq, nil)
 			if err != nil {
 				return nil, nil, fmt.Errorf("list_panes%s: %w", hostSuffix(hb.host), err)
@@ -275,16 +279,16 @@ func registerGetPaneStatusTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 
 // createPaneInput is shared by create_pane and create_tab's first_pane.
 type createPaneInput struct {
-	CWD             string           `json:"cwd,omitempty" jsonschema:"working directory for the new pane (on the daemon's filesystem)"`
-	Type            string           `json:"type,omitempty" jsonschema:"plugin type from list_plugins: terminal (default), claude-code, opencode, codex, ssh, stripe, ..."`
-	Name            string           `json:"name,omitempty" jsonschema:"pane label"`
-	Toggles         []string         `json:"toggles,omitempty" jsonschema:"plugin toggle names from list_plugins, e.g. dangerously_skip_permissions, enable_auto_mode, chrome, search"`
-	ResumeSessionID string           `json:"resume_session_id,omitempty" jsonschema:"Claude session id from list_sessions to resume instead of starting fresh"`
-	WorktreeBranch  string           `json:"worktree_branch,omitempty" jsonschema:"create a NEW git worktree on this branch (off the repo containing cwd) and open the pane inside it"`
-	SandboxImage    string           `json:"sandbox_image,omitempty" jsonschema:"run the pane inside a Docker container from this image (requires sandbox_available from list_plugins)"`
-	SandboxAuth     string           `json:"sandbox_auth,omitempty" jsonschema:"sandbox sign-in mode for claude-code: token or browser (empty = config default)"`
-	InstanceName    string           `json:"instance_name,omitempty" jsonschema:"saved instance name for plugins with instances (ssh, stripe)"`
-	InstanceArgs    []string         `json:"instance_args,omitempty" jsonschema:"instance arguments for plugins with instances; REPLACE the plugin's own args, so never use for AI panes — use toggles"`
+	CWD             string   `json:"cwd,omitempty" jsonschema:"working directory for the new pane (on the daemon's filesystem)"`
+	Type            string   `json:"type,omitempty" jsonschema:"plugin type from list_plugins: terminal (default), claude-code, opencode, codex, ssh, stripe, ..."`
+	Name            string   `json:"name,omitempty" jsonschema:"pane label"`
+	Toggles         []string `json:"toggles,omitempty" jsonschema:"plugin toggle names from list_plugins, e.g. dangerously_skip_permissions, enable_auto_mode, chrome, search"`
+	ResumeSessionID string   `json:"resume_session_id,omitempty" jsonschema:"Claude session id from list_sessions to resume instead of starting fresh"`
+	WorktreeBranch  string   `json:"worktree_branch,omitempty" jsonschema:"create a NEW git worktree on this branch (off the repo containing cwd) and open the pane inside it"`
+	SandboxImage    string   `json:"sandbox_image,omitempty" jsonschema:"run the pane inside a Docker container from this image (requires sandbox_available from list_plugins)"`
+	SandboxAuth     string   `json:"sandbox_auth,omitempty" jsonschema:"sandbox sign-in mode for claude-code: token or browser (empty = config default)"`
+	InstanceName    string   `json:"instance_name,omitempty" jsonschema:"saved instance name for plugins with instances (ssh, stripe)"`
+	InstanceArgs    []string `json:"instance_args,omitempty" jsonschema:"instance arguments for plugins with instances (ssh, stripe); they REPLACE the plugin's own args and are REFUSED for AI panes — use toggles there"`
 }
 
 func (in createPaneInput) toReq(tabID string) ipc.CreatePaneReqPayload {
@@ -534,7 +538,11 @@ func registerListTabsTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 			}
 		}
 		var out []hostedTab
-		for _, hb := range r.targets(host) {
+		hosts, err := r.targets(host)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list_tabs: %w", err)
+		}
+		for _, hb := range hosts {
 			resp, err := hb.bridge.request(ipc.MsgListTabsReq, ipc.ListTabsReqPayload{ProjectID: input.ProjectID})
 			if err != nil {
 				return nil, nil, fmt.Errorf("list_tabs%s: %w", hostSuffix(hb.host), err)
@@ -656,7 +664,11 @@ func registerGetNotificationsTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger
 			"output pattern matches, agent turn boundaries (agent_idle), task completions (task_done) and other pane events, across every connected host.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		var out []hostedEvent
-		for _, hb := range r.targets(input.Host) {
+		hosts, err := r.targets(input.Host)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get_notifications: %w", err)
+		}
+		for _, hb := range hosts {
 			resp, err := hb.bridge.request(ipc.MsgGetNotificationsReq, nil)
 			if err != nil {
 				return nil, nil, fmt.Errorf("get_notifications%s: %w", hostSuffix(hb.host), err)
@@ -747,7 +759,10 @@ func registerWatchNotificationsTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogg
 
 		mcpLog.Log("", "watch_notifications", fmt.Sprintf("panes=%d timeout=%ds since=%d", len(input.PaneIDs), timeout, input.SinceTimestamp))
 
-		targets := r.watchTargets(input.Host, input.PaneIDs)
+		targets, err := r.watchTargets(input.Host, input.PaneIDs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("watch_notifications: %w", err)
+		}
 		if len(targets) == 0 {
 			return nil, nil, fmt.Errorf("watch_notifications: no connected host to watch")
 		}

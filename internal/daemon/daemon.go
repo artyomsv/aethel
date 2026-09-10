@@ -62,7 +62,7 @@ type Daemon struct {
 	// tasksRegistry so the hand-built daemons in tests need no setup.
 	tasks     *taskRegistry
 	tasksOnce sync.Once
-	gitCache     *gitCache     // per-checkout branch/worktree/divergence, refreshed on a ticker
+	gitCache  *gitCache // per-checkout branch/worktree/divergence, refreshed on a ticker
 	// clientCWD is the last-known CWD from a TUI client, used as the
 	// default working directory for new panes/tabs. Read by defaultCWD()
 	// from any IPC dispatch goroutine and written by handleAttach on each
@@ -2782,6 +2782,11 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 // open+stat+close on it 5x/s. Production 2026-08-18: 349 files for 37 live
 // panes, ~7,000 handle ops/sec, 21% of a core in kernel time.
 func (d *Daemon) cleanupPaneArtifacts(paneID string) {
+	// Delegated tasks aimed at this pane end here, with the reason, because
+	// this is the one funnel every destruction path shares and nothing else
+	// can end them: the task state machine only advances on events for a pane
+	// the session still holds. See failTasksForPane (task.go).
+	d.failTasksForPane(paneID, "pane destroyed")
 	// Overlay visibility claims are keyed by pane id, so a destroyed overlay
 	// would otherwise leave its id in every live client's claim set — in a
 	// daemon that runs for weeks, one entry per overlay ever opened.
@@ -6117,7 +6122,6 @@ func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 	// handler stays non-spawning by design — see buildPaneStatus.
 	respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, d.buildPaneStatus(pane))
 }
-
 
 func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	var req ipc.RestartPaneReqPayload

@@ -207,7 +207,7 @@ Previously these calls answered `"Sent N bytes"` regardless, so input aimed at a
 | `resume_session_id` | A Claude session from `list_sessions`. Must be a UUID and not held by a live pane; otherwise the pane starts fresh. | daemon |
 | `worktree_branch` | Creates a NEW linked worktree on this branch off the repository that contains `cwd` and opens the pane inside it. The repo root is resolved by the daemon from `cwd` — a client-built path is how a worktree ends up nested inside a checkout. Not a repository, a bad branch name, or a branch already checked out elsewhere → ERROR and no pane. The bridge waits up to 130 s for the checkout. | daemon |
 | `sandbox_image` / `sandbox_auth` | Runs the pane in a Docker container from the image (`token` or `browser` sign-in for claude-code; empty follows `[sandbox] auth`). Only when `list_plugins` reports `sandbox_available`. A rejected image destroys the pane rather than running it on the host. See [Sandbox panes](sandbox-panes.md). | daemon |
-| `instance_name` / `instance_args` | For plugins with saved instances (`ssh`, `stripe`). `instance_args` REPLACE the plugin's own arguments — never use them for an AI pane; that is what `toggles` are for. | daemon |
+| `instance_name` / `instance_args` | For plugins with saved instances (`ssh`, `stripe`). `instance_args` REPLACE the plugin's own arguments, so the daemon REFUSES them for an AI plugin (`category = "ai"`) — use `toggles` there, which are checked by name. | daemon |
 
 The four "deliberately not exposed to MCP" notes in `internal/ipc/protocol.go` (resume, worktree, sandbox, overlay) are now three: overlay panes stay TUI-only. The other three ride the same validated payload the TUI sends, so an agent gets exactly the refusals the dialog gets.
 
@@ -222,7 +222,7 @@ A project groups tabs and owns a root directory (new tabs open there). Every tab
 | `update_project` | `project_id`, `name` (required), `root_dir` (optional) | `{ok}` | Rename and/or relocate. Renaming a bootstrap project adopts it. |
 | `switch_project` | `project_id` | `{ok}` | Brings the project's last active tab into view in the TUI. |
 | `destroy_project` | `project_id` | `{ok}` | Destroys every tab and pane under it. **Confirm with the user first.** |
-| `create_tab` | `name`, `project_id` (default: active project), `first_pane` (any `create_pane` option), `host` | `{tab_id, pane_id, preparing_worktree?, error?, host}` | Does NOT steal the TUI's focus — an orchestrator opening tabs for workers must not yank the user around; call `switch_tab` when you want it. With `worktree_branch` the returned `pane_id` is a placeholder (no process, `preparing_worktree` set); the `worktree_ready` event names the pane that replaces it. |
+| `create_tab` | `name`, `project_id` (default: active project), `first_pane` (any `create_pane` option), `host` | `{tab_id, pane_id, preparing_worktree?, error?, host}` | Does NOT steal the TUI's focus — an orchestrator opening tabs for workers must not yank the user around; call `switch_tab` when you want it. With `worktree_branch` the returned `pane_id` is a placeholder (no process, `preparing_worktree` set); the `worktree_ready` event names the pane that replaces it. The first pane is validated BEFORE the tab is made, so a refusal (unknown plugin, clashing toggles, unresolvable worktree root) is an ERROR with no tab and no pane. |
 | `rename_tab` | `tab_id`, `name` | `{ok}` | |
 | `destroy_tab` | `tab_id` | `{ok}` | Every pane in it. If it was the project's last tab a shell tab is auto-created. **Confirm first.** |
 
@@ -238,7 +238,7 @@ The bridge dials every `[[destinations]]` host of the machine running `quil mcp`
 
 Addressing: every tool that takes an id also takes an optional `host`. The bridge resolves it in this order — an explicit `host` (`"local"` or empty names the local daemon); else the host the id was **discovered on** (every `list_*` and every create files its ids); else local. So `list_panes` once, then `read_pane_output pane_id=…` just works for a remote pane. To CREATE something on a remote (a project, a tab in a project you have not listed yet), pass `host`.
 
-The list tools (`list_panes`, `list_tabs`, `list_projects`, `list_tasks`, `get_notifications`) aggregate across every connected host and stamp each entry with `host`; `watch_notifications` fans out one watcher per host and returns the first event. A host that is down is skipped in aggregates, named in a direct call's error, and re-dialled at most every 30 s. `quil --remote <host>` sessions still refuse to run the bridge — that mode is "drive that one machine", and the bridge would have to run there.
+The list tools (`list_panes`, `list_tabs`, `list_projects`, `list_tasks`, `get_notifications`) aggregate across every connected host and stamp each entry with `host`; `watch_notifications` fans out one watcher per host and returns the first event. A host that is down is skipped when NO host was named — that call asked for whatever is reachable — and is re-dialled at most every 30 s. Naming a host that is unknown or unreachable is an ERROR from those same tools, never an empty array: an unavailable workspace must not look like an empty one. `list_hosts` reports a dial still in flight as `error: "connecting"`, and never waits for it. `quil --remote <host>` sessions still refuse to run the bridge — that mode is "drive that one machine", and the bridge would have to run there.
 
 ### Delegating work to another pane
 
@@ -246,7 +246,7 @@ Before: pane A "asked" pane B for work by simulating keystrokes and then polling
 
 | Tool | Input | Returns | Notes |
 |---|---|---|---|
-| `delegate_task` | `pane_id` (target), `prompt`, `notify` (default true), `timeout` (seconds, 0 = none), `host` | `{id, from_pane, to_pane, to_pane_name, state, prompt, created_at, host}` | Pastes the prompt (bracketed paste, then Enter 100 ms later — a multi-line prompt is one block) into an AI pane, or types `prompt⏎` into a terminal. `from_pane` is the bridge's own pane. Refuses a placeholder, a pane with no process, an empty prompt, or self. |
+| `delegate_task` | `pane_id` (target), `prompt`, `notify` (default true), `timeout` (seconds, 0 = none), `host` | `{id, from_pane, to_pane, to_pane_name, state, prompt, created_at, host}` | Pastes the prompt (bracketed paste, then Enter 100 ms later — a multi-line prompt is one block) into an AI pane, or types `prompt⏎` into a terminal. `from_pane` is the bridge's own pane. Refuses a placeholder, a pane with no process, an empty prompt, self, or **a pane that already has a live task** (the error names it). |
 | `wait_task` | `task_id`, `timeout` (default 60, max 300) | `{…task, timeout}` | Blocks until the task ends. |
 | `get_task` | `task_id` | `{…task, result, error, started_at, ended_at, notified}` | `result` is the target's last 30 output lines at completion, ANSI-stripped. |
 | `list_tasks` | `pane_id` (requester OR target), `host` | `[…tasks]` | Oldest first. |
@@ -254,8 +254,10 @@ Before: pane A "asked" pane B for work by simulating keystrokes and then polling
 **Task states** — `sent` (prompt queued) → `working` (the target's first hook edge) → one of:
 
 - `done` — the target's agent state fell to idle **and stayed there for 2 s**. Not the raw `Stop`: Claude Code resumes on its own when a teammate reports back, and background subagents outlive the main turn. The daemon's per-pane work ledger (the same edges the TUI's spinner uses, subagent ledger included) is what decides.
-- `failed` — the target's process exited.
+- `failed` — the target's process exited, or the target pane was destroyed (`error` says which). A crash always beats a completion: an exit ends the task as `failed`, never as `done`.
 - `timeout` — you set one and it passed.
+
+**One live task per target pane.** A second `delegate_task` aimed at a pane that already has a task in flight is refused, and the error names the live task. Completion is read off the TARGET's work ledger, and that ledger says nothing about WHICH prompt finished — so two queued prompts would both be marked done by the first settled idle, including the one the agent had not looked at yet. Wait (`wait_task`), or use another pane.
 
 A terminal target is `done` when its shell reports the command finished (OSC 133 `D`, which Quil's shell integration emits only after a command actually ran — never for the startup prompt or a bare Enter). The command is sent with a trailing CR, the byte Enter produces; LF is echoed but not executed by PowerShell under ConPTY.
 
@@ -269,7 +271,9 @@ A terminal target is `done` when its shell reports the command finished (OSC 133
    [quil task task-3f9a1c2e] pane pane-77d2 (worker) done. Last output: ✓ 42 tests passed. Call get_task with task_id=task-3f9a1c2e for the full result, or read_pane_output on pane-77d2.
    ```
 
-   It is delivered only while the requester is **not mid-turn** (text typed into a working agent is at best queued behind its current work); otherwise it waits for the requester's next settled idle. So an orchestrator can hand out several tasks, carry on, finish its turn, and be woken by each result as it lands. `notified` in `get_task` says whether the line reached the requester. The notify-back needs requester and target on the SAME host — a remote daemon cannot type into a local pane; `wait_task` and `task_done` still work across hosts.
+   It is delivered only while the requester is **confirmed idle** (text typed into a working agent is at best queued behind its current work); otherwise it waits for the requester's next settled idle. So an orchestrator can hand out several tasks, carry on, finish its turn, and be woken by each result as it lands. `notified` in `get_task` says whether the line reached the requester. The notify-back needs requester and target on the SAME host — a remote daemon cannot type into a local pane; `wait_task` and `task_done` still work across hosts.
+
+   **It also needs the requester's hooks.** A pane whose `agent_state` is empty is UNKNOWN, not idle — no hook edge has ever been seen for it, and such a pane may be mid-turn — so the notice waits for a real idle edge and is never delivered if none comes. `wait_task` and the `task_done` event need no hooks and always work.
 
 The daemon does not parse the target's reply. The excerpt is raw output; the requester decides what to do with it (read more with `read_pane_output`, follow up with another `delegate_task`).
 

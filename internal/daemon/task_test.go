@@ -235,19 +235,192 @@ func TestDelegateTask_NotifyBackIsImmediateForAnIdleRequester(t *testing.T) {
 	from, fromSess := agentPane(t, d, "orchestrator")
 	to, _ := agentPane(t, d, "worker")
 
+	// The requester has finished a turn of its own, so its ledger really says
+	// idle — an UNKNOWN pane is not idle (see the test below).
+	d.emitEvent(hookEvent(from, "hook.claude.UserPromptSubmit", nil))
+	d.emitEvent(hookEvent(from, "hook.claude.Stop", nil))
+	if !waitUntilTrue(t, func() bool { return hasEventType(d, from.ID, "agent_idle") }, 2*time.Second) {
+		t.Fatal("requester never settled idle")
+	}
 	resp := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: to.ID, FromPane: from.ID, Prompt: "do it", Notify: true})
 	d.emitEvent(hookEvent(to, "hook.claude.UserPromptSubmit", nil))
 	d.emitEvent(hookEvent(to, "hook.claude.Stop", nil))
 	waitWrites(t, fromSess, "[quil task "+resp.Task.ID+"]")
 }
 
+// A requester whose ledger has never moved is UNKNOWN, not idle: an AI pane
+// whose hooks never loaded reports that while working. Typing the notice in
+// there lands it in a live turn.
+func TestDelegateTask_NotifyBackWaitsForAnUnknownRequester(t *testing.T) {
+	d := newTestDaemon(t)
+	shortenIdleSettle(t, 20*time.Millisecond)
+	from, fromSess := agentPane(t, d, "orchestrator")
+	to, _ := agentPane(t, d, "worker")
+	reg := d.tasksRegistry()
+
+	if got := d.buildPaneStatus(from).AgentState; got != "" {
+		t.Fatalf("requester AgentState = %q, want empty (unknown)", got)
+	}
+	resp := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: to.ID, FromPane: from.ID, Prompt: "do it", Notify: true})
+	d.emitEvent(hookEvent(to, "hook.claude.UserPromptSubmit", nil))
+	d.emitEvent(hookEvent(to, "hook.claude.Stop", nil))
+	if !waitUntilTrue(t, func() bool { return reg.info(reg.get(resp.Task.ID)).State == "done" }, 2*time.Second) {
+		t.Fatalf("task never done: %+v", reg.info(reg.get(resp.Task.ID)))
+	}
+	time.Sleep(60 * time.Millisecond)
+	if strings.Contains(fromSess.joined(), "[quil task") {
+		t.Fatalf("notice typed into an UNKNOWN-state requester: %q", fromSess.joined())
+	}
+	// Deferred, not dropped: the requester's own idle edge delivers it.
+	d.emitEvent(hookEvent(from, "hook.claude.UserPromptSubmit", nil))
+	d.emitEvent(hookEvent(from, "hook.claude.Stop", nil))
+	waitWrites(t, fromSess, "[quil task "+resp.Task.ID+"]")
+}
+
+// One live task per target pane. Completion is read off the TARGET's ledger,
+// which says nothing about which prompt finished — so with two tasks queued to
+// one pane the first settled idle marked both done, including the one whose
+// prompt the agent had not looked at yet.
+func TestDelegateTask_RefusesASecondTaskForTheSamePane(t *testing.T) {
+	d := newTestDaemon(t)
+	shortenIdleSettle(t, 20*time.Millisecond)
+	target, _ := agentPane(t, d, "worker")
+	other, _ := agentPane(t, d, "worker2")
+	reg := d.tasksRegistry()
+
+	first := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: target.ID, Prompt: "one"})
+	if first.Error != "" {
+		t.Fatalf("first: %+v", first)
+	}
+	second := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: target.ID, Prompt: "two"})
+	if second.Error == "" || !strings.Contains(second.Error, first.Task.ID) {
+		t.Fatalf("second task accepted or refusal does not name the live task: %+v", second)
+	}
+	if second.Task.ID != "" {
+		t.Fatalf("a refused delegate still minted a task: %+v", second.Task)
+	}
+	// Another pane is unaffected.
+	if r := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: other.ID, Prompt: "x"}); r.Error != "" {
+		t.Fatalf("a second pane was refused: %+v", r)
+	}
+	// Once the first ends, the pane takes work again.
+	d.emitEvent(hookEvent(target, "hook.claude.UserPromptSubmit", nil))
+	d.emitEvent(hookEvent(target, "hook.claude.Stop", nil))
+	if !waitUntilTrue(t, func() bool { return reg.info(reg.get(first.Task.ID)).State == "done" }, 2*time.Second) {
+		t.Fatalf("first never finished: %+v", reg.info(reg.get(first.Task.ID)))
+	}
+	if r := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: target.ID, Prompt: "three"}); r.Error != "" {
+		t.Fatalf("pane refused after its task ended: %+v", r)
+	}
+}
+
+// A process exit must WIN over a pending completion. The abort releases the
+// pane's idle subscribers on their own goroutine while taskObserve fails the
+// task on the emitting one, so without the aborted flag whichever got there
+// first decided whether a crashed pane was reported as done.
+//
+// The abort is driven through applyWorkEvent DIRECTLY, on purpose: emitEvent
+// would also run taskObserve, which fails the task on the caller's goroutine
+// and would mask which of the two answered. What is under test is the
+// subscriber alone — the end-to-end outcome is asserted after it.
+func TestDelegateTask_ProcessExitBeatsAPendingCompletion(t *testing.T) {
+	d := newTestDaemon(t)
+	// Long enough that the settle window cannot close by itself: the task's
+	// completion callback is registered and waiting when the exit lands.
+	shortenIdleSettle(t, 5*time.Second)
+	target, _ := agentPane(t, d, "worker")
+	reg := d.tasksRegistry()
+
+	resp := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: target.ID, Prompt: "do it"})
+	if resp.Error != "" {
+		t.Fatalf("delegate: %+v", resp)
+	}
+	d.emitEvent(hookEvent(target, "hook.claude.UserPromptSubmit", nil))
+	d.emitEvent(hookEvent(target, "hook.claude.Stop", nil))
+
+	d.applyWorkEvent(target, hookEvent(target, "process_exit", map[string]string{"exit_code": "1"}))
+	time.Sleep(150 * time.Millisecond) // the subscribers run on their own goroutine
+	if got := reg.info(reg.get(resp.Task.ID)); got.State == "done" {
+		t.Fatalf("a crashed pane's task was completed by its idle subscriber: %+v", got)
+	}
+	// End to end, the exit is what ends it, and it ends it as failed.
+	d.emitEvent(hookEvent(target, "process_exit", map[string]string{"exit_code": "1"}))
+	if got := reg.info(reg.get(resp.Task.ID)); got.State != "failed" {
+		t.Fatalf("after the exit: %+v", got)
+	}
+}
+
+// Destroying a pane ends the tasks aimed at it. Nothing else can: the state
+// machine only advances on events for a pane the session still holds, and
+// every destroy path removes it from the session first — so the task sat at
+// `sent` forever and wait_task could only keep timing out.
+func TestDelegateTask_DestroyingTheTargetFailsItsTasks(t *testing.T) {
+	d := newTestDaemon(t)
+	target, _ := agentPane(t, d, "worker")
+	reg := d.tasksRegistry()
+
+	resp := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: target.ID, Prompt: "do it"})
+	if resp.Error != "" {
+		t.Fatalf("delegate: %+v", resp)
+	}
+	msg, err := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: target.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.handleDestroyPane(msg)
+
+	info := reg.info(reg.get(resp.Task.ID))
+	if info.State != "failed" || !strings.Contains(info.Error, "destroyed") {
+		t.Fatalf("task after its target was destroyed: %+v", info)
+	}
+	if info.EndedAt == 0 {
+		t.Fatalf("no end timestamp: %+v", info)
+	}
+	select {
+	case <-reg.get(resp.Task.ID).done:
+	default:
+		t.Fatal("a waiter would still be blocked")
+	}
+}
+
+// Every read of task.state happens under the registry lock, and a terminal
+// state can never be overwritten. Run with -race: the observer reads state on
+// the emitting goroutine while timeouts and completions write it on theirs,
+// and an unguarded sent→working write can resurrect a timed-out task, whose
+// next completion closes its done channel a second time and panics.
+func TestDelegateTask_StateTransitionsAreAtomic(t *testing.T) {
+	d := newTestDaemon(t)
+	shortenIdleSettle(t, time.Millisecond)
+	reg := d.tasksRegistry()
+
+	for i := 0; i < 20; i++ {
+		target, _ := agentPane(t, d, "worker")
+		resp := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: target.ID, Prompt: "x", TimeoutMs: 1})
+		if resp.Error != "" {
+			t.Fatalf("delegate: %+v", resp)
+		}
+		var wg sync.WaitGroup
+		for _, ev := range []string{"hook.claude.UserPromptSubmit", "hook.claude.Stop", "hook.claude.PreToolUse", "hook.claude.Stop"} {
+			wg.Add(1)
+			go func(typ string) {
+				defer wg.Done()
+				d.emitEvent(hookEvent(target, typ, nil))
+			}(ev)
+		}
+		wg.Wait()
+		if !waitUntilTrue(t, func() bool { return taskState(reg.info(reg.get(resp.Task.ID)).State).terminal() }, 2*time.Second) {
+			t.Fatalf("task never reached a terminal state: %+v", reg.info(reg.get(resp.Task.ID)))
+		}
+	}
+}
+
 func TestTaskRegistry_EvictsOldestTerminalOnly(t *testing.T) {
 	r := newTaskRegistry(2)
-	live := &task{id: "a", state: taskWorking, done: make(chan struct{})}
-	old := &task{id: "b", state: taskDone, done: make(chan struct{})}
-	r.add(live)
-	r.add(old)
-	r.add(&task{id: "c", state: taskSent, done: make(chan struct{})})
+	live := &task{id: "a", to: "pane-1", state: taskWorking, done: make(chan struct{})}
+	old := &task{id: "b", to: "pane-2", state: taskDone, done: make(chan struct{})}
+	r.addLive(live)
+	r.addLive(old)
+	r.addLive(&task{id: "c", to: "pane-3", state: taskSent, done: make(chan struct{})})
 	if r.get("b") != nil {
 		t.Fatal("terminal task b not evicted")
 	}

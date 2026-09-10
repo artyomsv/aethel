@@ -166,6 +166,30 @@ func TestListPanes_AggregatesHostsAndMarksSelf(t *testing.T) {
 	}
 }
 
+// A named host that does not exist is an ERROR from every aggregating tool.
+// Swallowing it returned a successful empty array, so an unreachable or
+// misspelled host was indistinguishable from an empty workspace — and that is
+// the answer the agent acts on.
+func TestAggregatingTools_NamedHostErrorIsNotAnEmptyList(t *testing.T) {
+	local := newFakeIPCDaemon(t, "pane-local")
+	remote := newFakeIPCDaemon(t, "pane-remote")
+	session, _ := toolHarness(t, local, remote)
+
+	for _, tool := range []string{"list_panes", "list_tabs", "list_projects", "list_tasks", "get_notifications"} {
+		text, err := callTool(t, session, tool, map[string]any{"host": "missing"})
+		if err == nil {
+			t.Fatalf("%s with an unknown host returned %q instead of an error", tool, text)
+		}
+		if !strings.Contains(err.Error(), "unknown host") {
+			t.Fatalf("%s error does not name the refusal: %v", tool, err)
+		}
+	}
+	// A host that IS configured still aggregates normally.
+	if _, err := callTool(t, session, "list_panes", map[string]any{"host": "gpu"}); err != nil {
+		t.Fatalf("list_panes on a live host: %v", err)
+	}
+}
+
 func TestSendToPane_PasteWrapsAndThenEnters(t *testing.T) {
 	local := newFakeIPCDaemon(t, "pane-local")
 	session, _ := toolHarness(t, local, nil)

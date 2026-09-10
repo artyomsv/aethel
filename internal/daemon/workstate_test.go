@@ -140,25 +140,32 @@ func TestEmitEvent_MutedPaneStillUpdatesLedger(t *testing.T) {
 	}
 }
 
-// onPaneIdle runs immediately for a pane that is not working, and after the
-// settle for one that is.
+// onPaneIdle runs immediately only for a CONFIRMED idle pane, and after the
+// settle window for one that is working.
 func TestOnPaneIdle_RunsNowOrAfterSettle(t *testing.T) {
 	d := newTestDaemon(t)
 	shortenIdleSettle(t, 20*time.Millisecond)
 	pane := spawnedPane(t, d)
 
 	ran := make(chan struct{}, 2)
-	if !d.onPaneIdle(pane.ID, func() { ran <- struct{}{} }) {
+	// Settled idle, not merely stopped: inside the settle window a pane is
+	// still deciding, and a subscriber registered there must wait it out.
+	d.emitEvent(hookEvent(pane, "hook.claude.UserPromptSubmit", nil))
+	d.emitEvent(hookEvent(pane, "hook.claude.Stop", nil))
+	if !waitUntilTrue(t, func() bool { return hasEventType(d, pane.ID, "agent_idle") }, time.Second) {
+		t.Fatal("pane never settled idle")
+	}
+	if !d.onPaneIdle(pane.ID, func(bool) { ran <- struct{}{} }) {
 		t.Fatal("onPaneIdle refused a live pane")
 	}
 	select {
 	case <-ran:
 	default:
-		t.Fatal("subscriber on an unknown-state pane did not run immediately")
+		t.Fatal("subscriber on a settled-idle pane did not run immediately")
 	}
 
 	d.emitEvent(hookEvent(pane, "hook.claude.UserPromptSubmit", nil))
-	d.onPaneIdle(pane.ID, func() { ran <- struct{}{} })
+	d.onPaneIdle(pane.ID, func(bool) { ran <- struct{}{} })
 	select {
 	case <-ran:
 		t.Fatal("subscriber ran while the pane was working")
@@ -170,8 +177,38 @@ func TestOnPaneIdle_RunsNowOrAfterSettle(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("subscriber never ran after the pane settled idle")
 	}
-	if d.onPaneIdle("pane-nope", func() {}) {
+	if d.onPaneIdle("pane-nope", func(bool) {}) {
 		t.Fatal("onPaneIdle accepted an unknown pane")
+	}
+}
+
+// WorkUnknown is not idle: no classified edge has been seen, so the pane may be
+// mid-turn with hooks that never loaded. Running the subscriber there types
+// into a live turn, which is what the idle guard exists to prevent.
+func TestOnPaneIdle_UnknownStateIsNotIdle(t *testing.T) {
+	d := newTestDaemon(t)
+	shortenIdleSettle(t, 20*time.Millisecond)
+	pane := spawnedPane(t, d)
+
+	if got := d.buildPaneStatus(pane).AgentState; got != "" {
+		t.Fatalf("fresh pane AgentState = %q, want empty (unknown)", got)
+	}
+	ran := make(chan struct{}, 1)
+	if !d.onPaneIdle(pane.ID, func(bool) { ran <- struct{}{} }) {
+		t.Fatal("onPaneIdle refused a live pane")
+	}
+	select {
+	case <-ran:
+		t.Fatal("subscriber ran immediately on an UNKNOWN-state pane")
+	default:
+	}
+	// It is deferred, not dropped: a real idle edge delivers it.
+	d.emitEvent(hookEvent(pane, "hook.claude.UserPromptSubmit", nil))
+	d.emitEvent(hookEvent(pane, "hook.claude.Stop", nil))
+	select {
+	case <-ran:
+	case <-time.After(time.Second):
+		t.Fatal("deferred subscriber never ran after the pane settled idle")
 	}
 }
 
@@ -181,11 +218,14 @@ func TestOnPaneIdle_ProcessExitReleasesSubscribers(t *testing.T) {
 	d := newTestDaemon(t)
 	pane := spawnedPane(t, d)
 	d.emitEvent(hookEvent(pane, "hook.claude.UserPromptSubmit", nil))
-	ran := make(chan struct{}, 1)
-	d.onPaneIdle(pane.ID, func() { ran <- struct{}{} })
+	ran := make(chan bool, 1)
+	d.onPaneIdle(pane.ID, func(aborted bool) { ran <- aborted })
 	d.emitEvent(hookEvent(pane, "process_exit", map[string]string{"exit_code": "1"}))
 	select {
-	case <-ran:
+	case aborted := <-ran:
+		if !aborted {
+			t.Fatal("a process exit ran the subscriber as an ordinary completion")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("subscriber stranded after process exit")
 	}

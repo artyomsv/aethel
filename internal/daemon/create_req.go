@@ -92,6 +92,14 @@ func (d *Daemon) buildCreatePayload(req ipc.CreatePaneReqPayload, tabID, fallbac
 	if p == nil && paneType != "terminal" {
 		return ipc.CreatePanePayload{}, "", fmt.Errorf("unknown plugin type %q (see list_plugins)", paneType)
 	}
+	// Raw arguments are for plugins with saved instances (ssh, stripe), where
+	// the instance IS its argument list. For an AI plugin they REPLACE the
+	// command's own arguments, so they bypass every named-toggle check above
+	// and can start an agent with an invocation the plugin does not support —
+	// the schema says "never for AI panes" and this is what makes that true.
+	if len(req.InstanceArgs) > 0 && p != nil && p.Category == "ai" {
+		return ipc.CreatePanePayload{}, "", fmt.Errorf("instance_args replace %s's own arguments — use toggles for an AI pane (see list_plugins)", paneType)
+	}
 	toggleArgs, err := resolveToggles(p, req.Toggles)
 	if err != nil {
 		return ipc.CreatePanePayload{}, "", err
@@ -229,26 +237,27 @@ func (d *Daemon) handleCreateTabReq(conn *ipc.Conn, msg *ipc.Message) {
 	if name == "" {
 		name = "New Tab"
 	}
-	// Validated BEFORE the tab exists, so a bad request creates nothing at
-	// all — unlike the TUI path, which has a tab on screen to fall back to.
-	// The tab id is not known yet; the payload's TabID is filled after.
-	if first.WorktreeBranch != "" {
-		if err := gitworktree.ValidateBranch(first.WorktreeBranch); err != nil {
-			respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: err.Error()})
-			return
-		}
+	// EVERYTHING is validated before the tab exists, so a refused request
+	// creates nothing at all — unlike the TUI path, which has a tab on screen
+	// to fall back to. Validating after the create left an unknown plugin, a
+	// conflicting toggle pair or an unresolvable worktree root with a tab
+	// holding a fallback shell nobody asked for, reported through a response
+	// that still carried tab_id and therefore read as success at the tool.
+	//
+	// The fallback CWD is the project root, and it has to be resolved from the
+	// project id rather than from the tab: there is no tab yet. An empty id
+	// means the active project, which is where CreateTabInProject files it.
+	projectID := req.ProjectID
+	if projectID == "" {
+		projectID = d.session.ActiveProject()
 	}
-	tab := d.session.CreateTabInProject(req.ProjectID, name)
-	payload, cwd, err := d.buildCreatePayload(first, tab.ID, d.projectCWD(tab.ProjectID))
+	payload, cwd, err := d.buildCreatePayload(first, "", d.projectCWD(projectID))
 	if err != nil {
-		// The tab exists and must not be left empty — the same recovery the
-		// TUI path makes, so the daemon never holds a pane-less tab.
-		d.ensureTabNotEmpty(tab.ID)
-		d.broadcastState()
-		d.requestSnapshot()
-		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{TabID: tab.ID, Error: err.Error()})
+		respondTo(conn, msg.ID, ipc.MsgCreateTabResp, ipc.CreateTabRespPayload{Error: err.Error()})
 		return
 	}
+	tab := d.session.CreateTabInProject(req.ProjectID, name)
+	payload.TabID = tab.ID
 	log.Printf("tab created over IPC request: %s %q project=%s", tab.ID, tab.Name, tab.ProjectID)
 
 	if payload.Worktree != nil {

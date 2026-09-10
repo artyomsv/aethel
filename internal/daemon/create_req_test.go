@@ -82,6 +82,9 @@ func TestCreatePaneReq_RefusalsCreateNoPane(t *testing.T) {
 		{"unknown tab", ipc.CreatePaneReqPayload{TabID: "tab-nope"}, "no such tab"},
 		{"worktree outside a repo", ipc.CreatePaneReqPayload{TabID: tab.ID, Type: "claude-code", CWD: t.TempDir(), WorktreeBranch: "feat/x"}, "not inside a git repository"},
 		{"bad branch", ipc.CreatePaneReqPayload{TabID: tab.ID, Type: "claude-code", CWD: t.TempDir(), WorktreeBranch: "bad name"}, ""},
+		// Raw args REPLACE an AI plugin's own command line, so they route
+		// around every toggle check above. Names only, for AI panes.
+		{"raw args on an AI plugin", ipc.CreatePaneReqPayload{TabID: tab.ID, Type: "claude-code", InstanceArgs: []string{"--dangerously-skip-permissions"}}, "use toggles"},
 	}
 	for _, tc := range cases {
 		resp := decodeInto[ipc.CreatePaneRespPayload](t, roundTrip(t, client, ipc.MsgCreatePaneReq, ipc.MsgCreatePaneResp, tc.req))
@@ -124,6 +127,62 @@ func TestCreateTabReq_FilesTheTabUnderTheNamedProject(t *testing.T) {
 		ipc.CreateTabReqPayload{ProjectID: "proj-nope"}))
 	if bad.Error == "" || bad.TabID != "" {
 		t.Fatalf("unknown project: %+v", bad)
+	}
+}
+
+// instance_args stay legal for a plugin whose instances ARE argument lists.
+func TestCreatePaneReq_InstanceArgsStayLegalForNonAIPlugins(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	tab := d.session.CreateTab("t")
+
+	resp := decodeInto[ipc.CreatePaneRespPayload](t, roundTrip(t, client, ipc.MsgCreatePaneReq, ipc.MsgCreatePaneResp,
+		ipc.CreatePaneReqPayload{TabID: tab.ID, Type: "ssh", InstanceArgs: []string{"user@host"}}))
+	if resp.PaneID == "" {
+		t.Fatalf("resp = %+v, want a pane", resp)
+	}
+	pane := d.session.Pane(resp.PaneID)
+	pane.PluginMu.Lock()
+	args := pane.InstanceArgs
+	pane.PluginMu.Unlock()
+	if strings.Join(args, " ") != "user@host" {
+		t.Fatalf("InstanceArgs = %v", args)
+	}
+}
+
+// A refused first pane must leave NO tab. Validating after CreateTabInProject
+// kept the tab, filled it with a fallback shell nobody asked for, and answered
+// with a tab_id — which the create_tab tool reports as success.
+func TestCreateTabReq_RefusalCreatesNoTab(t *testing.T) {
+	d, client := mcpTestDaemon(t)
+	d.session.CreateTab("t")
+	prevList := worktreeListFn
+	worktreeListFn = func(ctx context.Context, dir string) ([]gitworktree.Worktree, error) { return nil, nil }
+	t.Cleanup(func() { worktreeListFn = prevList })
+	before := len(d.session.Tabs())
+
+	cases := []struct {
+		name string
+		req  ipc.CreatePaneReqPayload
+		want string
+	}{
+		{"unknown plugin", ipc.CreatePaneReqPayload{Type: "vim-but-not-a-plugin"}, "unknown plugin"},
+		{"group clash", ipc.CreatePaneReqPayload{Type: "claude-code", Toggles: []string{"dangerously_skip_permissions", "enable_auto_mode"}}, "mutually exclusive"},
+		{"worktree outside a repo", ipc.CreatePaneReqPayload{Type: "claude-code", CWD: t.TempDir(), WorktreeBranch: "feat/x"}, "not inside a git repository"},
+		{"raw args on an AI plugin", ipc.CreatePaneReqPayload{Type: "claude-code", InstanceArgs: []string{"--chrome"}}, "use toggles"},
+	}
+	for _, tc := range cases {
+		first := tc.req
+		resp := decodeInto[ipc.CreateTabRespPayload](t, roundTrip(t, client, ipc.MsgCreateTabReq, ipc.MsgCreateTabResp,
+			ipc.CreateTabReqPayload{Name: "worker", FirstPane: &first}))
+		if resp.Error == "" || resp.TabID != "" || resp.PaneID != "" {
+			t.Fatalf("%s: resp = %+v, want an error and no tab", tc.name, resp)
+		}
+		if !strings.Contains(resp.Error, tc.want) {
+			t.Fatalf("%s: error %q does not mention %q", tc.name, resp.Error, tc.want)
+		}
+	}
+	if got := len(d.session.Tabs()); got != before {
+		t.Fatalf("tab count %d → %d: a refused create left a tab behind", before, got)
 	}
 }
 
