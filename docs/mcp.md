@@ -14,11 +14,14 @@ The result: your AI can **see what's in your build pane and react**, instead of 
   - [VS Code (GitHub Copilot Chat)](#vs-code-github-copilot-chat)
   - [Any MCP-capable client](#any-mcp-capable-client)
 - [Verify the connection](#verify-the-connection)
-- [The 18 tools](#the-18-tools)
+- [The 34 tools](#the-34-tools)
   - [Discovery](#discovery)
   - [Reading pane output](#reading-pane-output)
   - [Interacting with panes](#interacting-with-panes)
   - [Pane lifecycle](#pane-lifecycle)
+  - [Projects and tabs](#projects-and-tabs)
+  - [Remote hosts](#remote-hosts)
+  - [Delegating work to another pane](#delegating-work-to-another-pane)
   - [TUI cooperation](#tui-cooperation)
   - [Event observation](#event-observation)
   - [Memory reporting](#memory-reporting)
@@ -67,7 +70,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 18 tools.
+Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 34 tools.
 
 ### Claude Code (CLI)
 
@@ -136,7 +139,7 @@ In your AI client, ask:
 
 The AI should call `list_panes` and return a JSON array with each pane's `id`, `type`, `tab_id`, `cwd`, etc. If you see "no Quil panes" or an error, check [Troubleshooting](#troubleshooting).
 
-## The 18 tools
+## The 34 tools
 
 Tools are grouped below by purpose. Every tool returns a `text` content block; many return JSON-formatted payloads.
 
@@ -146,8 +149,14 @@ Start here. Other tools need pane IDs and tab IDs as inputs.
 
 | Tool | Input | Returns |
 |---|---|---|
-| `list_panes` | — | JSON array of all panes: `{id, type, name, cwd, tab_id, alive, pid, preparing_worktree}` |
-| `list_tabs` | — | JSON array of all tabs: `{id, name, pane_count, active}` |
+| `list_panes` | `host` (optional) | JSON array of all panes on every connected host: `{id, type, name, cwd, tab_id, project_id, running, preparing_worktree, agent_state, blocked_reason, last_idle_at, host, self}` |
+| `list_tabs` | `project_id`, `host` (both optional) | JSON array of all tabs: `{id, name, project_id, pane_count, active, host}` |
+| `list_projects` | `host` (optional) | JSON array of projects: `{id, name, root_dir, active, bootstrap, tab_ids, active_tab, host}` |
+| `list_hosts` | — | The remote daemons this bridge reaches (`[[destinations]]` of the machine running `quil mcp`) with `connected` and any dial error |
+| `list_plugins` | `host` (optional) | Every plugin with `available`, `prompts_cwd`, `sessions` and its `toggles[]` `{name, label, group, default}`, plus `sandbox_available`. Call before `create_pane` with an AI type |
+| `list_sessions` | `cwd` (required), `host` | The Claude Code sessions recorded for a directory: `{id, title, modified_ms, in_use_pane_id}` |
+
+**`agent_state`** is the daemon's own replay of an AI pane's hook events: `working`, `blocked` (with `blocked_reason` naming the tool a permission prompt waits on), or `idle`. **Empty means unknown, not idle** — a terminal pane, or an AI pane whose hooks never loaded. **`self`** marks the pane the bridge is running inside (the daemon sets `QUIL_PANE_ID` on every AI pane's child, and the bridge is that child's child), so an orchestrator can tell itself apart from its workers.
 
 ### Reading pane output
 
@@ -165,7 +174,7 @@ Two ways to see what's in a pane — pick the right one for the kind of program 
 
 | Tool | Input | Returns | Notes |
 |---|---|---|---|
-| `send_to_pane` | `pane_id` (required), `input` (text), `press_enter` (default true) | "Sent N bytes to <pane>", or an ERROR — see below | Use for typing commands. Newline is appended by default so the command executes. **Wrap secrets in `<<REDACT>>...<</REDACT>>` markers** — see [Security](#security-redaction-model) |
+| `send_to_pane` | `pane_id` (required), `input` (text), `press_enter` (default true), `paste` (default false) | "Sent N bytes to <pane>", or an ERROR — see below | Use for typing commands. Newline is appended by default so the command executes. `paste=true` delivers the text as a bracketed paste and presses Enter 100 ms later, so a multi-line prompt to an AI pane is not submitted at its first newline. For a prompt to another AI pane prefer [`delegate_task`](#delegating-work-to-another-pane). **Wrap secrets in `<<REDACT>>...<</REDACT>>` markers** — see [Security](#security-redaction-model) |
 | `send_keys` | `pane_id` (required), `keys` (array of names or literal text, max 1000) | "Sent N keys to <pane>", or an ERROR — see below | Use for navigating TUIs. Each entry is either a key name (see table below) or literal text. The bridge inserts 50 ms between escape sequences so a TUI app processes each key before the next arrives. |
 
 **Both tools now FAIL rather than reporting a send that went nowhere.** They wait for the daemon to confirm the bytes reached a pane's input queue, and return an error naming the reason when it could not:
@@ -185,9 +194,84 @@ Previously these calls answered `"Sent N bytes"` regardless, so input aimed at a
 
 | Tool | Input | Returns | Notes |
 |---|---|---|---|
-| `create_pane` | `tab_id` (optional, default = active), `cwd` (optional), `type` (default `terminal`; also `claude-code`, `opencode`, `codex`, `ssh`, `stripe`) | JSON: `{pane_id, tab_id}` | Spawns a new pane in the given tab. |
+| `create_pane` | `tab_id` (optional, default = active), `cwd`, `type` (default `terminal`; also `claude-code`, `opencode`, `codex`, `ssh`, `stripe`), `name`, `toggles[]`, `resume_session_id`, `worktree_branch`, `sandbox_image`, `sandbox_auth`, `host` | JSON: `{pane_id, tab_id, host, error?}` | Spawns a new pane with the same options the Ctrl+N dialog collects — see below. An ERROR (no pane) names the refusal; `error` WITH a `pane_id` means the pane exists but its process failed to start. |
+| `rename_pane` | `pane_id`, `name` | `{ok}` | What Alt+F2 does. |
 | `restart_pane` | `pane_id` (required) | JSON: `{success, message}` | Kills + respawns with the same plugin, CWD, and instance config. Useful for stuck or crashed panes. AI clients should confirm with the user before calling. |
 | `destroy_pane` | `pane_id` (required) | "Destroyed pane <id>" or "Failed to destroy" | If it was the last pane in a tab, a replacement terminal pane is auto-created. AI clients should confirm before calling. |
+
+**`create_pane` options, and where each one goes:**
+
+| Input | Meaning | Validated by |
+|---|---|---|
+| `toggles` | Plugin toggle NAMES from `list_plugins` — `dangerously_skip_permissions`, `enable_auto_mode`, `chrome` (claude-code); `bypass_approvals_and_sandbox`, `auto_workspace_write`, `search` (codex); `print_logs` (opencode). Resolved to the plugin's own flags by the daemon. An unknown name, or two names from one group (the permission modes), is refused — never silently dropped, because an unattended pane without the permission mode it asked for is a pane stuck on a prompt nobody will answer. | daemon |
+| `resume_session_id` | A Claude session from `list_sessions`. Must be a UUID and not held by a live pane; otherwise the pane starts fresh. | daemon |
+| `worktree_branch` | Creates a NEW linked worktree on this branch off the repository that contains `cwd` and opens the pane inside it. The repo root is resolved by the daemon from `cwd` — a client-built path is how a worktree ends up nested inside a checkout. Not a repository, a bad branch name, or a branch already checked out elsewhere → ERROR and no pane. The bridge waits up to 130 s for the checkout. | daemon |
+| `sandbox_image` / `sandbox_auth` | Runs the pane in a Docker container from the image (`token` or `browser` sign-in for claude-code; empty follows `[sandbox] auth`). Only when `list_plugins` reports `sandbox_available`. A rejected image destroys the pane rather than running it on the host. See [Sandbox panes](sandbox-panes.md). | daemon |
+| `instance_name` / `instance_args` | For plugins with saved instances (`ssh`, `stripe`). `instance_args` REPLACE the plugin's own arguments — never use them for an AI pane; that is what `toggles` are for. | daemon |
+
+The four "deliberately not exposed to MCP" notes in `internal/ipc/protocol.go` (resume, worktree, sandbox, overlay) are now three: overlay panes stay TUI-only. The other three ride the same validated payload the TUI sends, so an agent gets exactly the refusals the dialog gets.
+
+### Projects and tabs
+
+A project groups tabs and owns a root directory (new tabs open there). Every tab and pane reports its `project_id`.
+
+| Tool | Input | Returns | Notes |
+|---|---|---|---|
+| `list_projects` | `host` (optional) | `[{id, name, root_dir, active, bootstrap, tab_ids, active_tab, host}]` | `bootstrap` marks the "Default" project the daemon invented because a tab needed a home. |
+| `create_project` | `name` (required), `root_dir`, `host` | `{project_id, name, host}` | Opens with one shell tab, like a project made from the TUI. The name is made unique on the daemon if taken. |
+| `update_project` | `project_id`, `name` (required), `root_dir` (optional) | `{ok}` | Rename and/or relocate. Renaming a bootstrap project adopts it. |
+| `switch_project` | `project_id` | `{ok}` | Brings the project's last active tab into view in the TUI. |
+| `destroy_project` | `project_id` | `{ok}` | Destroys every tab and pane under it. **Confirm with the user first.** |
+| `create_tab` | `name`, `project_id` (default: active project), `first_pane` (any `create_pane` option), `host` | `{tab_id, pane_id, preparing_worktree?, error?, host}` | Does NOT steal the TUI's focus — an orchestrator opening tabs for workers must not yank the user around; call `switch_tab` when you want it. With `worktree_branch` the returned `pane_id` is a placeholder (no process, `preparing_worktree` set); the `worktree_ready` event names the pane that replaces it. |
+| `rename_tab` | `tab_id`, `name` | `{ok}` | |
+| `destroy_tab` | `tab_id` | `{ok}` | Every pane in it. If it was the project's last tab a shell tab is auto-created. **Confirm first.** |
+
+Every mutation answers `{id, ok, error}` — the daemon reports whether it applied, instead of the agent inferring it from the next listing. (The TUI's own sends stay fire-and-forget; only an ID-bearing request gets the answer.) Moving a single tab between projects is not offered — the daemon has no such primitive; `MergeProjects` moves all of a project's tabs.
+
+### Remote hosts
+
+The bridge dials every `[[destinations]]` host of the machine running `quil mcp` — the same hosts the TUI shows in its sidebar — in the background, with the same ssh transport, version gate and hello. The local daemon is always there and needs no host.
+
+| Tool | Input | Returns |
+|---|---|---|
+| `list_hosts` | — | `{local: true, hosts: [{host, label, connected, error}]}` |
+
+Addressing: every tool that takes an id also takes an optional `host`. The bridge resolves it in this order — an explicit `host` (`"local"` or empty names the local daemon); else the host the id was **discovered on** (every `list_*` and every create files its ids); else local. So `list_panes` once, then `read_pane_output pane_id=…` just works for a remote pane. To CREATE something on a remote (a project, a tab in a project you have not listed yet), pass `host`.
+
+The list tools (`list_panes`, `list_tabs`, `list_projects`, `list_tasks`, `get_notifications`) aggregate across every connected host and stamp each entry with `host`; `watch_notifications` fans out one watcher per host and returns the first event. A host that is down is skipped in aggregates, named in a direct call's error, and re-dialled at most every 30 s. `quil --remote <host>` sessions still refuse to run the bridge — that mode is "drive that one machine", and the bridge would have to run there.
+
+### Delegating work to another pane
+
+Before: pane A "asked" pane B for work by simulating keystrokes and then polling. Nothing tied the request to the `Stop` that eventually answered it, and `hook.claude.Stop` fires while background subagents are still running, so a watcher woke early.
+
+| Tool | Input | Returns | Notes |
+|---|---|---|---|
+| `delegate_task` | `pane_id` (target), `prompt`, `notify` (default true), `timeout` (seconds, 0 = none), `host` | `{id, from_pane, to_pane, to_pane_name, state, prompt, created_at, host}` | Pastes the prompt (bracketed paste, then Enter 100 ms later — a multi-line prompt is one block) into an AI pane, or types `prompt⏎` into a terminal. `from_pane` is the bridge's own pane. Refuses a placeholder, a pane with no process, an empty prompt, or self. |
+| `wait_task` | `task_id`, `timeout` (default 60, max 300) | `{…task, timeout}` | Blocks until the task ends. |
+| `get_task` | `task_id` | `{…task, result, error, started_at, ended_at, notified}` | `result` is the target's last 30 output lines at completion, ANSI-stripped. |
+| `list_tasks` | `pane_id` (requester OR target), `host` | `[…tasks]` | Oldest first. |
+
+**Task states** — `sent` (prompt queued) → `working` (the target's first hook edge) → one of:
+
+- `done` — the target's agent state fell to idle **and stayed there for 2 s**. Not the raw `Stop`: Claude Code resumes on its own when a teammate reports back, and background subagents outlive the main turn. The daemon's per-pane work ledger (the same edges the TUI's spinner uses, subagent ledger included) is what decides.
+- `failed` — the target's process exited.
+- `timeout` — you set one and it passed.
+
+A terminal target is `done` when its shell reports the command finished (OSC 133, which Quil's shell integration provides).
+
+**Hearing about it.** Three ways, pick by what the requester is doing meanwhile:
+
+1. `wait_task` — blocking; fine when you have nothing else to do.
+2. `watch_notifications` / `get_notifications` — a `task_done` event is queued on the TARGET pane with `data.task_id`, `data.state`, `data.from_pane` and the result excerpt.
+3. **The notify-back** (`notify`, default on) — when the task ends, the daemon types one line into the REQUESTER's own prompt:
+
+   ```
+   [quil task task-3f9a1c2e] pane pane-77d2 (worker) done. Last output: ✓ 42 tests passed. Call get_task with task_id=task-3f9a1c2e for the full result, or read_pane_output on pane-77d2.
+   ```
+
+   It is delivered only while the requester is **not mid-turn** (text typed into a working agent is at best queued behind its current work); otherwise it waits for the requester's next settled idle. So an orchestrator can hand out several tasks, carry on, finish its turn, and be woken by each result as it lands. `notified` in `get_task` says whether the line reached the requester. The notify-back needs requester and target on the SAME host — a remote daemon cannot type into a local pane; `wait_task` and `task_done` still work across hosts.
+
+The daemon does not parse the target's reply. The excerpt is raw output; the requester decides what to do with it (read more with `read_pane_output`, follow up with another `delegate_task`).
 
 ### TUI cooperation
 
@@ -209,7 +293,7 @@ Replace polling-with-sleep + screenshot with the blocking watcher.
 | `watch_notifications` | `pane_ids` (optional, empty = all), `timeout` (seconds, default 60, max 300), `since_timestamp` (Unix ms, optional) | JSON: the first event that fires, or `{timed_out: true}` | **Blocks** up to `timeout` seconds. Use after kicking off a long-running task ("watch the build pane until it finishes"). Replaces sleep+poll patterns. Pass `since_timestamp` (the timestamp of the last event you handled) to catch events fired between your previous action and this call — the daemon returns the oldest queued event newer than the marker without ever registering a watcher. |
 | `dismiss_notifications` | `event_id` (optional, empty = dismiss all) | Confirmation string | Acks events the agent has already handled so they don't show up again on the next `get_notifications` call. |
 
-The events fired by the daemon include: process exits (any pane), OSC 133 command completion (shell panes), bell characters (with 30 s cooldown to avoid storming), and smart-idle pattern matches based on per-plugin `[[idle_handlers]]` in TOML. Each event carries a `data.excerpt` field with the last few stripped lines that triggered it, so an agent can act on the context without a follow-up `read_pane_output` call.
+The events fired by the daemon include: process exits (any pane), OSC 133 command completion (shell panes), bell characters (with 30 s cooldown to avoid storming), smart-idle pattern matches based on per-plugin `[[idle_handlers]]` in TOML, the hook events of AI panes (`hook.claude.Stop`, `hook.claude.PermissionRequest`, …), **`agent_idle`** ("Turn finished" — an AI pane's work state fell to idle and stayed there for 2 s, subagents included; the reliable "it is done" signal, unlike the raw `Stop`) and **`task_done`** (a delegated task ended; see above). Each event carries a `data.excerpt` field with the last few stripped lines that triggered it, so an agent can act on the context without a follow-up `read_pane_output` call. Every event also carries `host` when it came from a remote daemon; pass it back to `dismiss_notifications`.
 
 ### Memory reporting
 
@@ -241,6 +325,16 @@ The AI calls `create_pane` (with `cwd="~/work/quil"` and `type="terminal"`), `se
 > The third pane in the build tab is unresponsive. What's the status, and can you restart it?
 
 The AI calls `list_panes` + `get_pane_status` to inspect, then asks for confirmation before calling `restart_pane`.
+
+**Spin up a worker and hand it a job** —
+> Open a Claude Code pane in a fresh worktree `feat/login-form`, skip permissions, and have it implement the login form. Tell me when it's done.
+
+The AI calls `list_plugins` (to confirm the toggle name), `create_pane` with `type="claude-code"`, `worktree_branch="feat/login-form"`, `toggles=["dangerously_skip_permissions"]`, then `delegate_task` on the new pane. It carries on; when the worker's turn settles, the `[quil task …] done` line lands in its own prompt and it reports back.
+
+**Fan out across a remote box** —
+> On the gpu host, make a project for ~/work/train, open a codex pane there and start the benchmark.
+
+The AI calls `list_hosts`, `create_project host="gpu"`, `create_tab project_id=… first_pane={type:"codex", toggles:["auto_workspace_write"]}`, then `delegate_task`; it waits with `wait_task` because the notify-back cannot cross hosts.
 
 ## Security: redaction model
 
@@ -303,7 +397,13 @@ The bridge tried to auto-start `quild` but couldn't. Check that `quild` is on `P
 The client doesn't see your config. Restart the client. If that doesn't work, check that `quil` is on the client's `PATH` (not just your shell's). On macOS, GUI-launched apps don't inherit terminal `PATH` — use the absolute path in the config, e.g., `"command": "/Users/you/.local/bin/quil"`.
 
 **Tool calls hang for ~10 s and time out** —
-The bridge's request timeout is 10 s. Long-running operations should use `watch_notifications` (blocking, configurable timeout up to 300 s) instead of a synchronous tool. If a normal tool consistently times out, check `~/.quil/quild.log` for daemon errors.
+The bridge's request timeout is 10 s (130 s for a `create_pane` / `create_tab` with `worktree_branch`, which waits for the checkout). Long-running operations should use `watch_notifications` or `wait_task` (blocking, configurable timeout up to 300 s) instead of a synchronous tool. If a normal tool consistently times out, check `~/.quil/quild.log` for daemon errors.
+
+**A remote host shows `connected: false`** —
+`list_hosts` carries the dial error. The bridge dials with batch ssh (no prompts), so a first-time host key or a passphrase must be accepted once by hand: `quil remote setup <host>` or one manual `ssh`. It retries at most every 30 s; a tool call naming the host retries on the spot after that.
+
+**`delegate_task` says done too early / never** —
+`done` is the target's work ledger settling idle for 2 s. Too early means the target's hooks never reported a resume (check `agent_state` in `list_panes`); never means the pane's hooks are not loaded at all (`agent_state` stays empty) — `[notification.hooks]` set to `off` drops every edge. A terminal target needs Quil's shell integration for `command_complete`.
 
 **Border doesn't flash orange when the AI calls a tool** —
 The flash is configurable; check `[mcp] highlight_duration` in `~/.quil/config.toml`. If you set it to `0s`, no flash. The flash also requires an attached TUI — MCP calls land in the daemon, and the daemon broadcasts the highlight event for the TUI to render.
@@ -323,7 +423,9 @@ The bridge talks to `~/.quil/quild.sock` (mode `0600`). If that path doesn't exi
 ## Reference
 
 - Bridge entry point: [`cmd/quil/mcp.go`](../cmd/quil/mcp.go)
-- Tool implementations: [`cmd/quil/mcp_tools.go`](../cmd/quil/mcp_tools.go)
+- Host router (one connection per `[[destinations]]` host, id→host cache): [`cmd/quil/mcp_hosts.go`](../cmd/quil/mcp_hosts.go)
+- Tool implementations: [`cmd/quil/mcp_tools.go`](../cmd/quil/mcp_tools.go), [`mcp_tools_projects.go`](../cmd/quil/mcp_tools_projects.go), [`mcp_tools_tasks.go`](../cmd/quil/mcp_tools_tasks.go)
+- Daemon side: [`internal/daemon/create_req.go`](../internal/daemon/create_req.go) (create with dialog options), [`project_req.go`](../internal/daemon/project_req.go), [`workstate.go`](../internal/daemon/workstate.go) (per-pane work ledger, `agent_idle`), [`task.go`](../internal/daemon/task.go) (delegation), [`internal/hookevents/ledger.go`](../internal/hookevents/ledger.go)
 - Key name mapping: [`cmd/quil/mcp_keys.go`](../cmd/quil/mcp_keys.go)
 - Redaction + logging: [`cmd/quil/mcp_log.go`](../cmd/quil/mcp_log.go)
 - Architecture rationale: [Architecture / ADR-?? MCP](architecture.md)
