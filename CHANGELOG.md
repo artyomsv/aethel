@@ -11,6 +11,17 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.72.2] - 2026-09-10
+
+### Fixed
+- **`delegate_task` results and notification excerpts were empty or a stray fragment
+  for real terminal output.** The excerpt helper treated the carriage return that ends
+  every PTY line (`\r\n`) as an overwrite and dropped the line, so `get_task` /
+  `wait_task` returned no `result` for a shell command and `task_done`, `agent_idle`
+  and `output_idle` events carried a blank or meaningless `excerpt`. A trailing carriage
+  return is now trimmed before the overwrite reset; a carriage return with text after
+  it still collapses to what the terminal shows.
+
 ## [1.72.1] - 2026-09-10
 
 ### Fixed
