@@ -23,7 +23,7 @@ import (
 //
 // Bump when a later release adds request types that a still-older daemon
 // would drop the same way.
-const mcpDaemonMinVersion = "1.72.0"
+const mcpDaemonMinVersion = "1.73.0"
 
 // daemonVersionProbeTimeout bounds remote version probes. A pre-versioning
 // daemon drops the request silently. Local startup uses handshakeTimeout;

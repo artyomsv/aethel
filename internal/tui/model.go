@@ -25,6 +25,7 @@ import (
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/flow"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/kubediscover"
@@ -51,6 +52,7 @@ type PaneOutputMsg struct {
 }
 
 type WorkspaceStateMsg struct {
+	Flows     []flow.Flow
 	ActiveTab string
 	Tabs      []TabInfo
 	Panes     []PaneInfo
@@ -336,11 +338,13 @@ const (
 	dialogCommandHistory
 	dialogUpdateNotice
 	dialogCommandPalette
-	dialogProjectNew    // Alt+Shift+N: create a project (Task 13)
-	dialogProjectRename // sidebar context menu: rename a project (Task 13)
-	dialogProjectPick   // Alt+P: fuzzy project picker (Task 14)
+	dialogProjectNew     // Alt+Shift+N: create a project (Task 13)
+	dialogProjectRename  // sidebar context menu: rename a project (Task 13)
+	dialogProjectPick    // Alt+P: fuzzy project picker (Task 14)
 	dialogWhatsNew       // post-upgrade highlights; also F1 → What's New
 	dialogNotifySettings // F1 → Settings → Notifications: toasts + sidebar event groups
+	dialogNewFlow
+	dialogFlowSettings
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -362,6 +366,7 @@ type tuiClient interface {
 type Client = tuiClient
 
 type Model struct {
+	flowUI flowDialogState
 	// projects owns every tab. There is no flat tab list: activeProject
 	// selects the project, and that project's own activeTab selects the tab
 	// within it, so switching projects restores the tab each was left on.
@@ -2192,7 +2197,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case editorPasteMsg:
-		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
+		if (m.dialog == dialogNewFlow || m.dialog == dialogFlowSettings) && m.flowUI.editor != nil {
+			m.flowUI.editor.InsertMultiLine(strings.ReplaceAll(string(msg), "\r", ""))
+		} else if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
 			text := strings.ReplaceAll(string(msg), "\r", "")
 			m.migrationLeft.InsertMultiLine(text)
 			m.migrationLeft.Dirty = true
@@ -2206,6 +2213,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case flowReplyMsg:
+		cmd := m.applyFlowReply(msg)
+		return m, tea.Batch(cmd, m.listenForMessages())
+	case flowRequestTimeoutMsg:
+		if m.flowUI.pending && m.flowUI.requestID == string(msg) {
+			m.flowUI.pending = false
+			m.flowUI.err = "Flow request timed out; check the destination daemon."
+		}
+		return m, nil
 	case PaneOutputMsg:
 		cmd, changedView := m.handlePaneOutput(msg)
 		// Only the active tab is rendered, so output from any other pane leaves
@@ -2397,6 +2413,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
+		flowFocusCmd := m.adoptFlowState(msg)
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		// An open project picker holds a filtered snapshot taken when it opened.
 		// A project created or destroyed by another client — or a host
@@ -2415,6 +2432,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Both diffs run here, on the Update goroutine, because they read
 		// m.projects, which applyWorkspaceState has just rebuilt.
 		cmds := []tea.Cmd{
+			flowFocusCmd,
 			m.listenForMessages(),
 			m.sendDiffedResizes(m.diffResizes(msg)),
 			m.sendDiffedLayouts(m.diffLayouts(msg)),
@@ -2526,6 +2544,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Update working state + unseen marks from the same hook stream.
 		m.applyWorkTransition(msg.PaneID, msg.Type, msg.Data)
+		m.flowAttention(msg.PaneID, msg.Type)
 		if m.anyPaneWorking() && !m.workTickRunning {
 			m.workTickRunning = true
 			cmds = append(cmds, m.workSpinnerTick())
@@ -6852,6 +6871,8 @@ func (m Model) listenForMessages() tea.Cmd {
 		}
 
 		switch msg.Type {
+		case ipc.MsgStartFlowResp, ipc.MsgResumeFlowResp, ipc.MsgFlowConfigResp, ipc.MsgSaveFlowConfigResp, ipc.MsgPluginCatalogResp:
+			return flowReplyMsg{msg}
 		case ipc.MsgLinkLost:
 			// Synthesised by the Router when one of its connections died — it
 			// never reaches a socket. Receive itself cannot report that error,
@@ -7101,6 +7122,9 @@ func (m Model) listenForMessages() tea.Cmd {
 
 func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 	state := WorkspaceStateMsg{}
+	if data, err := json.Marshal(raw["flows"]); err == nil {
+		_ = json.Unmarshal(data, &state.Flows)
+	}
 	if at, ok := raw["active_tab"].(string); ok {
 		state.ActiveTab = at
 	}

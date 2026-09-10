@@ -789,3 +789,10 @@ list you pick a working directory from. The real name is always what gets opened
 ### Cross-platform
 
 Linux, macOS, and Windows from day one. PTY management via `creack/pty` (Unix) and ConPTY (Windows). IPC over Unix domain sockets or Named Pipes. All persistence paths use atomic temp+rename so a crash during snapshot leaves the previous state on disk.
+
+## Agent flows
+
+The command palette's **New flow** creates an analyst/developer/reviewer worktree
+for one epic and one PR. Quil owns the handoffs and pauses for user help instead
+of automatically retrying. See [Agent flows](agent-flows.md) for stages, recovery,
+and the F1 settings editor.

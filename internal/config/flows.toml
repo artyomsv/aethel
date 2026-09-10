@@ -1,0 +1,39 @@
+max_review_rounds = 3
+step_timeout_minutes = 0
+
+[roles.analyst]
+agent = "claude-code"
+toggles = ["dangerously_skip_permissions"]
+prompt = """
+You are the analyst. Feature request:
+
+{{feature}}
+
+Study the repository, write an implementation plan, create a GitHub epic with
+subtickets via gh, and put the detailed specification in the tickets.
+"""
+
+[roles.developer]
+agent = "codex"
+toggles = ["auto_workspace_write"]
+prompt = """
+You are the developer. Implement this plan on the current branch and open a
+pull request with gh:
+
+{{plan}}
+"""
+fix_prompt = """
+Address every review comment on PR {{pr}}. Reviewer notes:
+
+{{review}}
+
+Push the fixes to the same PR.
+"""
+
+[roles.reviewer]
+agent = "claude-code"
+toggles = ["dangerously_skip_permissions"]
+prompt = """
+You are the reviewer. Review PR {{pr}} for correctness, tests and project
+conventions. Leave your findings as PR review comments with gh.
+"""

@@ -304,6 +304,7 @@ type AttachPayload struct {
 }
 
 type CreatePanePayload struct {
+	FlowRole      string   `json:"flow_role,omitempty"`
 	TabID         string   `json:"tab_id"`
 	CWD           string   `json:"cwd"`
 	Type          string   `json:"type,omitempty"`

@@ -12,10 +12,40 @@ import (
 // Agent tasking: one pane hands work to another and hears when it is done.
 
 func registerTaskTools(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
+	registerReportStepTool(s, r)
 	registerDelegateTaskTool(s, r, mcpLog)
 	registerGetTaskTool(s, r)
 	registerWaitTaskTool(s, r, mcpLog)
 	registerListTasksTool(s, r)
+}
+
+func registerReportStepTool(s *mcp.Server, r *mcpRouter) {
+	type Input struct {
+		Status string            `json:"status" jsonschema:"done or blocked"`
+		Result map[string]string `json:"result" jsonschema:"step results: plan, pr, verdict (approved or changes), notes, or question when blocked; at most 16 values of 8 KiB each"`
+		TaskID string            `json:"task_id,omitempty" jsonschema:"optional task id; defaults to your pane's live task"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "report_step", Description: "Report your flow step result before ending your turn. The daemon advances only after your report and settled idle. Use blocked with a question when you need the user. A second report corrects the first until the task ends. You can only report on your own pane's task."},
+		func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
+			if err := r.local.requireDaemon("report_step"); err != nil {
+				return nil, nil, err
+			}
+			if r.selfPane == "" {
+				return nil, nil, fmt.Errorf("report_step: no step is waiting on this pane (QUIL_PANE_ID is unset)")
+			}
+			resp, err := r.local.request(ipc.MsgReportStepReq, ipc.ReportStepReqPayload{PaneID: r.selfPane, TaskID: input.TaskID, Status: input.Status, Result: input.Result})
+			if err != nil {
+				return nil, nil, fmt.Errorf("report_step: %w", err)
+			}
+			var payload ipc.ReportStepRespPayload
+			if err := resp.DecodePayload(&payload); err != nil {
+				return nil, nil, fmt.Errorf("report_step decode: %w", err)
+			}
+			if payload.Error != "" {
+				return nil, nil, fmt.Errorf("report_step: %s", payload.Error)
+			}
+			return jsonResult(payload), nil, nil
+		})
 }
 
 type hostedTask struct {

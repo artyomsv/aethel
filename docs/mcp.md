@@ -14,7 +14,7 @@ The result: your AI can **see what's in your build pane and react**, instead of 
   - [VS Code (GitHub Copilot Chat)](#vs-code-github-copilot-chat)
   - [Any MCP-capable client](#any-mcp-capable-client)
 - [Verify the connection](#verify-the-connection)
-- [The 34 tools](#the-34-tools)
+- [The 35 tools](#the-35-tools)
   - [Discovery](#discovery)
   - [Reading pane output](#reading-pane-output)
   - [Interacting with panes](#interacting-with-panes)
@@ -70,7 +70,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 34 tools.
+Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 35 tools.
 
 ### Claude Code (CLI)
 
@@ -139,7 +139,7 @@ In your AI client, ask:
 
 The AI should call `list_panes` and return a JSON array with each pane's `id`, `type`, `tab_id`, `cwd`, etc. If you see "no Quil panes" or an error, check [Troubleshooting](#troubleshooting).
 
-## The 34 tools
+## The 35 tools
 
 Tools are grouped below by purpose. Every tool returns a `text` content block; many return JSON-formatted payloads.
 
@@ -437,3 +437,14 @@ The bridge talks to `~/.quil/quild.sock` (mode `0600`). If that path doesn't exi
 - Key name mapping: [`cmd/quil/mcp_keys.go`](../cmd/quil/mcp_keys.go)
 - Redaction + logging: [`cmd/quil/mcp_log.go`](../cmd/quil/mcp_log.go)
 - Architecture rationale: [Architecture / ADR-?? MCP](architecture.md)
+
+### report_step
+
+Report the caller pane's current flow step: `status` is `done` or `blocked`,
+`result` is an object of string values, and `task_id` is optional. Plan requires
+`plan`, build requires `pr`, review requires `verdict` (`approved` or `changes`)
+and accepts `notes`, and fix requires no key. A blocked step supplies `question`.
+At most 16 values, each at most 8 KiB. The daemon rejects foreign and ended tasks.
+A correction replaces an earlier report until settled idle ends the task. A
+hookless pane completes after the report's settle window. This tool always uses
+the bridge's local daemon and requires Quil 1.73.0+. See [Agent flows](agent-flows.md).

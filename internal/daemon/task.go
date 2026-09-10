@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/artyomsv/quil/internal/flow"
 	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/google/uuid"
@@ -60,6 +61,7 @@ type task struct {
 	ended    time.Time
 	state    taskState
 	result   string
+	report   *flow.Report // under taskRegistry.mu; never persisted
 	errText  string
 	notified bool
 	done     chan struct{}
@@ -265,6 +267,12 @@ func (d *Daemon) deliverPrompt(pane *Pane, text string, agent bool) bool {
 }
 
 func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRespPayload {
+	return d.delegateTaskWithID(req, "")
+}
+
+// Flows reserve the id before delivery so even an immediate completion can
+// find its owner. Ordinary pane-to-pane tasks still allocate their own id.
+func (d *Daemon) delegateTaskWithID(req ipc.DelegateTaskReqPayload, id string) ipc.DelegateTaskRespPayload {
 	refuse := func(format string, args ...any) ipc.DelegateTaskRespPayload {
 		return ipc.DelegateTaskRespPayload{Error: fmt.Sprintf(format, args...)}
 	}
@@ -283,8 +291,11 @@ func (d *Daemon) delegateTask(req ipc.DelegateTaskReqPayload) ipc.DelegateTaskRe
 	toName := pane.Name
 	pane.PluginMu.Unlock()
 
+	if id == "" {
+		id = "task-" + uuid.New().String()[:8]
+	}
 	t := &task{
-		id:       "task-" + uuid.New().String()[:8],
+		id:       id,
 		from:     req.FromPane,
 		to:       req.ToPane,
 		toName:   toName,
@@ -394,11 +405,29 @@ func (d *Daemon) failTasksForPane(paneID, reason string) {
 // finishTask moves t to a terminal state exactly once: captures the target's
 // last output, queues task_done, wakes waiters and starts the notify-back.
 func (d *Daemon) finishTask(t *task, st taskState, errText string) {
+	d.finishTaskIf(t, st, errText, false)
+}
+
+func (d *Daemon) finishTaskIf(t *task, st taskState, errText string, onlyUnknown bool) {
 	reg := d.tasksRegistry()
 	reg.mu.Lock()
 	if t.state.terminal() {
 		reg.mu.Unlock()
 		return
+	}
+	var unknownPane *Pane
+	if onlyUnknown {
+		unknownPane = d.session.Pane(t.to)
+		if unknownPane == nil {
+			reg.mu.Unlock()
+			return
+		}
+		unknownPane.workMu.Lock()
+		if unknownPane.Work.State() != hookevents.WorkUnknown {
+			unknownPane.workMu.Unlock()
+			reg.mu.Unlock()
+			return
+		}
 	}
 	t.state = st
 	t.errText = errText
@@ -411,7 +440,12 @@ func (d *Daemon) finishTask(t *task, st taskState, errText string) {
 	}
 	close(t.done)
 	info := t.infoLocked()
+	report := t.report
+	if unknownPane != nil {
+		unknownPane.workMu.Unlock()
+	}
 	reg.mu.Unlock()
+	d.flowOnTaskEnd(info, report)
 
 	log.Printf("task %s: %s (%s → %s)", t.id, st, t.from, t.to)
 	target := d.session.Pane(t.to)

@@ -52,6 +52,17 @@ func newFakeIPCDaemonVersion(t *testing.T, paneID, version string) *fakeIPCDaemo
 			var req ipc.DelegateTaskReqPayload
 			_ = m.DecodePayload(&req)
 			resp, _ = ipc.NewMessage(ipc.MsgDelegateTaskResp, ipc.DelegateTaskRespPayload{Task: ipc.TaskInfo{ID: "task-1", ToPane: req.ToPane, FromPane: req.FromPane, State: "sent"}})
+		case ipc.MsgReportStepReq:
+			var req ipc.ReportStepReqPayload
+			_ = m.DecodePayload(&req)
+			payload := ipc.ReportStepRespPayload{TaskID: "task-1"}
+			if req.PaneID != f.paneID {
+				payload.Error = "no step is waiting on this pane"
+			}
+			if req.TaskID != "" && req.TaskID != "task-1" {
+				payload.Error = "pane is not this task's target"
+			}
+			resp, _ = ipc.NewMessage(ipc.MsgReportStepResp, payload)
 		case ipc.MsgListProjectsReq:
 			resp, _ = ipc.NewMessage(ipc.MsgListProjectsResp, ipc.ListProjectsRespPayload{Projects: []ipc.ProjectInfo{{ID: "proj-" + f.paneID, Name: f.paneID}}})
 		default:
@@ -277,7 +288,7 @@ func TestCreatePaneSchema_ExposesDialogOptions(t *testing.T) {
 	}
 	for _, want := range []string{"create_pane", "create_tab", "list_projects", "create_project", "update_project", "destroy_project",
 		"switch_project", "rename_tab", "destroy_tab", "rename_pane", "list_plugins", "list_sessions", "list_hosts",
-		"delegate_task", "get_task", "wait_task", "list_tasks"} {
+		"delegate_task", "get_task", "wait_task", "list_tasks", "report_step"} {
 		if byName[want] == nil {
 			t.Errorf("tool %s not registered", want)
 		}
@@ -288,7 +299,7 @@ func TestCreatePaneSchema_ExposesDialogOptions(t *testing.T) {
 			t.Errorf("create_pane schema lacks %s:\n%s", prop, schema)
 		}
 	}
-	if len(tools.Tools) != 34 {
-		t.Errorf("tool count = %d, want 34 (update docs/mcp.md and CLAUDE.md if this changed on purpose)", len(tools.Tools))
+	if len(tools.Tools) != 35 {
+		t.Errorf("tool count = %d, want 35 (update docs/mcp.md and CLAUDE.md if this changed on purpose)", len(tools.Tools))
 	}
 }
