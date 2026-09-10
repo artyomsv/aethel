@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/logger"
 	memreport "github.com/artyomsv/quil/internal/memreport"
 	apty "github.com/artyomsv/quil/internal/pty"
@@ -131,8 +132,23 @@ type Pane struct {
 	// this and a freshly computed one means the repository moved, and the
 	// pane says so rather than silently starting a fresh conversation.
 	ContainerCWD string
-	Type         string            // Plugin name (default: "terminal")
-	PluginState  map[string]string // Scraped values (e.g., "session_id": "abc123")
+	// Work is the daemon's copy of the agent work state (working / blocked /
+	// idle), replayed from the same hook edges the TUI's spinner replays. It
+	// is what lets an MCP client — which has no TUI — ask whether a pane is
+	// free, and what the task registry (task.go) hangs "done" off. Runtime-only,
+	// like the TUI's, and guarded by workMu rather than PluginMu because it is
+	// written from emitEvent, which already runs under other locks.
+	Work   hookevents.WorkLedger
+	workMu sync.Mutex
+	// idleTimer arms the agent_idle settle window (see applyWorkEvent). workMu.
+	idleTimer *time.Timer
+	// idleSubs are called once, after the settle window, when the pane falls
+	// idle — or with aborted=true when the pane's process exits, which is
+	// final but is NOT a completion. The task registry registers here to
+	// deliver a deferred notify-back. workMu.
+	idleSubs    []idleSub
+	Type        string            // Plugin name (default: "terminal")
+	PluginState map[string]string // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,
 	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and

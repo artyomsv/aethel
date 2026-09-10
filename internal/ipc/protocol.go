@@ -249,6 +249,37 @@ const (
 	// terminal.
 	MsgPluginListReq  = "plugin_list_req"
 	MsgPluginListResp = "plugin_list_resp"
+
+	// MCP project and tab management. The six project mutations above are
+	// fire-and-forget for the TUI; when a request carries an ID (only the MCP
+	// bridge sets one) the daemon answers with MsgProjectOpResp / MsgTabOpResp
+	// / MsgPaneOpResp so an agent learns whether the operation applied. The
+	// TUI never sets an ID, so nothing changes for it.
+	MsgListProjectsReq   = "list_projects_req"
+	MsgListProjectsResp  = "list_projects_resp"
+	MsgCreateProjectReq  = "create_project_req"
+	MsgCreateProjectResp = "create_project_resp"
+	MsgProjectOpResp     = "project_op_resp"
+	MsgTabOpResp         = "tab_op_resp"
+	MsgPaneOpResp        = "pane_op_resp"
+	MsgCreateTabReq      = "create_tab_req"
+	MsgCreateTabResp     = "create_tab_resp"
+	// MsgPluginCatalogReq lists every plugin with the options its setup dialog
+	// offers (toggles, cwd prompt, resume support), so an MCP agent can learn
+	// what create_pane accepts. Separate from MsgPluginListReq, whose contract
+	// is availability-only and remote-mode scoped.
+	MsgPluginCatalogReq  = "plugin_catalog_req"
+	MsgPluginCatalogResp = "plugin_catalog_resp"
+
+	// Agent tasking: one pane asks another for work and hears when it is done.
+	MsgDelegateTaskReq  = "delegate_task_req"
+	MsgDelegateTaskResp = "delegate_task_resp"
+	MsgGetTaskReq       = "get_task_req"
+	MsgGetTaskResp      = "get_task_resp"
+	MsgWaitTaskReq      = "wait_task_req"
+	MsgWaitTaskResp     = "wait_task_resp"
+	MsgListTasksReq     = "list_tasks_req"
+	MsgListTasksResp    = "list_tasks_resp"
 )
 
 // Message is the wire format for IPC communication.
@@ -454,6 +485,10 @@ type SubscribePayload struct {
 
 type CreateTabPayload struct {
 	Name string `json:"name"`
+	// ProjectID files the tab under a project other than the active one.
+	// Empty keeps the historical behaviour (the active project), which is
+	// what every existing producer sends.
+	ProjectID string `json:"project_id,omitempty"`
 	// FirstPane names the pane the new tab opens with. Nil (the default) keeps
 	// the historical behavior — a `terminal` pane rooted at the owning project's
 	// directory — which is what every non-interactive producer of this message
@@ -657,6 +692,18 @@ type PaneInfo struct {
 	// exit_code: null" is indistinguishable from a pane whose process died, so
 	// an agent reads a placeholder as a corpse and calls restart_pane on it.
 	PreparingWorktree string `json:"preparing_worktree,omitempty"`
+	// ProjectID names the project the pane's tab belongs to.
+	ProjectID string `json:"project_id,omitempty"`
+	// AgentState is the daemon's replay of the pane's hook edges: "working",
+	// "blocked", "idle", or empty when no hook edge has been seen (a terminal
+	// pane, or an AI pane whose hooks never loaded). Empty is NOT idle: an
+	// agent deciding whether another pane is free must treat it as unknown.
+	AgentState string `json:"agent_state,omitempty"`
+	// BlockedReason names the tool a permission prompt was raised for, when
+	// the producer said. Only meaningful while AgentState is "blocked".
+	BlockedReason string `json:"blocked_reason,omitempty"`
+	// LastIdleAt is when the pane last fell idle, Unix ms; 0 if never.
+	LastIdleAt int64 `json:"last_idle_at,omitempty"`
 }
 
 type ListPanesRespPayload struct {
@@ -689,6 +736,11 @@ type PaneStatusRespPayload struct {
 	// PreparingWorktree: see PaneInfo. A pane waiting on a checkout is not a
 	// dead pane, and this is the only field that says so.
 	PreparingWorktree string `json:"preparing_worktree,omitempty"`
+	// ProjectID, AgentState, BlockedReason, LastIdleAt: see PaneInfo.
+	ProjectID     string `json:"project_id,omitempty"`
+	AgentState    string `json:"agent_state,omitempty"`
+	BlockedReason string `json:"blocked_reason,omitempty"`
+	LastIdleAt    int64  `json:"last_idle_at,omitempty"`
 }
 
 type CreatePaneReqPayload struct {
@@ -697,6 +749,22 @@ type CreatePaneReqPayload struct {
 	Type         string   `json:"type,omitempty"`
 	InstanceName string   `json:"instance_name,omitempty"`
 	InstanceArgs []string `json:"instance_args,omitempty"`
+	// Name labels the pane, as Alt+F2 would.
+	Name string `json:"name,omitempty"`
+	// Toggles are plugin toggle NAMES (see PluginToggleInfo), resolved to
+	// their ArgsWhenOn by the daemon. Never raw args: InstanceArgs REPLACE
+	// the plugin's command args, so a free-form list would let any IPC
+	// client run any program under the plugin's name.
+	Toggles []string `json:"toggles,omitempty"`
+	// ResumeSessionID: see CreatePanePayload. Validated daemon-side.
+	ResumeSessionID string `json:"resume_session_id,omitempty"`
+	// WorktreeBranch asks for a NEW linked worktree on this branch, off the
+	// repository containing CWD, with the pane spawned inside it. The repo
+	// root is resolved by the daemon — never sent — because a client-built
+	// path is how a worktree ends up nested inside a checkout.
+	WorktreeBranch string `json:"worktree_branch,omitempty"`
+	// Sandbox: see CreatePanePayload. Validated daemon-side.
+	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
 }
 
 type CreatePaneRespPayload struct {
@@ -770,10 +838,172 @@ type TabInfo struct {
 	Color     string `json:"color,omitempty"`
 	PaneCount int    `json:"pane_count"`
 	Active    bool   `json:"active"`
+	// ProjectID names the owning project.
+	ProjectID string `json:"project_id,omitempty"`
+}
+
+// ListTabsReqPayload is optional: a request with no payload lists every tab.
+type ListTabsReqPayload struct {
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 type ListTabsRespPayload struct {
 	Tabs []TabInfo `json:"tabs"`
+}
+
+// ProjectInfo is the MCP view of a project.
+type ProjectInfo struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	RootDir   string   `json:"root_dir"`
+	Active    bool     `json:"active"`
+	Bootstrap bool     `json:"bootstrap,omitempty"`
+	TabIDs    []string `json:"tab_ids"`
+	ActiveTab string   `json:"active_tab,omitempty"`
+}
+
+type ListProjectsRespPayload struct {
+	Projects      []ProjectInfo `json:"projects"`
+	ActiveProject string        `json:"active_project,omitempty"`
+}
+
+// CreateProjectReqPayload mirrors CreateProjectPayload; the separate type is
+// the request-response contract, not a different shape.
+type CreateProjectReqPayload struct {
+	Name    string `json:"name"`
+	RootDir string `json:"root_dir"`
+}
+
+type CreateProjectRespPayload struct {
+	ProjectID string `json:"project_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// OpRespPayload answers an ID-bearing mutation that has no richer response:
+// ID echoes the object the request named, OK says whether it applied, Error
+// says why not.
+type OpRespPayload struct {
+	ID    string `json:"id,omitempty"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// CreateTabReqPayload creates a tab in a chosen project with a chosen first
+// pane, and ANSWERS with both ids. CreateTabPayload (the TUI's) is a
+// broadcast-answered message and files the tab under the active project.
+type CreateTabReqPayload struct {
+	Name      string `json:"name,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	// FirstPane names the pane the tab opens with; nil is a terminal in the
+	// project root. TabID inside it is ignored (the daemon mints the tab).
+	FirstPane *CreatePaneReqPayload `json:"first_pane,omitempty"`
+}
+
+type CreateTabRespPayload struct {
+	TabID  string `json:"tab_id,omitempty"`
+	PaneID string `json:"pane_id,omitempty"`
+	// PreparingWorktree is set when the first pane is a worktree placeholder:
+	// PaneID names the placeholder, and the pane that replaces it carries a
+	// NEW id, announced by the worktree_ready event.
+	PreparingWorktree string `json:"preparing_worktree,omitempty"`
+	Error             string `json:"error,omitempty"`
+}
+
+// PluginToggleInfo is one setup-dialog checkbox as create_pane accepts it by
+// name. Group non-empty means the toggles sharing it are mutually exclusive.
+type PluginToggleInfo struct {
+	Name    string `json:"name"`
+	Label   string `json:"label"`
+	Group   string `json:"group,omitempty"`
+	Default bool   `json:"default,omitempty"`
+}
+
+type PluginCatalogEntry struct {
+	Name        string             `json:"name"`
+	DisplayName string             `json:"display_name"`
+	Category    string             `json:"category"`
+	Available   bool               `json:"available"`
+	PromptsCWD  bool               `json:"prompts_cwd"`
+	Sessions    bool               `json:"sessions"`
+	Toggles     []PluginToggleInfo `json:"toggles,omitempty"`
+}
+
+type PluginCatalogRespPayload struct {
+	Plugins []PluginCatalogEntry `json:"plugins"`
+	// SandboxAvailable reports whether this daemon can run sandbox panes at
+	// all (docker present), so an agent does not offer an image to a host
+	// that will refuse it.
+	SandboxAvailable bool `json:"sandbox_available"`
+}
+
+// DelegateTaskReqPayload hands a prompt to ToPane and records a task the
+// daemon completes from ToPane's work ledger.
+type DelegateTaskReqPayload struct {
+	ToPane string `json:"to_pane"`
+	Prompt string `json:"prompt"`
+	// FromPane is the requester (the bridge's own QUIL_PANE_ID). Optional:
+	// a bridge outside any pane has none, and then Notify is ignored.
+	FromPane string `json:"from_pane,omitempty"`
+	// Notify types a one-line completion notice into FromPane when the task
+	// ends, delivered only while FromPane is not mid-turn.
+	Notify bool `json:"notify,omitempty"`
+	// TimeoutMs ends the task as "timeout" if it has not finished by then.
+	// 0 means no timeout.
+	TimeoutMs int `json:"timeout_ms,omitempty"`
+}
+
+// TaskInfo is the wire view of a task. State is one of sent, working, done,
+// failed, timeout. Times are Unix ms; zero when not reached.
+type TaskInfo struct {
+	ID         string `json:"id"`
+	FromPane   string `json:"from_pane,omitempty"`
+	ToPane     string `json:"to_pane"`
+	ToPaneName string `json:"to_pane_name,omitempty"`
+	State      string `json:"state"`
+	Prompt     string `json:"prompt"`
+	// Result is the last lines of ToPane's output at completion, ANSI-stripped.
+	Result    string `json:"result,omitempty"`
+	Error     string `json:"error,omitempty"`
+	CreatedAt int64  `json:"created_at"`
+	StartedAt int64  `json:"started_at,omitempty"`
+	EndedAt   int64  `json:"ended_at,omitempty"`
+	// Notified reports that the completion notice reached FromPane.
+	Notified bool `json:"notified,omitempty"`
+}
+
+type DelegateTaskRespPayload struct {
+	Task  TaskInfo `json:"task"`
+	Error string   `json:"error,omitempty"`
+}
+
+type GetTaskReqPayload struct {
+	TaskID string `json:"task_id"`
+}
+
+type GetTaskRespPayload struct {
+	Task  TaskInfo `json:"task"`
+	Error string   `json:"error,omitempty"`
+}
+
+type WaitTaskReqPayload struct {
+	TaskID    string `json:"task_id"`
+	TimeoutMs int    `json:"timeout_ms,omitempty"`
+}
+
+type WaitTaskRespPayload struct {
+	Task    TaskInfo `json:"task"`
+	Timeout bool     `json:"timeout,omitempty"`
+	Error   string   `json:"error,omitempty"`
+}
+
+type ListTasksReqPayload struct {
+	// PaneID filters to tasks where the pane is requester OR target.
+	PaneID string `json:"pane_id,omitempty"`
+}
+
+type ListTasksRespPayload struct {
+	Tasks []TaskInfo `json:"tasks"`
 }
 
 type DestroyPaneReqPayload struct {

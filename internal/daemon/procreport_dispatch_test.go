@@ -175,24 +175,20 @@ func TestHandleMessage_KillProcessIsWiredUpAndSingleFlighted(t *testing.T) {
 		t.Error("the busy path released a flight it did not claim")
 	}
 
-	// Released, the same message must claim it and then give it back once the
-	// worker goroutine finishes. Never claiming means the arm is disconnected.
+	// Hold the pane lookup's lock so the worker cannot finish before we
+	// observe its claim. Polling for this transient flag races a fast
+	// no-such-pane refusal, which can release it before the first poll.
 	d.killRunning.Store(false)
+	d.session.mu.Lock()
 	d.handleMessage(nil, msg)
-
-	deadline := time.Now().Add(5 * time.Second)
-	claimed := false
-	for time.Now().Before(deadline) {
-		if d.killRunning.Load() {
-			claimed = true
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	claimed := d.killRunning.Load()
+	d.session.mu.Unlock()
 	if !claimed {
 		t.Fatal("the kill request never claimed the single-flight — the dispatch " +
 			"arm for MsgKillProcessReq is not reaching handleKillProcessReq")
 	}
+	// Once the lookup can proceed, the worker must release its own claim.
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !d.killRunning.Load() {
 			return
