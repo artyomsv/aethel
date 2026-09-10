@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -16,8 +17,14 @@ func mcpTestDaemon(t *testing.T) (*Daemon, *ipc.Client) {
 	t.Helper()
 	d, sock := overlayServerDaemonWithConfig(t, config.Default())
 	registerShippedPlugins(t, d)
-	client := attachTestClient(t, sock)
+	client, err := ipc.NewClient(sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
 	t.Cleanup(func() { client.Close() })
+	// Match the MCP bridge's connection: attaching as a TUI can create a
+	// default shell tab concurrently with the test's workspace setup.
+	sendNoID(t, client, ipc.MsgClientHello, ipc.ClientHelloPayload{Role: "bridge", PID: os.Getpid()})
 	return d, client
 }
 

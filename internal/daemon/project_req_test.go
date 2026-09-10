@@ -8,6 +8,10 @@ import (
 
 func TestListProjectsReq_ReportsBootstrapProjectWithItsTabs(t *testing.T) {
 	d, client := mcpTestDaemon(t)
+	empty := decodeInto[ipc.ListTabsRespPayload](t, roundTrip(t, client, ipc.MsgListTabsReq, ipc.MsgListTabsResp, nil))
+	if len(empty.Tabs) != 0 {
+		t.Fatalf("MCP connection created tabs: %+v", empty.Tabs)
+	}
 	tab := d.session.CreateTab("t")
 
 	resp := decodeInto[ipc.ListProjectsRespPayload](t, roundTrip(t, client, ipc.MsgListProjectsReq, ipc.MsgListProjectsResp, nil))
