@@ -58,6 +58,10 @@ type Daemon struct {
 	snapshotCh   chan struct{} // buffered channel for snapshot requests
 	restored     bool          // true if workspace was loaded from disk
 	events       *eventQueue   // notification center event queue
+	// tasks is the pane-to-pane task registry (task.go). Built lazily through
+	// tasksRegistry so the hand-built daemons in tests need no setup.
+	tasks     *taskRegistry
+	tasksOnce sync.Once
 	gitCache     *gitCache     // per-checkout branch/worktree/divergence, refreshed on a ticker
 	// clientCWD is the last-known CWD from a TUI client, used as the
 	// default working directory for new panes/tabs. Read by defaultCWD()
@@ -1333,11 +1337,17 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgCreateTab:
 		d.handleCreateTab(conn, msg)
 	case ipc.MsgDestroyTab:
+		// The existence check happens HERE, before the handler, because the
+		// handler reports nothing and the tab is gone afterwards either way.
+		id, known := tabIDKnown(d, msg, "tab_id")
 		d.handleDestroyTab(msg)
+		answerOp(conn, msg, ipc.MsgTabOpResp, id, known, opErrUnless(known, "no such tab"))
 	case ipc.MsgSwitchTab:
 		d.handleSwitchTab(msg)
 	case ipc.MsgUpdateTab:
+		id, known := tabIDKnown(d, msg, "tab_id")
 		d.handleUpdateTab(msg)
+		answerOp(conn, msg, ipc.MsgTabOpResp, id, known, opErrUnless(known, "no such tab"))
 	case ipc.MsgReorderTab:
 		d.handleReorderTab(msg)
 	case ipc.MsgCreatePane:
@@ -1345,7 +1355,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgDestroyPane:
 		d.handleDestroyPane(msg)
 	case ipc.MsgUpdatePane:
+		id, known := paneIDKnown(d, msg)
 		d.handleUpdatePane(conn, msg)
+		answerOp(conn, msg, ipc.MsgPaneOpResp, id, known, opErrUnless(known, "no such pane"))
 	case ipc.MsgUpdateLayout:
 		d.handleUpdateLayout(msg)
 	case ipc.MsgPaneInput:
@@ -1391,6 +1403,11 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		var p ipc.DestroyProjectPayload
 		if err := msg.DecodePayload(&p); err != nil {
 			log.Printf("destroy project: malformed payload: %v", err)
+			answerOp(conn, msg, ipc.MsgProjectOpResp, "", false, "malformed payload")
+			return
+		}
+		if !d.projectExists(p.ProjectID) {
+			answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, false, "no such project")
 			return
 		}
 		detached := d.session.DestroyProject(p.ProjectID)
@@ -1408,11 +1425,13 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.recoverEmptyProject(d.session.ActiveProject())
 		d.broadcastState()
 		d.requestSnapshot()
+		answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, true, "")
 
 	case ipc.MsgUpdateProject:
 		var p ipc.UpdateProjectPayload
 		if err := msg.DecodePayload(&p); err != nil {
 			log.Printf("update project: malformed payload: %v", err)
+			answerOp(conn, msg, ipc.MsgProjectOpResp, "", false, "malformed payload")
 			return
 		}
 		// Logged when it does NOT apply. The two ways that happens — an unknown
@@ -1420,9 +1439,13 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// identical from the client: a dialog that accepted a name and closed
 		// on nothing changing. This package has already paid for one silently
 		// ignored project message.
-		if !d.session.UpdateProject(p.ProjectID, p.Name, p.RootDir, p.AdoptBootstrap) {
+		applied := d.session.UpdateProject(p.ProjectID, p.Name, p.RootDir, p.AdoptBootstrap)
+		if !applied {
 			log.Printf("update project %s: not applied (adopt=%v) — unknown id, or already named",
 				p.ProjectID, p.AdoptBootstrap)
+			answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, false, "not applied: unknown project id, or already named")
+		} else {
+			answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, true, "")
 		}
 		d.broadcastState()
 		// Rename now also clears the persisted Bootstrap flag, so leaving this
@@ -1436,6 +1459,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		var p ipc.MergeProjectsPayload
 		if err := msg.DecodePayload(&p); err != nil {
 			log.Printf("merge projects: malformed payload: %v", err)
+			answerOp(conn, msg, ipc.MsgProjectOpResp, "", false, "malformed payload")
 			return
 		}
 		// Logged when it does NOT apply, for the reason MsgUpdateProject is:
@@ -1444,8 +1468,10 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		if !d.session.MergeProjects(p.ProjectID, p.Absorb, p.Name) {
 			log.Printf("merge %d projects into %q: not applied — unknown id",
 				len(p.Absorb), p.ProjectID)
+			answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, false, "not applied: unknown project id")
 		} else {
 			log.Printf("merged %d projects into %q (%q)", len(p.Absorb), p.ProjectID, p.Name)
+			answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, true, "")
 		}
 		// Folding projects that all hold zero tabs leaves the survivor empty,
 		// which is a blank screen with no in-band way out — Ctrl+T files against
@@ -1463,6 +1489,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		var p ipc.SwitchProjectPayload
 		if err := msg.DecodePayload(&p); err != nil {
 			log.Printf("switch project: malformed payload: %v", err)
+			answerOp(conn, msg, ipc.MsgProjectOpResp, "", false, "malformed payload")
 			return
 		}
 		// ensureTabSpawned is the whole point of the returned tab: after a
@@ -1470,8 +1497,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// project's panes are Pending until something switches to their tab —
 		// and switching PROJECT never did, so they showed the restore
 		// indicator with no process behind them, indefinitely.
-		if tabID, ok := d.session.SwitchProject(p.ProjectID); ok && tabID != "" {
+		tabID, switched := d.session.SwitchProject(p.ProjectID)
+		if switched && tabID != "" {
 			d.ensureTabSpawned(tabID)
+		}
+		if switched {
+			answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, true, "")
+		} else {
+			answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, false, "no such project")
 		}
 		d.broadcastState()
 		d.requestSnapshot()
@@ -1480,11 +1513,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		var p ipc.ReorderProjectPayload
 		if err := msg.DecodePayload(&p); err != nil {
 			log.Printf("reorder project: malformed payload: %v", err)
+			answerOp(conn, msg, ipc.MsgProjectOpResp, "", false, "malformed payload")
 			return
 		}
 		if !d.session.ReorderProject(p.ProjectID, p.NewIndex) {
+			answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, false, "not applied: unknown project id or index")
 			return
 		}
+		answerOp(conn, msg, ipc.MsgProjectOpResp, p.ProjectID, true, "")
 		d.broadcastState()
 		// Same contract as handleReorderTab: without the snapshot the new
 		// order lived only until the next unrelated snapshot happened to run,
@@ -1492,6 +1528,22 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.requestSnapshot()
 
 	// MCP request-response
+	case ipc.MsgListProjectsReq:
+		d.handleListProjectsReq(conn, msg)
+	case ipc.MsgCreateProjectReq:
+		d.handleCreateProjectReq(conn, msg)
+	case ipc.MsgCreateTabReq:
+		d.handleCreateTabReq(conn, msg)
+	case ipc.MsgPluginCatalogReq:
+		d.handlePluginCatalogReq(conn, msg)
+	case ipc.MsgDelegateTaskReq:
+		d.handleDelegateTaskReq(conn, msg)
+	case ipc.MsgGetTaskReq:
+		d.handleGetTaskReq(conn, msg)
+	case ipc.MsgWaitTaskReq:
+		d.handleWaitTaskReq(conn, msg)
+	case ipc.MsgListTasksReq:
+		d.handleListTasksReq(conn, msg)
 	case ipc.MsgListPanesReq:
 		d.handleListPanesReq(conn, msg)
 	case ipc.MsgReadPaneOutputReq:
@@ -1948,7 +2000,9 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 
-	tab := d.session.CreateTab(payload.Name)
+	// An empty or unknown ProjectID resolves to the active project inside
+	// createTabLocked, which is exactly the historical behaviour.
+	tab := d.session.CreateTabInProject(payload.ProjectID, payload.Name)
 	d.session.SwitchTab(tab.ID)
 	log.Printf("tab created: %s %q", tab.ID, tab.Name)
 
@@ -2952,26 +3006,9 @@ func (d *Daemon) paneInputOutcome(payload ipc.PaneInputPayload) ipc.PaneInputRes
 	refuse := func(format string, args ...any) ipc.PaneInputRespPayload {
 		return ipc.PaneInputRespPayload{PaneID: payload.PaneID, Error: fmt.Sprintf(format, args...)}
 	}
-	pane := d.session.Pane(payload.PaneID)
+	pane, why := d.paneInputTarget(payload.PaneID)
 	if pane == nil {
-		return refuse("no such pane")
-	}
-	// A deferred pane (MCP send_to_pane / send_keys targeting a not-yet-spawned
-	// restored pane) must be booted before its PTY can accept input.
-	d.ensurePaneSpawned(pane)
-	pane.PluginMu.Lock()
-	pty := pane.PTY
-	preparing, spawnErr := pane.PreparingWorktree, pane.SpawnError
-	pane.PluginMu.Unlock()
-	if pty == nil {
-		switch {
-		case preparing != "":
-			return refuse("pane is still waiting for its worktree (%s) and has no process yet", preparing)
-		case spawnErr != "":
-			return refuse("pane has no process: %s", spawnErr)
-		default:
-			return refuse("pane has no process")
-		}
+		return refuse("%s", why)
 	}
 	// Never write the PTY here: a child that stopped reading stdin makes
 	// Write block forever, and this runs on the conn's dispatch goroutine —
@@ -2985,6 +3022,34 @@ func (d *Daemon) paneInputOutcome(payload ipc.PaneInputPayload) ipc.PaneInputRes
 	// synchronously — the writer goroutine owns the PTY write precisely so a
 	// wedged child cannot block this goroutine.
 	return ipc.PaneInputRespPayload{PaneID: payload.PaneID, Delivered: true}
+}
+
+// paneInputTarget resolves a pane that can take input, or names the reason
+// it cannot. Shared by pane_input and delegate_task so the two refuse the
+// same panes with the same words.
+func (d *Daemon) paneInputTarget(paneID string) (*Pane, string) {
+	pane := d.session.Pane(paneID)
+	if pane == nil {
+		return nil, "no such pane"
+	}
+	// A deferred pane (MCP send_to_pane / send_keys targeting a not-yet-spawned
+	// restored pane) must be booted before its PTY can accept input.
+	d.ensurePaneSpawned(pane)
+	pane.PluginMu.Lock()
+	pty := pane.PTY
+	preparing, spawnErr := pane.PreparingWorktree, pane.SpawnError
+	pane.PluginMu.Unlock()
+	if pty == nil {
+		switch {
+		case preparing != "":
+			return nil, fmt.Sprintf("pane is still waiting for its worktree (%s) and has no process yet", preparing)
+		case spawnErr != "":
+			return nil, "pane has no process: " + spawnErr
+		default:
+			return nil, "pane has no process"
+		}
+	}
+	return pane, ""
 }
 
 // notifyInputBlocked surfaces a full input queue — the pane's child has
@@ -6053,75 +6118,6 @@ func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 	respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, d.buildPaneStatus(pane))
 }
 
-func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
-	var req ipc.CreatePaneReqPayload
-	if err := msg.DecodePayload(&req); err != nil {
-		log.Printf("handleCreatePaneReq: decode: %v", err)
-		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{})
-		return
-	}
-
-	tabID := req.TabID
-	if tabID == "" {
-		tabID = d.session.ActiveTabID()
-	}
-	if tabID == "" {
-		log.Print("handleCreatePaneReq: no active tab")
-		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{})
-		return
-	}
-
-	cwd := req.CWD
-	if cwd == "" {
-		cwd = d.defaultCWD()
-	}
-
-	// Validate CWD exists and is a directory, then re-resolve symlinks so
-	// the spawn can't be redirected by a swap between Stat and exec. Failure
-	// of EvalSymlinks itself is non-fatal (Windows junctions etc.) — fall
-	// back to the lexically validated path.
-	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
-		log.Printf("handleCreatePaneReq: invalid cwd %q: %v", cwd, err)
-		cwd = d.defaultCWD()
-	} else if resolved, evalErr := filepath.EvalSymlinks(cwd); evalErr == nil {
-		cwd = resolved
-	}
-
-	pane, err := d.session.CreatePane(tabID, cwd)
-	if err != nil {
-		log.Printf("handleCreatePaneReq: create pane: %v", err)
-		respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{})
-		return
-	}
-	d.highlightPane(pane.ID)
-
-	// Same hazard setPaneType documents, but three fields must land together —
-	// a snapshot between two critical sections would see the new Type with the
-	// previous instance, so this keeps its own combined block rather than
-	// calling the helper. Matches constructPaneAt, which guards the same trio.
-	pane.PluginMu.Lock()
-	pane.Type = req.Type
-	if pane.Type == "" {
-		pane.Type = "terminal"
-	}
-	pane.InstanceName = req.InstanceName
-	pane.InstanceArgs = req.InstanceArgs
-	pane.PluginMu.Unlock()
-
-	ptySession := apty.NewWithSize(80, 24)
-	if err := d.spawnPane(pane, ptySession, false); err != nil {
-		log.Printf("handleCreatePaneReq: spawn: %v", err)
-		// Pane exists but has no running process — caller can check via get_pane_status
-	}
-
-	d.broadcastState()
-	d.requestSnapshot()
-
-	respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, ipc.CreatePaneRespPayload{
-		PaneID: pane.ID,
-		TabID:  tabID,
-	})
-}
 
 func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	var req ipc.RestartPaneReqPayload
@@ -6355,16 +6351,26 @@ func (d *Daemon) handleSwitchTabReq(conn *ipc.Conn, msg *ipc.Message) {
 }
 
 func (d *Daemon) handleListTabsReq(conn *ipc.Conn, msg *ipc.Message) {
+	// The payload is OPTIONAL — every existing bridge sends none — so a
+	// decode failure means "no filter", not a refusal.
+	var req ipc.ListTabsReqPayload
+	if len(msg.Payload) > 0 {
+		_ = msg.DecodePayload(&req)
+	}
 	activeTab, tabs, panesByTab, _, _ := d.session.SnapshotState()
 
 	var tabInfos []ipc.TabInfo
 	for _, tab := range tabs {
+		if req.ProjectID != "" && tab.ProjectID != req.ProjectID {
+			continue
+		}
 		tabInfos = append(tabInfos, ipc.TabInfo{
 			ID:        tab.ID,
 			Name:      tab.Name,
 			Color:     tab.Color,
 			PaneCount: len(panesByTab[tab.ID]),
 			Active:    tab.ID == activeTab,
+			ProjectID: tab.ProjectID,
 		})
 	}
 
