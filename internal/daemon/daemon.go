@@ -5738,11 +5738,19 @@ func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity, excerpt string) 
 // actually SEES is the trailing segment after the last `\r`. Without this
 // reset, excerpts capture text the user can never see (e.g. the prompt
 // rune that was immediately overwritten) and miss the text they DO see.
+//
+// The `\r` of a CRLF line ending is NOT an overwrite: a PTY terminates every
+// line with `\r\n`, so after the split each line ends in `\r` with nothing
+// after it. Applying the reset to that CR emptied every line of real terminal
+// output — a delegated shell command came back with no result and every
+// task_done / agent_idle excerpt was blank or a stray fragment (measured
+// 2026-09-10 on a remote host). Trailing CRs are trimmed first; only a CR
+// with text after it is the overwrite the reset exists for.
 func lastNLines(text string, n int) string {
 	lines := strings.Split(text, "\n")
 	var result []string
 	for i := len(lines) - 1; i >= 0 && len(result) < n; i-- {
-		line := lines[i]
+		line := strings.TrimRight(lines[i], "\r")
 		if cr := strings.LastIndex(line, "\r"); cr >= 0 {
 			line = line[cr+1:]
 		}

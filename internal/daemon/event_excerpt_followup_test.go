@@ -176,6 +176,44 @@ func TestLastNLines_NoCarriageReturnUntouched(t *testing.T) {
 	}
 }
 
+// A PTY ends every line with CRLF, so after the split on `\n` each line
+// carries a trailing `\r`. That CR terminates the line; it overwrites
+// nothing. Treating it as an overwrite reset emptied every line of real
+// terminal output — a delegated `echo` came back with no result, and every
+// task_done / agent_idle excerpt on a remote host was blank or a fragment
+// (observed 2026-09-10 on omarchy). ansi.Strip keeps `\r` (it passes C0
+// controls through), so the excerpt path sees exactly this shape.
+func TestLastNLines_KeepsCRLFTerminatedLines(t *testing.T) {
+	t.Parallel()
+	in := "TASK-MARKER omarchy 20:24:48\r\n7.2.3-arch1-3\r\n\r\n~ ❯ "
+	got := lastNLines(in, 30)
+	want := "TASK-MARKER omarchy 20:24:48\n7.2.3-arch1-3\n~ ❯"
+	if got != want {
+		t.Errorf("lastNLines CRLF: got %q, want %q", got, want)
+	}
+	// The overwrite reset still applies to a CR INSIDE a CRLF line.
+	in = "%          \r \r\ruser@host: /path\r\nnext\r\n"
+	got = lastNLines(in, 5)
+	want = "user@host: /path\nnext"
+	if got != want {
+		t.Errorf("lastNLines CR-reset then CRLF: got %q, want %q", got, want)
+	}
+}
+
+// The same through the ring buffer, as finishTask and the event enrichers
+// call it: a shell's CRLF output must produce the lines the user sees.
+func TestPaneOutputExcerpt_CRLFTerminalOutput(t *testing.T) {
+	t.Parallel()
+	pane := &Pane{OutputBuf: ringbuf.NewRingBuffer(4096)}
+	pane.OutputBuf.Write([]byte("$ uname -r\r\n7.2.3-arch1-3\r\n$ "))
+
+	got := paneOutputExcerpt(pane, 30)
+	want := "$ uname -r\n7.2.3-arch1-3\n$"
+	if got != want {
+		t.Errorf("paneOutputExcerpt CRLF: got %q, want %q", got, want)
+	}
+}
+
 func TestIsPromptOnlyExcerpt(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
