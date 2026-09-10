@@ -485,10 +485,10 @@ func TestFastPaths_KnownValidityLimits(t *testing.T) {
 		// the frame decoded CLEANLY as Type "shutdown". Not a moved error; a
 		// forged envelope. json.Valid closes it.
 		for _, payload := range []string{
-			`{},"type":"shutdown","x":{}`, // envelope injection: rewrites Type
-			`{},"id":"stolen","x":{}`,     // rewrites ID
-			`{},"z":{}`,                   // injects an unrelated key
-			`[A]`, `{not valid}`, `{"a":1` , // plain invalid
+			`{},"type":"shutdown","x":{}`,  // envelope injection: rewrites Type
+			`{},"id":"stolen","x":{}`,      // rewrites ID
+			`{},"z":{}`,                    // injects an unrelated key
+			`[A]`, `{not valid}`, `{"a":1`, // plain invalid
 			"-", "+", ".", "1e", "1.2.3", "+5", ".5", // numbers json.Marshal never emits
 		} {
 			msg := &Message{Type: MsgPaneOutput, Payload: json.RawMessage(payload)}
@@ -571,6 +571,7 @@ func TestPaneOutputPayload_FastPathStaysEngaged(t *testing.T) {
 			{"PaneID", `json:"pane_id"`},
 			{"Data", `json:"data"`},
 			{"Ghost", `json:"ghost,omitempty"`},
+			{"Generation", `json:"generation,omitempty"`},
 		}
 		typ := reflect.TypeOf(PaneOutputPayload{})
 		if typ.NumField() != len(want) {
@@ -590,26 +591,28 @@ func TestPaneOutputPayload_FastPathStaysEngaged(t *testing.T) {
 
 	t.Run("fast paths still engage on a real message", func(t *testing.T) {
 		for _, ghost := range []bool{false, true} {
-			msg, err := NewMessage(MsgPaneOutput, PaneOutputPayload{
-				PaneID: "pane-1a2b3c4d", Data: []byte("hello"), Ghost: ghost,
-			})
-			if err != nil {
-				t.Fatalf("NewMessage: %v", err)
-			}
-			frame, ok := appendEnvelope(msg)
-			if !ok {
-				t.Fatalf("ghost=%v: appendEnvelope declined a NewMessage-produced pane_output frame", ghost)
-			}
-			var got Message
-			if !parseEnvelope(frame[4:], &got) {
-				t.Fatalf("ghost=%v: parseEnvelope declined a frame this package just produced", ghost)
-			}
-			var p PaneOutputPayload
-			if !decodePaneOutput(got.Payload, &p) {
-				t.Fatalf("ghost=%v: decodePaneOutput declined a payload NewMessage just marshalled", ghost)
-			}
-			if p.PaneID != "pane-1a2b3c4d" || string(p.Data) != "hello" || p.Ghost != ghost {
-				t.Errorf("ghost=%v: round trip changed the value: %+v", ghost, p)
+			for _, generation := range []uint64{0, 1, 42, ^uint64(0)} {
+				msg, err := NewMessage(MsgPaneOutput, PaneOutputPayload{
+					PaneID: "pane-1a2b3c4d", Data: []byte("hello"), Ghost: ghost, Generation: generation,
+				})
+				if err != nil {
+					t.Fatalf("NewMessage: %v", err)
+				}
+				frame, ok := appendEnvelope(msg)
+				if !ok {
+					t.Fatalf("ghost=%v: appendEnvelope declined a NewMessage-produced pane_output frame", ghost)
+				}
+				var got Message
+				if !parseEnvelope(frame[4:], &got) {
+					t.Fatalf("ghost=%v: parseEnvelope declined a frame this package just produced", ghost)
+				}
+				var p PaneOutputPayload
+				if !decodePaneOutput(got.Payload, &p) {
+					t.Fatalf("ghost=%v: decodePaneOutput declined a payload NewMessage just marshalled", ghost)
+				}
+				if p.PaneID != "pane-1a2b3c4d" || string(p.Data) != "hello" || p.Ghost != ghost || p.Generation != generation {
+					t.Errorf("ghost=%v: round trip changed the value: %+v", ghost, p)
+				}
 			}
 		}
 	})
