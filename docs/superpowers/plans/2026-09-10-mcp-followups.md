@@ -1,9 +1,41 @@
 # MCP follow-ups after v1.72.0 — work order
 
-**Status:** TODO. **Branch:** `fix/mcp-followups` (off `542a679`, `chore(release): v1.72.0`).
+**Status:** Implemented and locally verified; CI results tracked on PR #213. **Branch:** `fix/mcp-followups` (off `542a679`, `chore(release): v1.72.0`).
 **Baseline:** PR #212 shipped 34 MCP tools, the host router and pane-to-pane tasks in v1.72.0.
 A live test on 2026-09-10 (Windows laptop, five Linux remotes, all on 1.72.0) found three
 follow-ups. They are independent; do them in order, each with its own commit.
+
+## Implementation and measurements (2026-09-10)
+
+- **Host recovery:** a persistent Windows dev MCP bridge connected over SSH to
+  an isolated dev daemon on the test VM. Its initial version probe failed. After
+  replacing that dev daemon with the matching build, only unscoped
+  `list_projects` and `list_hosts` calls were made. The host recovered after
+  **30.2 seconds**, appeared in the project aggregate, reported `1.72.0`, and
+  cleared its old error. No named-host call triggered recovery.
+- **Sizing measurement through `Update`:** with a 178×58 terminal, a hidden
+  pane announced as 80×24 had a **176×54 emulator and 176×54 outgoing resize**,
+  for both local and remote destinations. Switching tabs retained that size.
+  The suspected persistent emulator/PTY size split was not reproduced.
+- **Live rendering:** in an isolated Linux dev TUI on the VM, Claude Code
+  2.1.267 initially rendered cleanly. Restarting reproduced the defect: its new
+  logo and input box were painted into the old screen. The old child's exit
+  also marked the replacement as exited. After the fix, creation in a hidden
+  tab and restart showed one clean screen and a running process. The same
+  creation sequence from the Windows MCP bridge over SSH rendered cleanly.
+  The original initial-paint corruption was not reproduced in this setup;
+  initial spawn sizes are now pinned by daemon request-path tests regardless.
+- **Fix:** new panes inherit sibling/client dimensions. Every live output chunk
+  carries its PTY generation; `Update` resets before a replacement's first
+  output and ignores late old chunks. Old PTY exits cannot mark the replacement
+  exited; restart explicitly fails the old delegated tasks and clears their
+  work state.
+- **Verification:** host-router race tests, daemon create/restart request tests,
+  local/remote `Update` rendering regressions, IPC fast-path round trips, full
+  `go vet`, unit race tests, and the work order's Debian-image integration race
+  command passed. The roadmap tool table matches all **34 registered names**.
+  Site rendering comes from `site/src/data/features.ts`; `features.astro`
+  requires no separate hardcoded tool list. CI validates the site build.
 
 Ground rules that apply to all three (see `.claude/rules/dev-environment.md`):
 
@@ -162,28 +194,28 @@ An MCP-created Claude Code pane in a hidden tab, local and remote, renders like 
 
 ---
 
-## 3. Docs, roadmap and the site still say "18 tools"
+## 3. Docs, roadmap and the site still say "eighteen tools"
 
 `docs/mcp.md`, `docs/README.md`, `docs/quick-start.md`, `docs/roadmap.md` (M10 bullet)
 and the `.claude/CLAUDE.md` "MCP Server" section were updated in #212. Everything below was
-not. Source of truth: `docs/mcp.md` (34 tools, four groups: workspace control,
+not. Source of truth: `docs/mcp.md` (34 tools, grouped by purpose: workspace control,
 interaction/introspection, notifications, memory, projects and tabs, discovery, tasking).
 
 | File | Line(s) | Says | Should say |
 |---|---|---|---|
-| `README.md` | 8 | badge `MCP-18%20tools` | `MCP-34%20tools` |
-| `.claude/CLAUDE.md` | 243 | `docs/mcp.md — … all 18 tools` | 34 |
-| `.claude/CLAUDE.md` | 275 | M10 row: `18 tools` | 34, note the 2026-09 additions (projects, hosts, tasks) |
-| `docs/roadmap/mcp-server.md` | "MCP Tools (13 total)" table and everything after | 13 tools, phases A/B | 34 tools; add the projects/tabs, discovery, hosts and tasking sections; keep it a PRD (what and why), link `docs/mcp.md` for the reference |
-| `docs/prd.md` | 636 | `exposes 18 tools` | 34 |
-| `docs/competitive-analysis.md` | 32, 146, 221 | `18 tools` | 34; the 221 bullet can add "projects, remote hosts and pane-to-pane task delegation" |
+| `README.md` | 8 | badge `MCP-the old badge count` | `MCP-34%20tools` |
+| `.claude/CLAUDE.md` | 243 | `docs/mcp.md — … all eighteen tools` | 34 |
+| `.claude/CLAUDE.md` | 275 | M10 row: `eighteen tools` | 34, note the 2026-09 additions (projects, hosts, tasks) |
+| `docs/roadmap/mcp-server.md` | "MCP Tools (thirteen total)" table and everything after | 13 tools, phases A/B | 34 tools; add the projects/tabs, discovery, hosts and tasking sections; keep it a PRD (what and why), link `docs/mcp.md` for the reference |
+| `docs/prd.md` | 636 | `exposes eighteen tools` | 34 |
+| `docs/competitive-analysis.md` | 32, 146, 221 | `eighteen tools` | 34; the 221 bullet can add "projects, remote hosts and pane-to-pane task delegation" |
 | `docs/features.md` | ~475 (MCP paragraph in the notification section) and the MCP intro at 3 | only the notification tools | add one paragraph: projects/tabs, multi-host routing, `delegate_task` with notify-back; link `docs/mcp.md` anchors |
 | `docs/roadmap.md` | 322 | "Deferred: per-project MCP scoping" | still true — leave; but check the M14 table row that lists "MCP project scoping" as deferred reads well next to the new M10 bullet |
-| `site/src/data/features.ts` | 113 | `18 tools exposed over the Model Context Protocol` | 34; mention projects, hosts, tasks |
-| `site/src/data/faq.ts` | 33 | `exposes 18 tools so any MCP-capable client can read pane output, send keystrokes, snapshot a workspace, and query per-pane memory usage` | 34; add "create tabs and AI panes with the dialog's options, manage projects across remote hosts, and delegate work between AI panes" |
-| `site/src/data/competitors.ts` | 410 | `Quil exposes 18 tools over the Model Context Protocol` | 34 |
-| `site/src/pages/docs.astro` | 53 | `all 18 tools` | 34 |
-| `site/src/pages/index.astro` | 77 | `… snapshot your workspace. 18 tools.` | 34, and one clause on delegation between AI panes |
+| `site/src/data/features.ts` | 113 | `eighteen tools exposed over the Model Context Protocol` | 34; mention projects, hosts, tasks |
+| `site/src/data/faq.ts` | 33 | `exposes eighteen tools so any MCP-capable client can read pane output, send keystrokes, snapshot a workspace, and query per-pane memory usage` | 34; add "create tabs and AI panes with the dialog's options, manage projects across remote hosts, and delegate work between AI panes" |
+| `site/src/data/competitors.ts` | 410 | `Quil exposes eighteen tools over the Model Context Protocol` | 34 |
+| `site/src/pages/docs.astro` | 53 | `all eighteen tools` | 34 |
+| `site/src/pages/index.astro` | 77 | `… snapshot your workspace. eighteen tools.` | 34, and one clause on delegation between AI panes |
 | `site/src/pages/features.astro` | `#mcp-server` section | check the body text for the count and the tool list | match `docs/mcp.md` |
 
 Rules for the site: do not run `npm install` on Windows (memory `npm-lock-is-platform-shaped`);
@@ -194,5 +226,5 @@ item (a docs-only change must not cut a release of byte-identical binaries).
 
 ### Acceptance
 
-`grep -rn "18 tools\|18%20tools\|13 total" README.md docs site/src .claude` returns nothing;
+`rg -n --hidden "[1]8 tools|[1]8%20tools|[1]3 total" README.md docs site/src .claude` returns nothing;
 `docs/roadmap/mcp-server.md` lists all 34 tools by group; the site builds in CI.

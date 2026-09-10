@@ -4,6 +4,8 @@
 
 Quil is a persistent workflow orchestrator / terminal multiplexer for AI-native developers. Written in Go with a Bubble Tea TUI frontend.
 
+Pane restart boundary: `PaneOutputPayload.Generation` carries the daemon's PTY run counter on every live chunk. The TUI resets its VT before a replacement run's output and drops older frames; reattach forgets the counter because the daemon may have restarted. `newPaneSession` picks sibling/client dimensions before spawn. Keep the IPC fast-frame decoder and its wire-shape test in sync with this payload.
+
 ## Tech Stack
 
 - **Language:** Go 1.25
@@ -121,7 +123,7 @@ IPC request-response: `Message.ID` field (omitempty, backward compatible) correl
 
 **The bridge routes to `[[destinations]]` hosts** (`cmd/quil/mcp_hosts.go`, `mcpRouter`): one `mcpBridge` per host, dialled in the background with `dialRemoteTransportFn` (batch) + `gateExtraVersion` + the bridge hello, re-dialled lazily with a 30 s backoff (a LOST link earns one immediate retry; the backoff is for a host that refused). Resolution: explicit `host` → the id→host cache every list/create fills → local. `mcpBridge.dead` is set when `readLoop` exits so a dropped link is detected before the next request times out. The bridge learns its own pane from `QUIL_PANE_ID`, which the daemon sets on every AI pane's child. **Every bridge probes its daemon's version at dial (`probeDaemonVersion`, before the read loop owns the connection), and tools that send the request types added in this branch call `requireDaemon` first** (`cmd/quil/mcp_version.go`, floor `mcpDaemonMinVersion` = 1.72.0): an older daemon drops an unknown message type SILENTLY, so a `list_projects` at a remote still on 1.71.0 read as a 10 s timeout rather than "that host is not upgraded" (measured 2026-09-10). The TUI's `versionHandshakeWithin` cannot serve here — it skips itself for a non-release client, and the dev bridge needs the number precisely then. Unknown / unparseable versions pass; only a release below the floor is refused. **Unscoped aggregation skips a failing REMOTE and records the error on the host (`forEachHost`, `hostConn.reqErr` → `list_hosts` `error`)**; a named host or the local daemon failing still fails the call.
 
-Key files: `cmd/quil/mcp.go` (bridge + daemon connection, server instructions), `cmd/quil/mcp_hosts.go` (host router), `cmd/quil/mcp_tools.go` (the original 18 tools, now host-aware), `cmd/quil/mcp_tools_projects.go` (projects, tabs, hosts, catalog), `cmd/quil/mcp_tools_tasks.go` (delegation), `cmd/quil/mcp_keys.go` (key name → escape sequence map), `cmd/quil/mcp_log.go` (per-pane interaction logging + two-layer redaction); daemon side `internal/daemon/create_req.go`, `project_req.go`, `workstate.go`, `task.go`.
+Key files: `cmd/quil/mcp.go` (bridge + daemon connection, server instructions), `cmd/quil/mcp_hosts.go` (host router), `cmd/quil/mcp_tools.go` (workspace and interaction tools, now host-aware), `cmd/quil/mcp_tools_projects.go` (projects, tabs, hosts, catalog), `cmd/quil/mcp_tools_tasks.go` (delegation), `cmd/quil/mcp_keys.go` (key name → escape sequence map), `cmd/quil/mcp_log.go` (per-pane interaction logging + two-layer redaction); daemon side `internal/daemon/create_req.go`, `project_req.go`, `workstate.go`, `task.go`.
 
 Bridge lifetime: `watchParentExit()` (`cmd/quil/parentwatch_windows.go` / `parentwatch_unix.go`, armed first thing in `runMCP`) ties the bridge to the AI client that spawned it. Stdin EOF is NOT a reliable termination signal on Windows — the MCP client spawns stdio servers concurrently and same-second siblings inherit each other's pipe handles, so after the client dies a sibling still holds the bridge's stdin write end and `server.Run` blocks forever (observed: 20 orphaned bridges accumulated over a week, in same-second spawn pairs, each holding a live IPC conn to the production daemon). Windows: `OpenProcess(SYNCHRONIZE)` on the parent + `WaitForSingleObject` in a goroutine → `os.Exit(0)` when the parent exits, with a PID-reuse guard (`parentHandleTrustworthy` — a real parent's creation time is ≤ the child's; an impostor wearing a reused PID is treated as parent-already-dead). Unix: 2 s `Getppid()` reparent poll as belt-and-suspenders (EOF is reliable there). Covers pane kill, pane restart, session restart, and client crash with zero daemon coupling — the pane's claude process IS the bridge's parent.
 
@@ -240,7 +242,7 @@ Project docs are now organized as a navigable tree under `docs/` (with the index
 - `docs/features.md` — Feature catalog grouped by area
 - `docs/keybindings.md` — Full keymap + customization syntax
 - `docs/configuration.md` — `~/.quil/config.toml` reference
-- `docs/mcp.md` — User-facing MCP guide (client wiring, all 18 tools, redaction model)
+- `docs/mcp.md` — User-facing MCP guide (client wiring, all 34 tools, redaction model)
 - `docs/plugin-reference.md` — TOML plugin schema (every field, every strategy, examples)
 - `docs/troubleshooting.md` — Daemon won't start, MCP not detected, log file locations, reset
 - `docs/sandbox-panes.md` — Docker sandbox panes: building the image, signing in, what the sandbox does and does not bound
@@ -272,7 +274,7 @@ Cached reference repos:
 | M6 | Done | Pane focus — Ctrl+E full-screen active pane |
 | M7 | Done | Pane notes — Alt+E editor bound per pane, three save safety nets |
 | M8 | Done | Bubble Tea v2 + Lipgloss v2 migration |
-| M10 | Done | MCP server — `quil mcp`, 18 tools, request-response IPC via `Message.ID` |
+| M10 | Done | MCP server — `quil mcp`, 34 tools; projects, hosts and task delegation added September 2026; request-response IPC via `Message.ID` |
 | M11 | Done | Command palette — Alt+Shift+P, fuzzy find, unified content search |
 | M12 | Done | Notification center — daemon event queue, per-pane mute, sidebar, 3 MCP tools |
 | M13 | Done | Memory reporting — 5s collector, per-pane Go-heap + PTY RSS, dialog + 2 MCP tools |

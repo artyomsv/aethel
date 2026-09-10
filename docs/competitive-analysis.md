@@ -29,7 +29,7 @@ architectural bet.
 | VT emulation | `charmbracelet/x/vt` | Vendored libghostty-vt (Ghostty engine) | `vt100` crate over `tmux pipe-pane` |
 | Client/server | daemon + TUI client | server + thin client(s) | tmux + TUI + optional HTTP daemon |
 | **Windows** | ✅ **Native** (bundled ConPTY/OpenConsole) | ⚠️ Native **beta** (ConPTY) | ❌ **WSL2 only** |
-| Agent-drives-it API | **MCP server** (18 tools, native protocol) | Socket API + full CLI + agent skill | HTTP REST API (130 routes) + CLI |
+| Agent-drives-it API | **MCP server** (34 tools, native protocol) | Socket API + full CLI + agent skill | HTTP REST API (130 routes) + CLI |
 | Web/browser UI | ❌ TUI only | ❌ (responsive TUI) | ✅ **React PWA dashboard** |
 | Container sandbox | ✅ **Docker** (per-pane, user-supplied image) | ❌ | ✅ Docker/Podman/Apple |
 | Remote phone access | ❌ | via SSH TUI | ✅ Tunnel + PWA + Web Push |
@@ -143,7 +143,7 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent
 | Executable plugins (any language) | ✅ | ✅ (design) | ❌ |
 | Plugin actions / event hooks / link handlers | ✅ | ✅ | ❌ |
 | Plugin marketplace (GitHub topic index) | ✅ | ✅ (featured + hash) | ❌ |
-| Agent-drives-multiplexer API | ✅ socket+CLI | ✅ HTTP+CLI | ✅ **MCP (18 tools)** |
+| Agent-drives-multiplexer API | ✅ socket+CLI | ✅ HTTP+CLI | ✅ **MCP (34 tools)** |
 | General CLI to script panes | ✅ | ✅ | ❌ |
 | MCP server forwarding to agents | ❌ | ✅ | ❌ |
 | ACP structured view (plan/tool/approve cards) | ❌ | ✅ | ❌ |
@@ -218,8 +218,9 @@ vim-style copy mode, agent command overrides.
   window-size persistence, conhost grid fixups, ConPTY ghost-window guards. herdr
   is explicitly *beta* on Windows; aoe is **WSL2-only**. A real, defensible wedge
   with Windows-based agent developers.
-- **First-class MCP server.** Quil exposes 18 MCP tools that Claude Desktop /
-  Cursor / VS Code consume *natively*. The competitors built bespoke socket/HTTP
+- **First-class MCP server.** Quil exposes 34 MCP tools that Claude Desktop /
+  Cursor / VS Code consume *natively*, including projects, remote hosts and
+  pane-to-pane task delegation. The competitors built bespoke socket/HTTP
   APIs that need an "agent skill" to teach. For the *AI-agent-as-operator* use
   case, Quil's protocol choice is the strongest of the three.
 - **Pane notes** — per-pane markdown editor with autosave. Neither competitor has
