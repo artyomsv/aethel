@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -43,6 +43,15 @@ func newMCPBridge(client *ipc.Client) *mcpBridge {
 		client:  client,
 		pending: make(map[string]chan *ipc.Message),
 	}
+}
+
+// newLocalMCPBridge discovers the local daemon's version before readLoop owns
+// the connection. Use the local handshake budget: a pre-versioning daemon
+// ignores the probe, and waiting the remote budget would delay MCP startup.
+func newLocalMCPBridge(client *ipc.Client) *mcpBridge {
+	bridge := newMCPBridge(client)
+	bridge.daemonVersion = probeDaemonVersion(client, handshakeTimeout)
+	return bridge
 }
 
 // declinePaneOutput asks the daemon to stop broadcasting the live PTY stream to
@@ -194,11 +203,7 @@ func runMCP() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	bridge := newMCPBridge(client)
-	// Before the read loop takes the connection: the probe reads its own
-	// reply. The local daemon is normally this build's twin, but a bridge can
-	// outlive an upgrade (an old quil.exe beside a new quild, or the reverse).
-	bridge.daemonVersion = probeDaemonVersion(client, daemonVersionProbeTimeout)
+	bridge := newLocalMCPBridge(client)
 	if err := bridge.declinePaneOutput(); err != nil {
 		log.Printf("mcp: decline pane output: %v", err)
 	}

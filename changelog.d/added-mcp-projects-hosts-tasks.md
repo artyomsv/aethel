@@ -15,7 +15,8 @@ headline: MCP gains projects, remote hosts and pane-to-pane tasks
   own. `list_hosts` shows connection state and each daemon's version. The list and
   notification tools aggregate across hosts and skip a host whose request fails rather
   than failing the whole list. A tool that needs the new request types refuses a daemon
-  older than 1.72.0 by name instead of timing out.
+  older than 1.72.0 by name instead of timing out. Local MCP startup uses the shorter
+  local version-probe timeout when an older daemon does not answer.
 - **`delegate_task`: hand another pane a job and hear when it is done.** The prompt is
   pasted as one block; the daemon follows the target's own agent state — a new
   `agent_state` (`working` / `blocked` / `idle`) on every AI pane — and marks the task

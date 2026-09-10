@@ -25,8 +25,9 @@ import (
 // would drop the same way.
 const mcpDaemonMinVersion = "1.72.0"
 
-// daemonVersionProbeTimeout bounds the version probe. A pre-versioning daemon
-// drops the request silently. Package var so tests keep it short.
+// daemonVersionProbeTimeout bounds remote version probes. A pre-versioning
+// daemon drops the request silently. Local startup uses handshakeTimeout;
+// this is a package var so remote-bridge tests can keep it short.
 var daemonVersionProbeTimeout = remoteHandshakeTimeout
 
 // probeDaemonVersion asks a freshly dialled client which version its daemon

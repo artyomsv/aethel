@@ -61,6 +61,34 @@ func TestProbeDaemonVersion_ReadsTheAnswerOrGivesUp(t *testing.T) {
 	}
 }
 
+// A pre-versioning local daemon ignores the probe but still answers the
+// original tools. Exercise the constructor runMCP uses, including its actual
+// startup budget and the connection's usability after the probe times out.
+func TestLocalMCPBridge_SilentVersionProbeKeepsLegacyToolsAvailable(t *testing.T) {
+	client, err := ipc.NewClient(echoServer(t, "pane-legacy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ready := make(chan *mcpBridge, 1)
+	go func() { ready <- newLocalMCPBridge(client) }()
+	var bridge *mcpBridge
+	select {
+	case bridge = <-ready:
+	case <-time.After(3 * time.Second): // 2 s local budget plus scheduling slack
+		client.Close()
+		<-ready
+		t.Fatal("local MCP startup waited beyond its local probe budget")
+	}
+	if bridge.daemonVersion != "" {
+		t.Fatalf("silent daemon version = %q, want unknown", bridge.daemonVersion)
+	}
+	go bridge.readLoop(context.Background())
+	if got := firstPaneID(t, bridge); got != "pane-legacy" {
+		t.Fatalf("legacy list_panes after the probe = %q", got)
+	}
+}
+
 // An unscoped list skips a remote whose daemon is too old and still returns
 // the local entries; list_hosts shows why the remote is missing. A NAMED old
 // remote is a clear refusal, not a timeout.
