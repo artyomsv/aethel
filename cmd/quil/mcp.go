@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,10 @@ type mcpBridge struct {
 	client  *ipc.Client
 	mu      sync.Mutex
 	pending map[string]chan *ipc.Message
+	// dead is set when readLoop exits: the connection is gone and every
+	// later request would only time out. The host router reads it to
+	// decide whether a remote needs re-dialling.
+	dead atomic.Bool
 }
 
 func newMCPBridge(client *ipc.Client) *mcpBridge {
@@ -74,6 +79,7 @@ func (b *mcpBridge) readLoop(ctx context.Context) {
 		msg, err := b.client.Receive()
 		if err != nil {
 			// Connection lost — wake all pending requests
+			b.dead.Store(true)
 			b.mu.Lock()
 			for id, ch := range b.pending {
 				close(ch)
@@ -190,37 +196,57 @@ func runMCP() {
 	}
 	go bridge.readLoop(ctx)
 
+	// Remote hosts ride the same [[destinations]] the TUI attaches to, dialled
+	// in the background so the local daemon is served at once.
+	router := newMCPRouter(bridge, cfg, dialMCPHost)
+	router.connectAll()
+
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "quil", Version: version},
 		&mcp.ServerOptions{
-			Instructions: "Quil is a terminal multiplexer with multiple panes and tabs.\n\n" +
-				"Tool usage guidelines:\n" +
-				"- Use list_panes or list_tabs first to discover IDs before calling other tools.\n" +
-				"- read_pane_output: best for simple shells and command output (returns scrollback text).\n" +
-				"- screenshot_pane: best for interactive TUI apps (vim, htop, Claude Code) — returns the actual screen state.\n" +
-				"- send_keys: for navigating interactive menus, send arrow keys ONE AT A TIME with separate calls. " +
-				"Do NOT batch escape-sequence keys in a single call — TUI apps may only process the first one.\n" +
-				"- send_to_pane: for typing text commands — appends newline by default to execute.\n" +
-				"- Destructive tools (restart_pane, destroy_pane, close_tui): always confirm with the user before using.\n" +
-				"- watch_notifications: blocks until an event fires on specified panes (replaces polling). Use after starting long-running tasks.\n" +
-				"- get_notifications: returns all pending notification events without blocking.\n" +
-				"- dismiss_notifications: ack events you've handled so they don't show up again. Pass an event_id, or omit to clear all.\n\n" +
-				"Sensitive data handling:\n" +
-				"When sending sensitive data (passwords, API keys, tokens, seeds) via send_to_pane or send_keys, " +
-				"wrap the value with <<REDACT>>...<</REDACT>> markers.\n" +
-				"Example: send_to_pane(input=\"export API_KEY=<<REDACT>>sk-abc123<</REDACT>>\")\n" +
-				"The markers are stripped before reaching the terminal. MCP interaction logs show [REDACTED] in their place.",
+			Instructions: mcpInstructions,
 		},
 	)
 
 	mcpLog := newMCPLogger(cfg.MCP)
-	registerMCPTools(server, bridge, mcpLog)
+	registerMCPTools(server, router, mcpLog)
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintf(os.Stderr, "mcp server: %v\n", err)
 		os.Exit(1)
 	}
 }
+
+// mcpInstructions is the server-level guidance every MCP client shows its
+// model. Kept as one constant so the tool descriptions and this text are
+// edited side by side.
+const mcpInstructions = "Quil is a terminal multiplexer with projects, tabs and panes, possibly across several hosts.\n\n" +
+	"Tool usage guidelines:\n" +
+	"- Use list_panes, list_tabs or list_projects first to discover IDs before calling other tools. " +
+	"list_panes marks the pane you are running inside with self=true and reports each AI pane's agent_state " +
+	"(working / blocked / idle; empty means unknown, not idle).\n" +
+	"- read_pane_output: best for simple shells and command output (returns scrollback text).\n" +
+	"- screenshot_pane: best for interactive TUI apps (vim, htop, Claude Code) — returns the actual screen state.\n" +
+	"- send_keys: for navigating interactive menus, send arrow keys ONE AT A TIME with separate calls. " +
+	"Do NOT batch escape-sequence keys in a single call — TUI apps may only process the first one.\n" +
+	"- send_to_pane: for typing text commands — appends newline by default to execute. Use paste=true for multi-line text to an AI pane.\n" +
+	"- delegate_task: to ask ANOTHER AI pane (or a terminal) to do work. It pastes the prompt, returns a task id, and the daemon " +
+	"reports done / failed / timeout from the target's own state. Then either wait_task (blocking), watch_notifications for task_done, " +
+	"or carry on — with notify (default) a '[quil task ...]' line is typed into your pane when the task ends. get_task returns the last output.\n" +
+	"- create_pane / create_tab: call list_plugins first for the toggle names an AI plugin accepts (permission mode, chrome, search); " +
+	"list_sessions for a Claude session to resume. worktree_branch opens the pane in a fresh git worktree; sandbox_image runs it in Docker.\n" +
+	"- Projects: list_projects, create_project, update_project, switch_project, destroy_project; tabs: create_tab, rename_tab, destroy_tab.\n" +
+	"- Hosts: list_hosts shows the remote daemons this bridge reaches. Ids you discovered route to their host automatically; " +
+	"pass host explicitly to create things on a remote. delegate_task with notify only works when requester and target share a host.\n" +
+	"- Destructive tools (restart_pane, destroy_pane, destroy_tab, destroy_project, close_tui): always confirm with the user before using.\n" +
+	"- watch_notifications: blocks until an event fires on specified panes (replaces polling). Use after starting long-running tasks.\n" +
+	"- get_notifications: returns all pending notification events without blocking.\n" +
+	"- dismiss_notifications: ack events you've handled so they don't show up again. Pass an event_id (and its host), or omit to clear all.\n\n" +
+	"Sensitive data handling:\n" +
+	"When sending sensitive data (passwords, API keys, tokens, seeds) via send_to_pane, send_keys or delegate_task, " +
+	"wrap the value with <<REDACT>>...<</REDACT>> markers.\n" +
+	"Example: send_to_pane(input=\"export API_KEY=<<REDACT>>sk-abc123<</REDACT>>\")\n" +
+	"The markers are stripped before reaching the terminal. MCP interaction logs show [REDACTED] in their place."
 
 // refuseRemoteMCP reports whether this session is attached to a remote
 // daemon over --remote and, if so, prints a refusal to stderr and calls
