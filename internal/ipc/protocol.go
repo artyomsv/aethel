@@ -657,6 +657,18 @@ type PaneInfo struct {
 	// exit_code: null" is indistinguishable from a pane whose process died, so
 	// an agent reads a placeholder as a corpse and calls restart_pane on it.
 	PreparingWorktree string `json:"preparing_worktree,omitempty"`
+	// ProjectID names the project the pane's tab belongs to.
+	ProjectID string `json:"project_id,omitempty"`
+	// AgentState is the daemon's replay of the pane's hook edges: "working",
+	// "blocked", "idle", or empty when no hook edge has been seen (a terminal
+	// pane, or an AI pane whose hooks never loaded). Empty is NOT idle: an
+	// agent deciding whether another pane is free must treat it as unknown.
+	AgentState string `json:"agent_state,omitempty"`
+	// BlockedReason names the tool a permission prompt was raised for, when
+	// the producer said. Only meaningful while AgentState is "blocked".
+	BlockedReason string `json:"blocked_reason,omitempty"`
+	// LastIdleAt is when the pane last fell idle, Unix ms; 0 if never.
+	LastIdleAt int64 `json:"last_idle_at,omitempty"`
 }
 
 type ListPanesRespPayload struct {
@@ -689,6 +701,11 @@ type PaneStatusRespPayload struct {
 	// PreparingWorktree: see PaneInfo. A pane waiting on a checkout is not a
 	// dead pane, and this is the only field that says so.
 	PreparingWorktree string `json:"preparing_worktree,omitempty"`
+	// ProjectID, AgentState, BlockedReason, LastIdleAt: see PaneInfo.
+	ProjectID     string `json:"project_id,omitempty"`
+	AgentState    string `json:"agent_state,omitempty"`
+	BlockedReason string `json:"blocked_reason,omitempty"`
+	LastIdleAt    int64  `json:"last_idle_at,omitempty"`
 }
 
 type CreatePaneReqPayload struct {

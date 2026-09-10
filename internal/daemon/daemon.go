@@ -5308,6 +5308,11 @@ func (d *Daemon) findEventSince(sinceUnixMilli int64, paneFilter map[string]bool
 func (d *Daemon) emitEvent(e PaneEvent) {
 	if e.PaneID != "" {
 		if pane := d.session.Pane(e.PaneID); pane != nil {
+			// The work ledger sees EVERY event, ahead of both bypasses below:
+			// a muted pane still finishes turns, and the heartbeat that never
+			// reaches the queue is exactly what re-arms "working".
+			tr := d.applyWorkEvent(pane, e)
+			d.taskObserve(pane, e, tr)
 			pane.PluginMu.Lock()
 			muted := pane.Muted
 			pane.PluginMu.Unlock()
@@ -5906,6 +5911,7 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 			pane.spawnMu.Lock()
 			pending := pane.Pending
 			pane.spawnMu.Unlock()
+			state, reason, lastIdle := paneWorkState(pane)
 			panes = append(panes, ipc.PaneInfo{
 				ID:           pane.ID,
 				TabID:        tab.ID,
@@ -5919,6 +5925,10 @@ func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 				// Why this pane has no process. Without it an agent reads a
 				// placeholder as a crashed pane.
 				PreparingWorktree: preparing,
+				ProjectID:         tab.ProjectID,
+				AgentState:        state,
+				BlockedReason:     reason,
+				LastIdleAt:        lastIdle,
 			})
 		}
 	}
@@ -5998,6 +6008,11 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 	pane.spawnMu.Lock()
 	pending := pane.Pending
 	pane.spawnMu.Unlock()
+	state, reason, lastIdle := paneWorkState(pane)
+	projectID := ""
+	if tab := d.session.Tab(pane.TabID); tab != nil {
+		projectID = tab.ProjectID
+	}
 
 	return ipc.PaneStatusRespPayload{
 		PaneID:            pane.ID,
@@ -6008,6 +6023,10 @@ func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
 		CWD:               cwd,
 		Name:              pane.Name,
 		PreparingWorktree: preparing,
+		ProjectID:         projectID,
+		AgentState:        state,
+		BlockedReason:     reason,
+		LastIdleAt:        lastIdle,
 	}
 }
 
