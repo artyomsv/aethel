@@ -2544,7 +2544,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Update working state + unseen marks from the same hook stream.
 		m.applyWorkTransition(msg.PaneID, msg.Type, msg.Data)
-		m.flowAttention(msg.PaneID, msg.Type)
+		m.flowAttention(msg)
 		if m.anyPaneWorking() && !m.workTickRunning {
 			m.workTickRunning = true
 			cmds = append(cmds, m.workSpinnerTick())

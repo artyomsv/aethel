@@ -22,6 +22,7 @@ The result: your AI can **see what's in your build pane and react**, instead of 
   - [Projects and tabs](#projects-and-tabs)
   - [Remote hosts](#remote-hosts)
   - [Delegating work to another pane](#delegating-work-to-another-pane)
+  - [report_step](#report_step)
   - [TUI cooperation](#tui-cooperation)
   - [Event observation](#event-observation)
   - [Memory reporting](#memory-reporting)
@@ -281,6 +282,17 @@ A terminal target is `done` when its shell reports the command finished (OSC 133
 
 The daemon does not parse the target's reply. The excerpt is raw output; the requester decides what to do with it (read more with `read_pane_output`, follow up with another `delegate_task`).
 
+### report_step
+
+Report the caller pane's current flow step: `status` is `done` or `blocked`,
+`result` is an object of string values, and `task_id` is optional. Plan requires
+`plan`, build requires `pr`, review requires `verdict` (`approved` or `changes`)
+and accepts `notes`, and fix requires no key. `pr` must be a PR number, `owner/repo#N`, or a GitHub PR URL. A blocked step supplies `question`.
+At most 16 values, each at most 8 KiB. The daemon rejects ordinary delegated tasks, foreign targets, ended steps, and terminal control characters.
+A correction replaces an earlier report until settled idle ends the task. A
+hookless pane completes after the report's settle window. This tool always uses
+the bridge's local daemon and requires Quil 1.73.0+. See [Agent flows](agent-flows.md).
+
 ### TUI cooperation
 
 These steer the live TUI window (if one is attached).
@@ -437,14 +449,3 @@ The bridge talks to `~/.quil/quild.sock` (mode `0600`). If that path doesn't exi
 - Key name mapping: [`cmd/quil/mcp_keys.go`](../cmd/quil/mcp_keys.go)
 - Redaction + logging: [`cmd/quil/mcp_log.go`](../cmd/quil/mcp_log.go)
 - Architecture rationale: [Architecture / ADR-?? MCP](architecture.md)
-
-### report_step
-
-Report the caller pane's current flow step: `status` is `done` or `blocked`,
-`result` is an object of string values, and `task_id` is optional. Plan requires
-`plan`, build requires `pr`, review requires `verdict` (`approved` or `changes`)
-and accepts `notes`, and fix requires no key. A blocked step supplies `question`.
-At most 16 values, each at most 8 KiB. The daemon rejects foreign and ended tasks.
-A correction replaces an earlier report until settled idle ends the task. A
-hookless pane completes after the report's settle window. This tool always uses
-the bridge's local daemon and requires Quil 1.73.0+. See [Agent flows](agent-flows.md).

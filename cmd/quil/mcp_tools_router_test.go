@@ -108,6 +108,10 @@ func (f *fakeIPCDaemon) delegate() *ipc.DelegateTaskReqPayload {
 // toolHarness registers every tool on a server backed by a router over one
 // local fake daemon and one remote fake daemon, and returns a client session.
 func toolHarness(t *testing.T, local, remote *fakeIPCDaemon) (*mcp.ClientSession, *mcpRouter) {
+	return toolsetHarness(t, local, remote, false)
+}
+
+func toolsetHarness(t *testing.T, local, remote *fakeIPCDaemon, flowOnly bool) (*mcp.ClientSession, *mcpRouter) {
 	t.Helper()
 	cfg := config.Default()
 	dial := func(cfg config.Config, d config.Destination) (*ipc.Client, error) { return ipc.NewClient(remote.sock) }
@@ -121,7 +125,7 @@ func toolHarness(t *testing.T, local, remote *fakeIPCDaemon) (*mcp.ClientSession
 		}
 	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "quil-test", Version: "0"}, nil)
-	registerMCPTools(server, r, &mcpLogger{dir: t.TempDir()})
+	registerMCPToolset(server, r, &mcpLogger{dir: t.TempDir()}, flowOnly)
 	ct, st := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(context.Background(), st, nil); err != nil {
 		t.Fatalf("server connect: %v", err)

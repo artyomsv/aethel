@@ -653,7 +653,7 @@ func (d *Daemon) snapshot() {
 	// — the workspace.json said N panes while the buffer flush iterated
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
 	activeTab, tabs, panesByTab, projects, activeProject, flows := d.session.snapshotStateWithFlows()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false, flows...)
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false, flows)
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
@@ -4006,7 +4006,13 @@ func (d *Daemon) broadcastState() {
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
 	activeTab, tabs, panesByTab, projects, activeProject, flows := d.session.snapshotStateWithFlows()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true, flows...)
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true, flows)
+	// Broadcast only presentation fields. Features, plans, and notes stay on disk.
+	for i := range flows {
+		flows[i].Feature = ""
+		flows[i].Results.Plan = ""
+		flows[i].Results.Notes = ""
+	}
 	// Broadcast-only (never persisted): announced newer release, if any.
 	if info := d.currentUpdateInfo(); info != nil {
 		state["update"] = info
@@ -4028,7 +4034,7 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 // snapshot and the live broadcast because this function is shared by both
 // (buildWorkspaceState and snapshot()); writing them only at the persist.Save
 // call site would leave every broadcast project-less.
-func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string, includeOverlays bool, flows ...flow.Flow) map[string]any {
+func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string, includeOverlays bool, flows []flow.Flow) map[string]any {
 	tabList := make([]map[string]any, 0, len(tabs))
 	paneList := make([]map[string]any, 0)
 

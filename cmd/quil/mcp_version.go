@@ -21,9 +21,9 @@ import (
 // rather than as "this host has not been upgraded". Measured 2026-09-10
 // against a remote still on 1.71.0.
 //
-// Bump when a later release adds request types that a still-older daemon
-// would drop the same way.
-const mcpDaemonMinVersion = "1.73.0"
+// Newer tools use their own floor; do not raise the floor of existing tools.
+const mcpDaemonMinVersion = "1.72.0"
+const reportStepMinVersion = "1.73.0"
 
 // daemonVersionProbeTimeout bounds remote version probes. A pre-versioning
 // daemon drops the request silently. Local startup uses handshakeTimeout;
@@ -92,14 +92,18 @@ func truncateVersion(v string) string {
 // floor is refused, and the error says what to run — the remedy is the same
 // one `quil remote setup` performs.
 func (b *mcpBridge) requireDaemon(tool string) error {
+	return b.requireDaemonAtLeast(tool, mcpDaemonMinVersion)
+}
+
+func (b *mcpBridge) requireDaemonAtLeast(tool, min string) error {
 	v := b.daemonVersion
 	if v == "" {
 		return nil
 	}
-	cmp, err := versionpkg.Compare(v, mcpDaemonMinVersion)
+	cmp, err := versionpkg.Compare(v, min)
 	if err != nil || cmp >= 0 {
 		return nil
 	}
 	return fmt.Errorf("%s needs quil %s or newer on the daemon, and this one runs %s — upgrade it (quil remote setup <host> pushes this client's build)",
-		tool, mcpDaemonMinVersion, v)
+		tool, min, v)
 }

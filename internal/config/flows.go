@@ -11,6 +11,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/artyomsv/quil/internal/flow"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 //go:embed flows.toml
@@ -33,7 +34,12 @@ func FlowsPath() string { return filepath.Join(QuilDir(), "flows.toml") }
 
 func DefaultFlows() Flows {
 	var f Flows
-	_ = toml.Unmarshal([]byte(defaultFlows), &f)
+	if err := toml.Unmarshal([]byte(defaultFlows), &f); err != nil {
+		panic("invalid embedded flows: " + err.Error())
+	}
+	if err := f.Validate(); err != nil {
+		panic("invalid embedded flows: " + err.Error())
+	}
 	return f
 }
 
@@ -62,6 +68,15 @@ func (f Flows) Validate() error {
 	}
 	for _, role := range flow.Roles {
 		r := f.Roles[role]
+		if strings.TrimSpace(r.Prompt) == "" {
+			return fmt.Errorf("%s prompt is empty", role)
+		}
+		if role == flow.Developer && strings.TrimSpace(r.FixPrompt) == "" {
+			return fmt.Errorf("developer fix_prompt is empty")
+		}
+		if flow.UnsafePromptText(r.Prompt) || flow.UnsafePromptText(r.FixPrompt) {
+			return fmt.Errorf("%s prompt contains terminal control characters", role)
+		}
 		if strings.TrimSpace(r.Agent) == "" {
 			return fmt.Errorf("%s agent is empty", role)
 		}
@@ -129,4 +144,19 @@ func (cfg Flows) Prompt(f flow.Flow) string {
 		example = `{"verdict": "approved or changes", "notes": "..."}`
 	}
 	return prompt + fmt.Sprintf("\n\nWhen you finish, call the quil MCP tool report_step with status=\"done\" and\nresult=%s. Required keys for this step: %s. If you cannot\nfinish, call report_step with status=\"blocked\" and result={\"question\": \"...\"}.\nDo not do the work of any other role. Do not start subagents to do it.\n", example, key)
+}
+
+func (f Flows) Wire() ipc.FlowConfig {
+	out := ipc.FlowConfig{MaxReviewRounds: f.MaxReviewRounds, StepTimeoutMinutes: f.StepTimeoutMinutes, Roles: make(map[flow.Role]ipc.FlowRoleConfig, len(f.Roles))}
+	for role, r := range f.Roles {
+		out.Roles[role] = ipc.FlowRoleConfig{Agent: r.Agent, Toggles: append([]string(nil), r.Toggles...), Prompt: r.Prompt, FixPrompt: r.FixPrompt}
+	}
+	return out
+}
+func FlowsFromWire(f ipc.FlowConfig) Flows {
+	out := Flows{MaxReviewRounds: f.MaxReviewRounds, StepTimeoutMinutes: f.StepTimeoutMinutes, Roles: make(map[flow.Role]FlowRole, len(f.Roles))}
+	for role, r := range f.Roles {
+		out.Roles[role] = FlowRole{Agent: r.Agent, Toggles: append([]string(nil), r.Toggles...), Prompt: r.Prompt, FixPrompt: r.FixPrompt}
+	}
+	return out
 }

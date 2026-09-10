@@ -3,12 +3,12 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/flow"
-	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/google/uuid"
 )
@@ -35,18 +35,6 @@ func (d *Daemon) flowsConfig() (config.Flows, error) {
 		return config.DefaultFlows(), nil
 	}
 	return d.session.flowConfig, nil
-}
-
-func (d *Daemon) flowSnapshots() []flow.Flow {
-	d.session.mu.RLock()
-	defer d.session.mu.RUnlock()
-	out := make([]flow.Flow, 0, len(d.session.flows))
-	for _, f := range d.session.flows {
-		if d.session.tabs[f.TabID] != nil {
-			out = append(out, f.Clone())
-		}
-	}
-	return out
 }
 
 func (d *Daemon) restoreFlows(raw any) {
@@ -82,6 +70,11 @@ func (d *Daemon) handleStartFlowReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	// Root resolution can touch a dead filesystem; leave the client dispatch free.
 	go func() {
+		select {
+		case <-d.shutdown:
+			return
+		default:
+		}
 		resp, prepare := d.startFlow(req)
 		respondTo(conn, msg.ID, ipc.MsgStartFlowResp, resp)
 		if prepare != nil {
@@ -103,6 +96,18 @@ func (d *Daemon) validateFlowRoles(cfg config.Flows) error {
 		if !flowMCPSupported(r.Agent) {
 			return fmt.Errorf("%s agent %q has no per-spawn MCP support", role, r.Agent)
 		}
+		permissionMode, selected := false, false
+		for _, toggle := range p.Command.Toggles {
+			if toggle.Group == "permission_mode" {
+				permissionMode = true
+				for _, name := range r.Toggles {
+					selected = selected || name == toggle.Name
+				}
+			}
+		}
+		if permissionMode && !selected {
+			return fmt.Errorf("%s requires a permission_mode toggle for unattended work", role)
+		}
 		if _, err := resolveToggles(p, r.Toggles); err != nil {
 			return err
 		}
@@ -117,8 +122,16 @@ func (d *Daemon) startFlow(req ipc.StartFlowReqPayload) (ipc.StartFlowRespPayloa
 	fail := func(err error) (ipc.StartFlowRespPayload, func()) {
 		return ipc.StartFlowRespPayload{Error: err.Error()}, nil
 	}
+	select {
+	case <-d.shutdown:
+		return fail(fmt.Errorf("daemon is shutting down"))
+	default:
+	}
 	if strings.TrimSpace(req.Feature) == "" {
 		return fail(fmt.Errorf("feature is empty"))
+	}
+	if flow.UnsafePromptText(req.Feature) {
+		return fail(fmt.Errorf("feature contains terminal control characters"))
 	}
 	if len(req.Feature) > 128*1024 {
 		return fail(fmt.Errorf("feature exceeds 128 KiB"))
@@ -158,7 +171,9 @@ func (d *Daemon) startFlow(req ipc.StartFlowReqPayload) (ipc.StartFlowRespPayloa
 	analyst := payloads[flow.Analyst]
 	placeholder, err := d.constructPreparingPane(tab.ID, cwd, "terminal", ipc.FirstPaneSpec{Worktree: analyst.Worktree})
 	if err != nil {
-		_ = d.session.DestroyTab(tab.ID)
+		if cleanupErr := d.session.DestroyTab(tab.ID); cleanupErr != nil {
+			log.Printf("failed flow tab cleanup: %v", cleanupErr)
+		}
 		return fail(err)
 	}
 	applyPaneName(placeholder, string(flow.Analyst))
@@ -188,6 +203,11 @@ func (d *Daemon) startFlow(req ipc.StartFlowReqPayload) (ipc.StartFlowRespPayloa
 }
 
 func (d *Daemon) prepareFlow(id string) {
+	select {
+	case <-d.shutdown:
+		return
+	default:
+	}
 	d.session.mu.RLock()
 	payloads := d.session.flowPreparing[id]
 	d.session.mu.RUnlock()
@@ -213,22 +233,47 @@ func (d *Daemon) prepareFlow(id string) {
 	cwd := pane.CWD
 	pane.PluginMu.Unlock()
 	panes := map[flow.Role]string{flow.Analyst: pane.ID}
+	createdPanes := []*Pane{pane}
 	var spawnErr error
 	for _, role := range []flow.Role{flow.Developer, flow.Reviewer} {
+		select {
+		case <-d.shutdown:
+			return // Restore drops preparing flows; never start another child during shutdown.
+		default:
+		}
 		p := payloads[role]
 		created, err := d.constructPaneAt(p, cwd, p.Type)
 		if created != nil {
+			createdPanes = append(createdPanes, created)
 			applyPaneName(created, string(role))
 			panes[role] = created.ID
 		}
 		if err != nil && spawnErr == nil {
-			spawnErr = err
+			spawnErr = fmt.Errorf("pane %s failed to start: %w", role, err)
 		}
 	}
 	d.session.mu.Lock()
 	f := d.session.flows[id]
 	if f == nil {
 		d.session.mu.Unlock()
+		// Cancellation may have raced construction. Retire only this worker's
+		// panes; never leave an untracked process alive after its flow vanished.
+		for _, created := range createdPanes {
+			paneID := created.ID
+			d.cleanupPaneArtifacts(paneID)
+			if d.session.Pane(paneID) != nil {
+				if err := d.session.DestroyPane(paneID); err != nil {
+					log.Printf("cancelled flow %s cleanup: %v", id, err)
+				}
+			} else {
+				releasePanes([]*Pane{created})
+			}
+		}
+		if spawnErr != nil {
+			log.Printf("cancelled flow %s: %v", id, spawnErr)
+		}
+		d.broadcastState()
+		d.requestSnapshot()
 		return
 	}
 	f.Panes = panes
@@ -277,11 +322,31 @@ func (d *Daemon) publishFlow(f flow.Flow) {
 	if f.Paused {
 		typ, title, severity = "flow_paused", f.PauseWhy, "warning"
 	}
-	d.emitEvent(PaneEvent{ID: uuid.NewString(), PaneID: f.Panes[role], TabID: f.TabID, PaneName: string(role),
+	paneID := f.Panes[role]
+	// cleanupPaneArtifacts finishes the task before removing the dying pane.
+	// Route its one attention edge through a surviving role in the same tab.
+	if d.session.Pane(paneID) == nil || f.PauseWhy == "pane "+string(role)+" was closed" {
+		for _, candidate := range flow.Roles {
+			id := f.Panes[candidate]
+			if id == paneID {
+				continue
+			}
+			if p := d.session.Pane(id); p != nil && p.TabID == f.TabID {
+				paneID = id
+				break
+			}
+		}
+	}
+	d.emitEvent(PaneEvent{ID: uuid.NewString(), PaneID: paneID, TabID: f.TabID, PaneName: string(role),
 		Type: typ, Title: title, Severity: severity, Timestamp: time.Now(), Data: map[string]string{"flow_id": f.ID}})
 }
 
 func (d *Daemon) dispatchFlow(id string) {
+	select {
+	case <-d.shutdown:
+		return
+	default:
+	}
 	cfg, err := d.flowsConfig()
 	if err != nil {
 		d.pauseFlow(id, err.Error())
@@ -359,6 +424,11 @@ func (d *Daemon) flowOnTaskEnd(info ipc.TaskInfo, report *flow.Report) {
 }
 
 func (d *Daemon) resumeFlow(id string) error {
+	select {
+	case <-d.shutdown:
+		return fmt.Errorf("daemon is shutting down")
+	default:
+	}
 	d.session.mu.Lock()
 	f := d.session.flows[id]
 	if f == nil {
@@ -384,13 +454,26 @@ func (d *Daemon) resumeFlow(id string) error {
 		}
 	} else {
 		for _, role := range flow.Roles {
-			if d.session.panes[f.Panes[role]] == nil {
+			p := d.session.panes[f.Panes[role]]
+			if p == nil || p.TabID != f.TabID {
 				d.session.mu.Unlock()
-				return fmt.Errorf("pane %s was closed; close this tab and start a new flow", role)
+				return fmt.Errorf("pane %s was closed or belongs to another tab; close this tab and start a new flow", role)
+			}
+			p.PluginMu.Lock()
+			spawnError := p.SpawnError
+			p.PluginMu.Unlock()
+			if spawnError != "" {
+				d.session.mu.Unlock()
+				return fmt.Errorf("pane %s failed to start: %s; restart that pane before resuming", role, spawnError)
 			}
 		}
 	}
-	*f, _ = flow.Resume(*f)
+	next, err := flow.Resume(*f)
+	if err != nil {
+		d.session.mu.Unlock()
+		return err
+	}
+	*f = next
 	f.UpdatedAt = time.Now().UnixMilli()
 	d.session.mu.Unlock()
 	d.broadcastState()
@@ -453,51 +536,44 @@ func (d *Daemon) reportStep(req ipc.ReportStepReqPayload) ipc.ReportStepRespPayl
 		reg.mu.Unlock()
 		return fail("pane is not this task's target")
 	}
+	if !t.flowStep {
+		reg.mu.Unlock()
+		return fail("task is not a flow step")
+	}
 	if t.state.terminal() {
 		reg.mu.Unlock()
 		return fail("step already ended")
 	}
 	t.report = r
 	id := t.id
-	reg.mu.Unlock()
 	// Unknown is distinct from idle. Recheck at expiry so hooks that loaded
 	// during the window restore the strict report-then-settled-idle contract.
-	if p := d.session.Pane(req.PaneID); p != nil {
-		p.workMu.Lock()
-		unknown := p.Work.State() == hookevents.WorkUnknown
-		p.workMu.Unlock()
-		if unknown {
-			time.AfterFunc(agentIdleSettle, func() {
-				select {
-				case <-d.shutdown:
-					return
-				default:
-				}
-				p := d.session.Pane(req.PaneID)
-				if p == nil {
-					return
-				}
-				p.workMu.Lock()
-				unknown := p.Work.State() == hookevents.WorkUnknown
-				p.workMu.Unlock()
-				if unknown {
-					d.finishTaskIf(t, taskDone, "", true)
-				}
-			})
-		}
+	// One timer per task: corrected reports replace data, never race timers.
+	if t.reportTimer == nil {
+		t.reportTimer = flowReportAfter(agentIdleSettle, func() {
+			select {
+			case <-d.shutdown:
+				return
+			default:
+			}
+			d.finishTaskIf(t, taskDone, "", true)
+		})
 	}
+	reg.mu.Unlock()
 	return ipc.ReportStepRespPayload{TaskID: id}
 }
+
+var flowReportAfter = time.AfterFunc
 
 func (d *Daemon) handleFlowConfigReq(conn *ipc.Conn, msg *ipc.Message) {
 	if msg.Type == ipc.MsgSaveFlowConfigReq {
 		var req ipc.SaveFlowConfigReqPayload
 		err := msg.DecodePayload(&req)
 		if err == nil {
-			err = d.validateFlowRoles(req.Config)
+			err = d.validateFlowRoles(config.FlowsFromWire(req.Config))
 		}
 		if err == nil {
-			err = config.WriteFlows(req.Config)
+			err = config.WriteFlows(config.FlowsFromWire(req.Config))
 		}
 		if err == nil {
 			d.reloadFlows()
@@ -510,7 +586,7 @@ func (d *Daemon) handleFlowConfigReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	cfg, err := d.flowsConfig()
-	resp := ipc.FlowConfigRespPayload{Config: cfg}
+	resp := ipc.FlowConfigRespPayload{Config: cfg.Wire()}
 	if err != nil {
 		resp.Error = err.Error()
 	}

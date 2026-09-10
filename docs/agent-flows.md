@@ -32,6 +32,8 @@ prompt, maximum review rounds, and step timeout in minutes. Arrow keys select
 rows; Enter edits a prompt or cycles an option; Ctrl+S saves a prompt back to the
 settings page, and Ctrl+S there saves the file atomically and reloads the daemon.
 Unknown `{{placeholders}}` are retained and flagged in the prompt editor.
+Prompts cannot be empty. Changing an agent seeds its plugin's default-on toggles;
+select a permission-mode toggle before saving if the plugin offers that group.
 
 A missing file uses the embedded defaults: Claude Code for analyst/reviewer
 with `dangerously_skip_permissions`, Codex for developer with
@@ -53,7 +55,9 @@ stay within its role, and avoid doing another role's work through subagents.
 
 ## Step reporting
 
-Role panes receive a per-process Quil MCP server; no global agent configuration
+Role panes receive a restricted `quil mcp --toolset flow` server exposing only
+`report_step` and `get_task` for their own local task. It does not connect to
+remote hosts or expose workspace control tools. No global agent configuration
 is changed. The bridge is the `quil` executable beside the running `quild`, with
 the same dev/debug suffix. It uses that pane's `QUIL_HOME` and `QUIL_PANE_ID`.
 Codex receives these names in the server's `env_vars` allowlist because it
@@ -64,21 +68,27 @@ Call `report_step` with `status: "done"` and string-valued `result` entries:
 | Step | Required result |
 | --- | --- |
 | plan | `plan` |
-| build | `pr` |
+| build | `pr`: number, `owner/repo#N`, or GitHub PR URL |
 | review | `verdict`: `approved` or `changes`; optional `notes` |
 | fix | none (`{}`) |
 
 For help, report `status: "blocked"` with `result: {"question": "…"}`. Each value
 is limited to 8 KiB and there may be at most 16 entries. An optional `task_id`
 must target the caller's own pane; otherwise the daemon resolves that pane's
-one live task. A report may be corrected before the task ends. Reporting on an
+one live **flow** task; ordinary delegated tasks cannot be completed by reporting.
+Feature text, prompts, and report values reject ESC, CSI, and CR controls.
+A report may be corrected before the task ends. Reporting on an
 ended task is refused.
 
 With hooks, completion requires both a report and settled idle. Without any
 ledger edge, a report starts a two-second fallback; hooks appearing during the
 window restore the strict idle rule. Reported text is stored raw and sanitized
 when displayed. `report_step` requires daemon version 1.73.0 or newer and always
-uses the local daemon of its bridge, never a remote route.
+uses the local daemon of its bridge, never a remote route. Existing project,
+tab, and task tools retain their separate 1.72.0 daemon floor.
+
+Workspace broadcasts carry display state, PR, and pause reason. Full feature,
+plan, and review notes are retained in the persisted snapshot, not broadcast.
 
 ## Adapter references
 

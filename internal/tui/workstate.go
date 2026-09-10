@@ -534,7 +534,9 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// excludes the active tab and the active pane border outranks the green
 		// one, so the mark is invisible until it matters and is cleared by
 		// ackFocusedPane the moment the user comes back.
-		if !m.userIsWatching(paneID) {
+		// Flow outcomes own completion marks. An internal Stop must not seed
+		// a mark that the later on-blur sweep could turn into a second toast.
+		if !m.userIsWatching(paneID) && m.paneFlow(paneID) == nil {
 			pane.unseen = true
 			// A completion THIS process saw: a fresh event the on-blur sweep
 			// may toast for, unlike a mark seeded from the daemon's copy.
@@ -547,12 +549,6 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	// raiseAttentionToast. Withdrawal is NOT here: the falling edge has no
 	// choke point (the user typing an answer clears blockedSince without any
 	// hook firing at all), so it is a sweep in Update instead.
-	// A flow's settled outcome owns the completion toast. Its raw Stop can
-	// still become a pause (missing report), and each internal handoff is not
-	// a user-facing completion. Permission-request toasts remain unchanged.
-	if m.paneFlow(paneID) != nil {
-		wasUnseen = true
-	}
 	m.raiseAttentionToast(pane, proj, wasBlocked, wasUnseen)
 
 	// The daemon's copy of the mark follows every CHANGE — set on the falling

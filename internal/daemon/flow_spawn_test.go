@@ -47,3 +47,26 @@ func TestFlowMCPSpawn_PreservesHooksAndQuotesPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestSpawnPane_FlowRoles_RegisterRestrictedMCP(t *testing.T) {
+	d := newTestDaemon(t)
+	registerShippedPlugins(t, d)
+	old := flowMCPExeFn
+	flowMCPExeFn = func() (string, error) { return "/test/quil", nil }
+	t.Cleanup(func() { flowMCPExeFn = old })
+	for _, agent := range []string{"claude-code", "codex", "opencode"} {
+		d.registry.Get(agent).Available = true
+		for _, role := range []string{"analyst", ""} {
+			fake := &fakeSession{}
+			pane := &Pane{ID: "pane-f10af10a", Type: agent, FlowRole: role, CWD: t.TempDir()}
+			if err := d.spawnPane(pane, fake, false); err != nil {
+				t.Fatal(agent, err)
+			}
+			got := strings.Join(append(append([]string(nil), fake.startArgs...), fake.env...), " ")
+			hasMCP := strings.Contains(got, "/test/quil")
+			if !fake.started || hasMCP != (role != "") || (hasMCP && !strings.Contains(got, "--toolset")) {
+				t.Fatalf("agent %s role %q: %s", agent, role, got)
+			}
+		}
+	}
+}

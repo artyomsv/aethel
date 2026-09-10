@@ -10,7 +10,7 @@ import (
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
-func TestFlowsDefaultRoundTripAndToggles(t *testing.T) {
+func TestFlows_Default_RoundTripsWithShippedToggles(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	f, err := LoadFlows()
 	if err != nil || f.MaxReviewRounds != 3 {
@@ -43,7 +43,7 @@ func TestFlowsDefaultRoundTripAndToggles(t *testing.T) {
 	}
 }
 
-func TestFlowPromptFixedTailAndSinglePass(t *testing.T) {
+func TestFlowPrompt_Placeholders_PreservesFixedTail(t *testing.T) {
 	f := DefaultFlows()
 	r := f.Roles[flow.Analyst]
 	r.Prompt = "{{feature}} / {{unknown}}"
@@ -62,5 +62,25 @@ func TestFlowPromptFixedTailAndSinglePass(t *testing.T) {
 	}
 	if !strings.Contains(f.Prompt(flow.Flow{Stage: flow.StageFix}), "Required keys for this step: none") {
 		t.Fatal("fix demands a key")
+	}
+}
+
+func TestFlows_EmptyPrompts_RefusesSave(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	for _, role := range flow.Roles {
+		f := DefaultFlows()
+		r := f.Roles[role]
+		r.Prompt = " \n\t"
+		f.Roles[role] = r
+		if err := WriteFlows(f); err == nil {
+			t.Fatal("accepted empty prompt", role)
+		}
+	}
+	f := DefaultFlows()
+	r := f.Roles[flow.Developer]
+	r.FixPrompt = ""
+	f.Roles[flow.Developer] = r
+	if err := WriteFlows(f); err == nil {
+		t.Fatal("accepted empty fix prompt")
 	}
 }

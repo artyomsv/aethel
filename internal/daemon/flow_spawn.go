@@ -42,7 +42,7 @@ func flowMCPSpawn(agent string, args, env []string) ([]string, []string, error) 
 	switch agent {
 	case "claude-code":
 		b, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"quil": map[string]any{
-			"type": "stdio", "command": exe, "args": []string{"mcp"},
+			"type": "stdio", "command": exe, "args": []string{"mcp", "--toolset", "flow"},
 		}}})
 		if err != nil {
 			return nil, nil, err
@@ -52,11 +52,11 @@ func flowMCPSpawn(agent string, args, env []string) ([]string, []string, error) 
 		// Codex filters the environment inherited by stdio servers. Explicitly
 		// forward the pane identity and daemon directory or report_step cannot
 		// resolve its caller (and a custom QUIL_HOME would reach another daemon).
-		args = append([]string{"-c", "mcp_servers.quil.command=" + strconv.Quote(exe), "-c", `mcp_servers.quil.args=["mcp"]`,
+		args = append([]string{"-c", "mcp_servers.quil.command=" + strconv.Quote(exe), "-c", `mcp_servers.quil.args=["mcp","--toolset","flow"]`,
 			"-c", `mcp_servers.quil.env_vars=["QUIL_HOME","QUIL_PANE_ID"]`}, args...)
 	case "opencode":
 		cfg := make(map[string]any)
-		out := make([]string, 0, len(env)+1)
+		out := make([]string, 0, len(env))
 		for _, item := range env {
 			if data, ok := strings.CutPrefix(item, "OPENCODE_CONFIG_CONTENT="); ok {
 				if err := json.Unmarshal([]byte(data), &cfg); err != nil {
@@ -70,7 +70,7 @@ func flowMCPSpawn(agent string, args, env []string) ([]string, []string, error) 
 		if servers == nil {
 			servers = make(map[string]any)
 		}
-		servers["quil"] = map[string]any{"type": "local", "command": []string{exe, "mcp"}, "enabled": true}
+		servers["quil"] = map[string]any{"type": "local", "command": []string{exe, "mcp", "--toolset", "flow"}, "enabled": true}
 		cfg["mcp"] = servers
 		b, err := json.Marshal(cfg)
 		if err != nil {

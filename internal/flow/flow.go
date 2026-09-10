@@ -3,6 +3,7 @@ package flow
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -16,7 +17,6 @@ const (
 	StageReview      Stage = "review"
 	StageFix         Stage = "fix"
 	StageReadyForYou Stage = "ready_for_you"
-	StageDone        Stage = "done"
 	Analyst          Role  = "analyst"
 	Developer        Role  = "developer"
 	Reviewer         Role  = "reviewer"
@@ -105,6 +105,13 @@ func Resume(f Flow) (Flow, error) {
 
 // ValidateReport checks the wire envelope; stage-specific validation happens
 // only when the task ends, so an agent can correct a report before going idle.
+// UnsafePromptText rejects terminal controls while preserving multiline text.
+func UnsafePromptText(s string) bool {
+	return strings.ContainsAny(s, "\x1b\u009b\r") || strings.Contains(s, string([]byte{0x9b}))
+}
+
+var prShape = regexp.MustCompile(`^(#?[0-9]{1,10}|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]{1,10}|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]{1,10})$`)
+
 func ValidateReport(r Report) error {
 	if r.Status != "done" && r.Status != "blocked" {
 		return fmt.Errorf("status must be done or blocked")
@@ -113,6 +120,9 @@ func ValidateReport(r Report) error {
 		return fmt.Errorf("result has more than 16 values")
 	}
 	for k, v := range r.Result {
+		if UnsafePromptText(k) || UnsafePromptText(v) {
+			return fmt.Errorf("result values may not contain terminal control characters")
+		}
 		if len(k) > 8192 || len(v) > 8192 {
 			return fmt.Errorf("result values must be at most 8 KiB")
 		}
@@ -160,7 +170,11 @@ func Next(f Flow, report *Report) (Flow, error) {
 	case StagePlan:
 		f.Results.Plan, f.Stage = report.Result["plan"], StageBuild
 	case StageBuild:
-		f.Results.PR, f.Stage = report.Result["pr"], StageReview
+		pr := strings.TrimSpace(report.Result["pr"])
+		if !prShape.MatchString(pr) {
+			return Pause(f, "pr must be a PR number, owner/repo#N, or GitHub PR URL"), nil
+		}
+		f.Results.PR, f.Stage = pr, StageReview
 	case StageReview:
 		verdict := report.Result["verdict"]
 		if verdict != "approved" && verdict != "changes" {

@@ -23,6 +23,7 @@ Client-daemon model:
 - `cmd/quil/` — TUI client (Bubble Tea)
 - `cmd/quild/` — Background daemon
 - `internal/config/` — TOML configuration (`Load` reads, `Save` writes atomically via `.tmp` + rename). `UIConfig.ShowDisclaimer` controls startup beta dialog
+- `internal/flow/` — Pure epic flow transitions and structured-result validation; runtime glue is in `internal/daemon/flow.go` (see `.claude/rules/flows.md`).
 - `internal/daemon/` — Session manager, message routing, event queue (`event.go` — bounded, mutex-protected, watcher pub/sub for MCP)
 - `internal/persist/` — Atomic workspace/buffer persistence (JSON snapshots, binary ghost buffers)
 - `internal/shellinit/` — Automatic OSC 7 + OSC 133 shell integration (embedded init scripts, `//go:embed`)
@@ -119,7 +120,7 @@ IPC request-response: `Message.ID` field (omitempty, backward compatible) correl
 
 **Tasks (`internal/daemon/task.go`)** are runtime-only and bounded (200, oldest TERMINAL evicted — a live task has a waiter parked on it). A prompt to an AI pane is a bracketed paste, then `\r` after `pasteSettle`; a terminal gets `text\n`. `done` = the target's ledger settled idle (through `onPaneIdle`); `failed` = `process_exit`; a terminal target completes on `command_complete`. The notify-back is typed into the requester only while it is not mid-turn (`onPaneIdle` again), and only when both panes share a daemon — the bridge blanks `from_pane` for a remote target.
 
-**The bridge routes to `[[destinations]]` hosts** (`cmd/quil/mcp_hosts.go`, `mcpRouter`): one `mcpBridge` per host, dialled in the background with `dialRemoteTransportFn` (batch) + `gateExtraVersion` + the bridge hello, re-dialled lazily with a 30 s backoff (a LOST link earns one immediate retry; the backoff is for a host that refused). Resolution: explicit `host` → the id→host cache every list/create fills → local. `mcpBridge.dead` is set when `readLoop` exits so a dropped link is detected before the next request times out. The bridge learns its own pane from `QUIL_PANE_ID`, which the daemon sets on every AI pane's child. **Every bridge probes its daemon's version at dial (`probeDaemonVersion`, before the read loop owns the connection), and tools that send the request types added in this branch call `requireDaemon` first** (`cmd/quil/mcp_version.go`, floor `mcpDaemonMinVersion` = 1.73.0): an older daemon drops an unknown message type SILENTLY, so a `list_projects` at a remote still on 1.71.0 read as a 10 s timeout rather than "that host is not upgraded" (measured 2026-09-10). The TUI's `versionHandshakeWithin` cannot serve here — it skips itself for a non-release client, and the dev bridge needs the number precisely then. Unknown / unparseable versions pass; only a release below the floor is refused. **Unscoped aggregation skips a failing REMOTE and records the error on the host (`forEachHost`, `hostConn.reqErr` → `list_hosts` `error`)**; a named host or the local daemon failing still fails the call.
+**The bridge routes to `[[destinations]]` hosts** (`cmd/quil/mcp_hosts.go`, `mcpRouter`): one `mcpBridge` per host, dialled in the background with `dialRemoteTransportFn` (batch) + `gateExtraVersion` + the bridge hello, re-dialled lazily with a 30 s backoff (a LOST link earns one immediate retry; the backoff is for a host that refused). Resolution: explicit `host` → the id→host cache every list/create fills → local. `mcpBridge.dead` is set when `readLoop` exits so a dropped link is detected before the next request times out. The bridge learns its own pane from `QUIL_PANE_ID`, which the daemon sets on every AI pane's child. **Every bridge probes its daemon's version at dial (`probeDaemonVersion`, before the read loop owns the connection), and tools that send the request types added in this branch call `requireDaemon` first** (`cmd/quil/mcp_version.go`, floor `mcpDaemonMinVersion` = 1.72.0): an older daemon drops an unknown message type SILENTLY, so a `list_projects` at a remote still on 1.71.0 read as a 10 s timeout rather than "that host is not upgraded" (measured 2026-09-10). The TUI's `versionHandshakeWithin` cannot serve here — it skips itself for a non-release client, and the dev bridge needs the number precisely then. Unknown / unparseable versions pass; only a release below the floor is refused. **Unscoped aggregation skips a failing REMOTE and records the error on the host (`forEachHost`, `hostConn.reqErr` → `list_hosts` `error`)**; a named host or the local daemon failing still fails the call.
 
 Key files: `cmd/quil/mcp.go` (bridge + daemon connection, server instructions), `cmd/quil/mcp_hosts.go` (host router), `cmd/quil/mcp_tools.go` (the original 18 tools, now host-aware), `cmd/quil/mcp_tools_projects.go` (projects, tabs, hosts, catalog), `cmd/quil/mcp_tools_tasks.go` (delegation), `cmd/quil/mcp_keys.go` (key name → escape sequence map), `cmd/quil/mcp_log.go` (per-pane interaction logging + two-layer redaction); daemon side `internal/daemon/create_req.go`, `project_req.go`, `workstate.go`, `task.go`.
 
@@ -240,7 +241,8 @@ Project docs are now organized as a navigable tree under `docs/` (with the index
 - `docs/features.md` — Feature catalog grouped by area
 - `docs/keybindings.md` — Full keymap + customization syntax
 - `docs/configuration.md` — `~/.quil/config.toml` reference
-- `docs/mcp.md` — User-facing MCP guide (client wiring, all 18 tools, redaction model)
+- `docs/agent-flows.md` — Agent roles, structured handoffs, pause/resume, settings, and validation limits
+- `docs/mcp.md` — User-facing MCP guide (client wiring, all 35 tools, redaction model)
 - `docs/plugin-reference.md` — TOML plugin schema (every field, every strategy, examples)
 - `docs/troubleshooting.md` — Daemon won't start, MCP not detected, log file locations, reset
 - `docs/sandbox-panes.md` — Docker sandbox panes: building the image, signing in, what the sandbox does and does not bound
@@ -281,15 +283,3 @@ Cached reference repos:
 | M19 | Done (unreleased) | Sandbox panes — an AI pane (claude-code, codex, opencode) inside a per-pane Docker container. **The mount set IS the boundary**: no `--privileged`, no `--cap-add`, no `--network`; the checkout read-write, `.git` mounted AS a mountpoint with `objects`/`hooks`/`config`/`config.worktree`/`modules`/`worktrees` pinned read-only on top, and new objects in a per-pane store with the repo's own as a read-only alternate. Auth is per-vendor and per-pane: Claude Code forwards `CLAUDE_CODE_OAUTH_TOKEN` BY NAME or signs in in-container (radio row in the create dialog; a token-mode pane with no token drives `claude setup-token` itself, single-flighted daemon-wide), codex gets its `auth.json` COPIED in, opencode signs in per container. Quil publishes and pulls NO image — `scripts/sandbox-image.sh` builds `docker/sandbox/Dockerfile` locally and verifies the result. See `.claude/rules/sandbox.md`, [ADR-31](../docs/architecture.md), `docs/sandbox-panes.md` |
 
 Full detail: `docs/roadmap.md` and `docs/roadmap/*.md`.
-
-## Agent flows
-
-`internal/flow` is the stdlib-only built-in epic state machine. `internal/daemon/flow.go`
-owns the registry under `SessionManager.mu`, persists `flows` beside tabs, and
-uses the existing task delivery and idle ledger. `finishTask` forwards its locked
-report snapshot after releasing the task registry mutex. Flow dispatch reserves
-the task ID before delivery, so immediate completion can find the flow. Restore
-pauses active stages and drops preparing/orphan flows. `Pane.FlowRole` is persisted
-and opts only role panes into per-spawn MCP registration. `config.FlowsPath()` is
-`$QUIL_HOME/flows.toml`; the daemon loads it at start/reload and the TUI settings
-editor reads/writes it over destination-pinned IPC. See `docs/agent-flows.md`.

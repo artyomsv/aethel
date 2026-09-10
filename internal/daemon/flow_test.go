@@ -13,6 +13,7 @@ import (
 	"github.com/artyomsv/quil/internal/flow"
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
+	apty "github.com/artyomsv/quil/internal/pty"
 )
 
 func flowTestDaemon(t *testing.T) (*Daemon, *ipc.Client) {
@@ -110,6 +111,7 @@ func TestFlowIPC_WholeEpicReportsAndIdle(t *testing.T) {
 
 func TestFlowIPC_HooklessReportOwnershipCorrectionAndLateReport(t *testing.T) {
 	d, c := flowTestDaemon(t)
+	finish := captureFlowReportTimer(t)
 	f := startTestFlow(t, d, c)
 	report := func(req ipc.ReportStepReqPayload) ipc.ReportStepRespPayload {
 		return decodeInto[ipc.ReportStepRespPayload](t, roundTrip(t, c, ipc.MsgReportStepReq, ipc.MsgReportStepResp, req))
@@ -126,6 +128,7 @@ func TestFlowIPC_HooklessReportOwnershipCorrectionAndLateReport(t *testing.T) {
 			t.Fatal(r)
 		}
 	}
+	finish()
 	f = awaitFlow(t, d, f.ID, flow.StageBuild, false)
 	if f.Results.Plan != "corrected" {
 		t.Fatal(f)
@@ -197,7 +200,8 @@ func TestFlow_DelegateRefusalAndTimeoutPause(t *testing.T) {
 func TestFlow_RestartSnapshot(t *testing.T) {
 	d, c := flowTestDaemon(t)
 	f := startTestFlow(t, d, c)
-	state := d.buildWorkspaceState()
+	active, tabs, panes, projects, project, flows := d.session.snapshotStateWithFlows()
+	state := d.workspaceStateFromSnapshot(active, tabs, panes, projects, project, false, flows)
 	b, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +239,7 @@ func TestFlowIPC_SaveConfiguration(t *testing.T) {
 	d, c := flowTestDaemon(t)
 	cfg := config.DefaultFlows()
 	cfg.MaxReviewRounds = 8
-	r := decodeInto[ipc.FlowConfigRespPayload](t, roundTrip(t, c, ipc.MsgSaveFlowConfigReq, ipc.MsgSaveFlowConfigResp, ipc.SaveFlowConfigReqPayload{Config: cfg}))
+	r := decodeInto[ipc.FlowConfigRespPayload](t, roundTrip(t, c, ipc.MsgSaveFlowConfigReq, ipc.MsgSaveFlowConfigResp, ipc.SaveFlowConfigReqPayload{Config: cfg.Wire()}))
 	if r.Error != "" {
 		t.Fatal(r)
 	}
@@ -248,6 +252,7 @@ func TestFlowIPC_SaveConfiguration(t *testing.T) {
 
 func TestFlow_HooksAppearingDuringFallbackKeepTaskLive(t *testing.T) {
 	d, c := flowTestDaemon(t)
+	finish := captureFlowReportTimer(t)
 	f := startTestFlow(t, d, c)
 	r := d.reportStep(ipc.ReportStepReqPayload{PaneID: f.Panes[flow.Analyst], Status: "done", Result: map[string]string{"plan": "p"}})
 	if r.Error != "" {
@@ -255,7 +260,7 @@ func TestFlow_HooksAppearingDuringFallbackKeepTaskLive(t *testing.T) {
 	}
 	p := d.session.Pane(f.Panes[flow.Analyst])
 	d.emitEvent(hookEvent(p, "hook.claude.UserPromptSubmit", nil))
-	time.Sleep(60 * time.Millisecond)
+	finish()
 	if !d.tasksRegistry().live(d.tasksRegistry().get(f.TaskID)) {
 		t.Fatal("hookless fallback ignored arriving hooks")
 	}
@@ -271,6 +276,9 @@ func TestFlow_ClosedStepPanePausesAndResumeRefuses(t *testing.T) {
 	f = awaitFlow(t, d, f.ID, flow.StagePlan, true)
 	if f.PauseWhy != "pane analyst was closed" {
 		t.Fatal(f)
+	}
+	if !hasEventType(d, f.Panes[flow.Developer], "flow_paused") {
+		t.Fatal("closed pane lost its pause notification")
 	}
 	if err := d.resumeFlow(f.ID); err == nil || !strings.Contains(err.Error(), "analyst") {
 		t.Fatal(err)
@@ -305,5 +313,183 @@ func TestFlow_TaskEndDoesNotWaitForWedgedWriter(t *testing.T) {
 	}
 	if got := awaitFlow(t, d, "f", flow.StageBuild, false); got.TaskID == "" {
 		t.Fatal(got)
+	}
+}
+
+// Tests inspect the exact same snapshot as persistence and workspace broadcasts.
+func (d *Daemon) flowSnapshots() []flow.Flow {
+	_, _, _, _, _, flows := d.session.snapshotStateWithFlows()
+	return flows
+}
+
+func captureFlowReportTimer(t *testing.T) func() {
+	t.Helper()
+	old := flowReportAfter
+	var callbacks chan func() = make(chan func(), 2)
+	flowReportAfter = func(_ time.Duration, f func()) *time.Timer {
+		callbacks <- f
+		return time.NewTimer(time.Hour)
+	}
+	t.Cleanup(func() { flowReportAfter = old })
+	return func() {
+		t.Helper()
+		select {
+		case f := <-callbacks:
+			f()
+		default:
+			t.Fatal("report did not schedule fallback")
+		}
+		if len(callbacks) != 0 {
+			t.Fatal("corrected report scheduled a second timer")
+		}
+	}
+}
+
+func TestFlowIPC_OrdinaryTask_RefusesReportWithoutEndingTask(t *testing.T) {
+	d, c := flowTestDaemon(t)
+	p, _ := agentPane(t, d, "ordinary")
+	r := d.delegateTask(ipc.DelegateTaskReqPayload{ToPane: p.ID, Prompt: "ordinary work"})
+	if r.Error != "" {
+		t.Fatal(r)
+	}
+	for _, taskID := range []string{"", r.Task.ID} {
+		resp := decodeInto[ipc.ReportStepRespPayload](t, roundTrip(t, c, ipc.MsgReportStepReq, ipc.MsgReportStepResp,
+			ipc.ReportStepReqPayload{PaneID: p.ID, TaskID: taskID, Status: "done", Result: map[string]string{"plan": "ignored"}}))
+		if resp.Error != "task is not a flow step" {
+			t.Fatal(resp)
+		}
+	}
+	reg := d.tasksRegistry()
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	task := reg.byID[r.Task.ID]
+	if task.state.terminal() || task.report != nil || task.reportTimer != nil {
+		t.Fatal("report mutated ordinary task")
+	}
+}
+
+func TestFlowStart_InvalidInputs_AllocatesNothing(t *testing.T) {
+	d, _ := flowTestDaemon(t)
+	for _, feature := range []string{"bad\x1b[201~\r", "bad\u009b", "bad\r"} {
+		r, _ := d.startFlow(ipc.StartFlowReqPayload{Feature: feature, Branch: "feat/invalid"})
+		if r.Error == "" || len(d.session.Tabs()) != 0 {
+			t.Fatal(r)
+		}
+	}
+	cfg := config.DefaultFlows()
+	r := cfg.Roles[flow.Analyst]
+	r.Toggles = nil
+	cfg.Roles[flow.Analyst] = r
+	if err := d.validateFlowRoles(cfg); err == nil || !strings.Contains(err.Error(), "permission_mode") {
+		t.Fatal(err)
+	}
+}
+
+func TestFlowResume_ForeignTab_RefusesDispatch(t *testing.T) {
+	d, c := flowTestDaemon(t)
+	f := startTestFlow(t, d, c)
+	d.finishTask(d.tasksRegistry().get(f.TaskID), taskTimeout, "timed out")
+	foreign, _ := agentPane(t, d, "foreign")
+	d.session.mu.Lock()
+	d.session.flows[f.ID].Panes[flow.Analyst] = foreign.ID
+	d.session.mu.Unlock()
+	if err := d.resumeFlow(f.ID); err == nil || !strings.Contains(err.Error(), "another tab") {
+		t.Fatal(err)
+	}
+}
+
+func TestFlowBroadcast_ResultBodies_OnlyPersisted(t *testing.T) {
+	d, c := flowTestDaemon(t)
+	f := startTestFlow(t, d, c)
+	d.session.mu.Lock()
+	d.session.flows[f.ID].Results = flow.Results{Plan: "private plan", Notes: "private notes", PR: "42"}
+	d.session.mu.Unlock()
+	broadcast := d.buildWorkspaceState()["flows"].([]flow.Flow)[0]
+	persisted := d.flowSnapshots()[0]
+	if broadcast.Feature != "" || broadcast.Results.Plan != "" || broadcast.Results.Notes != "" || broadcast.Results.PR != "42" {
+		t.Fatal(broadcast)
+	}
+	if persisted.Feature == "" || persisted.Results.Plan != "private plan" || persisted.Results.Notes != "private notes" {
+		t.Fatal("broadcast mutated persisted flow", persisted)
+	}
+}
+
+type flowSpawnSession struct {
+	apty.Session
+	beforeStart func() error
+}
+
+func (s *flowSpawnSession) Start(cmd string, args ...string) error {
+	if err := s.beforeStart(); err != nil {
+		return err
+	}
+	return s.Session.Start(cmd, args...)
+}
+
+func TestPrepareFlow_CancelledDuringSpawn_ReleasesCreatedPanes(t *testing.T) {
+	d, _ := flowTestDaemon(t)
+	resp, prepare := d.startFlow(ipc.StartFlowReqPayload{Feature: "cancel me", Branch: "feat/cancel"})
+	if resp.Error != "" {
+		t.Fatal(resp)
+	}
+	old := newSessionFn
+	count := 0
+	newSessionFn = func(cols, rows int) apty.Session {
+		count++
+		n := count
+		return &flowSpawnSession{Session: old(cols, rows), beforeStart: func() error {
+			if n == 2 {
+				d.session.mu.Lock()
+				delete(d.session.flows, resp.FlowID)
+				d.session.mu.Unlock()
+			}
+			return nil
+		}}
+	}
+	t.Cleanup(func() { newSessionFn = old })
+	prepare()
+	if len(d.session.Panes(resp.TabID)) != 0 {
+		t.Fatal("cancelled preparation leaked panes")
+	}
+}
+
+func TestPrepareFlow_SpawnFailure_NamesRoleAndRefusesResume(t *testing.T) {
+	d, _ := flowTestDaemon(t)
+	resp, prepare := d.startFlow(ipc.StartFlowReqPayload{Feature: "failed spawn", Branch: "feat/failure"})
+	if resp.Error != "" {
+		t.Fatal(resp)
+	}
+	old := newSessionFn
+	count := 0
+	newSessionFn = func(cols, rows int) apty.Session {
+		count++
+		n := count
+		return &flowSpawnSession{Session: old(cols, rows), beforeStart: func() error {
+			if n == 2 {
+				return errors.New("cannot launch")
+			}
+			return nil
+		}}
+	}
+	t.Cleanup(func() { newSessionFn = old })
+	prepare()
+	f := awaitFlow(t, d, resp.FlowID, flow.StagePlan, true)
+	if !strings.Contains(f.PauseWhy, "developer") || !strings.Contains(f.PauseWhy, "cannot launch") {
+		t.Fatal(f)
+	}
+	if err := d.resumeFlow(f.ID); err == nil || !strings.Contains(err.Error(), "developer") {
+		t.Fatal(err)
+	}
+}
+
+func TestFlow_Shutdown_RefusesNewWork(t *testing.T) {
+	d := New(config.Default())
+	close(d.shutdown)
+	resp, prepare := d.startFlow(ipc.StartFlowReqPayload{Feature: "feature", Branch: "feat/x"})
+	if resp.Error == "" || prepare != nil || len(d.session.Tabs()) != 0 {
+		t.Fatal(resp)
+	}
+	if err := d.resumeFlow("f"); err == nil {
+		t.Fatal("resumed during shutdown")
 	}
 }

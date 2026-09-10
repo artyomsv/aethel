@@ -27,6 +27,14 @@ func TestFlowUpdate_SidebarPaletteAndRestartPause(t *testing.T) {
 	if got := flowTabLabel(m.activeTabModel()); !strings.Contains(got, "review · round 2 ⏸") {
 		t.Fatal(got)
 	}
+	rows, _ := m.sidebarRows(100)
+	var sidebar string
+	for _, row := range rows {
+		sidebar += row.text
+	}
+	if !strings.Contains(sidebar, "review · round 2 ⏸") {
+		t.Fatal("flow state missing from sidebar", sidebar)
+	}
 	if p, _, _ := m.findPaneAndTab("pane-1"); p.blockedReason != "Which API?" || p.blockedSince.IsZero() {
 		t.Fatal("pause did not reach sidebar attention")
 	}
@@ -49,6 +57,73 @@ func TestFlowUpdate_SidebarPaletteAndRestartPause(t *testing.T) {
 	}
 }
 
+func TestFlowUpdate_PaletteActions_ResumesOrConfirmsCancel(t *testing.T) {
+	for _, action := range []paletteAction{palActResumeFlow, palActCancelFlow} {
+		m := paletteModelWithProjects(t)
+		m.initKeymap()
+		m.activeTabModel().Flow = &flow.Flow{ID: "flow-test", Stage: flow.StagePlan, Paused: true}
+		m.dialog = dialogCommandPalette
+		for _, command := range m.buildPaletteCommands() {
+			if command.action == action {
+				m.palette = paletteState{filtered: []paletteCommand{command}}
+			}
+		}
+		m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if action == palActResumeFlow {
+			msg := m.client.(*fakeConn).lastSent()
+			if msg == nil || msg.Type != ipc.MsgResumeFlowReq {
+				t.Fatal("resume not sent", msg)
+			}
+			var req ipc.ResumeFlowReqPayload
+			if err := msg.DecodePayload(&req); err != nil || req.FlowID != "flow-test" {
+				t.Fatal(req, err)
+			}
+		} else if m.dialog != dialogConfirm || m.confirmKind != "tab" || m.confirmID != "tab-1" {
+			t.Fatal("cancel did not use the close-tab confirmation", m.dialog)
+		}
+	}
+}
+
+func TestFlowUpdate_StopHook_DoesNotToastInternalHandoff(t *testing.T) {
+	m, notifier, pane := wiredToastModel(t)
+	m.activeTabModel().Flow = &flow.Flow{ID: "f", Panes: map[flow.Role]string{flow.Analyst: pane.ID}}
+	m = flowUpdate(t, m, paneEventMsg{PaneID: pane.ID, Type: "hook.claude.UserPromptSubmit"})
+	m = flowUpdate(t, m, paneEventMsg{PaneID: pane.ID, Type: "hook.claude.Stop"})
+	if len(notifier.sent) != 0 || pane.unseen {
+		t.Fatal("internal handoff raised user attention")
+	}
+	m = flowUpdate(t, m, paneEventMsg{PaneID: pane.ID, Type: "flow_ready"})
+	if len(notifier.sent) != 1 {
+		t.Fatal("flow outcome did not toast")
+	}
+}
+
+func TestFlowUpdate_AgentChange_SeedsPluginDefaults(t *testing.T) {
+	m := paletteModelWithProjects(t)
+	m.initKeymap()
+	m.dialog = dialogFlowSettings
+	m.flowUI.cfg = config.DefaultFlows()
+	m.flowUI.row = 2 // analyst agent
+	m.flowUI.plugins = []ipc.PluginCatalogEntry{
+		{Name: "claude-code", Category: "ai", Available: true},
+		{Name: "codex", Category: "ai", Available: true, Toggles: []ipc.PluginToggleInfo{{Name: "search", Default: true}, {Name: "permission", Default: false}}},
+	}
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	role := m.flowUI.cfg.Roles[flow.Analyst]
+	if role.Agent != "codex" || len(role.Toggles) != 1 || role.Toggles[0] != "search" {
+		t.Fatal(role)
+	}
+}
+
+func TestFlowUpdate_DestroyedPane_ToastsThroughSurvivingTab(t *testing.T) {
+	m, notifier, survivor := wiredToastModel(t)
+	tab := m.activeTabModel()
+	m = flowUpdate(t, m, paneEventMsg{PaneID: "destroyed", TabID: tab.ID, Type: "flow_paused", Title: "pane analyst was closed"})
+	if len(notifier.sent) != 1 || survivor.blockedReason != "pane analyst was closed" {
+		t.Fatal("destroyed pane lost attention", survivor.blockedReason, len(notifier.sent))
+	}
+}
+
 func TestFlowUpdate_NewDialogSubmitsAndFocusesOnlyResponseTab(t *testing.T) {
 	m := paletteModelWithProjects(t)
 	m.initKeymap()
@@ -68,7 +143,9 @@ func TestFlowUpdate_NewDialogSubmitsAndFocusesOnlyResponseTab(t *testing.T) {
 		t.Fatalf("sent %s", msg.Type)
 	}
 	var req ipc.StartFlowReqPayload
-	_ = msg.DecodePayload(&req)
+	if err := msg.DecodePayload(&req); err != nil {
+		t.Fatal(err)
+	}
 	if req.Feature != "Add useful tests" || req.Branch != "feat/add-useful-tests" || req.ProjectID != "proj-local" {
 		t.Fatal(req)
 	}
@@ -98,7 +175,7 @@ func TestFlowUpdate_SettingsSaveAndReload(t *testing.T) {
 	if m.dialog != dialogFlowSettings {
 		t.Fatal("F1 settings did not open flows")
 	}
-	reply, _ := ipc.NewMessage(ipc.MsgFlowConfigResp, ipc.FlowConfigRespPayload{Config: config.DefaultFlows()})
+	reply, _ := ipc.NewMessage(ipc.MsgFlowConfigResp, ipc.FlowConfigRespPayload{Config: config.DefaultFlows().Wire()})
 	reply.ID = m.flowUI.requestID
 	m = flowUpdate(t, m, flowReplyMsg{reply})
 	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
@@ -109,7 +186,9 @@ func TestFlowUpdate_SettingsSaveAndReload(t *testing.T) {
 	if save.Type != ipc.MsgSaveFlowConfigReq {
 		t.Fatal(save.Type)
 	}
-	_ = save.DecodePayload(&req)
+	if err := save.DecodePayload(&req); err != nil {
+		t.Fatal(err)
+	}
 	if req.Config.MaxReviewRounds != 4 {
 		t.Fatal(req.Config)
 	}
@@ -168,7 +247,9 @@ func TestFlowUpdate_DestinationPinnedAndForeignReplyIgnored(t *testing.T) {
 		t.Fatalf("request escaped pinned destination: %+v", req)
 	}
 	var payload ipc.StartFlowReqPayload
-	_ = req.DecodePayload(&payload)
+	if err := req.DecodePayload(&payload); err != nil {
+		t.Fatal(err)
+	}
 	if payload.ProjectID != "proj-remote" {
 		t.Fatal(payload)
 	}

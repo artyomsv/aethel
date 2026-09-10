@@ -1,6 +1,6 @@
 package ipc
 
-import "github.com/artyomsv/quil/internal/config"
+import "github.com/artyomsv/quil/internal/flow"
 
 const (
 	MsgStartFlowReq       = "start_flow_req"
@@ -44,10 +44,23 @@ type ReportStepRespPayload struct {
 }
 
 type FlowConfigRespPayload struct {
-	Config config.Flows `json:"config"`
-	Error  string       `json:"error,omitempty"`
+	Config FlowConfig `json:"config"`
+	Error  string     `json:"error,omitempty"`
 }
 
 type SaveFlowConfigReqPayload struct {
-	Config config.Flows `json:"config"`
+	Config FlowConfig `json:"config"`
+}
+
+// FlowConfig is the stable wire schema, independent of the TOML configuration.
+type FlowConfig struct {
+	MaxReviewRounds    int                          `json:"max_review_rounds"`
+	StepTimeoutMinutes int                          `json:"step_timeout_minutes"`
+	Roles              map[flow.Role]FlowRoleConfig `json:"roles"`
+}
+type FlowRoleConfig struct {
+	Agent     string   `json:"agent"`
+	Toggles   []string `json:"toggles"`
+	Prompt    string   `json:"prompt"`
+	FixPrompt string   `json:"fix_prompt,omitempty"`
 }

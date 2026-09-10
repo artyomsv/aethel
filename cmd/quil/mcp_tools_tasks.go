@@ -27,7 +27,7 @@ func registerReportStepTool(s *mcp.Server, r *mcpRouter) {
 	}
 	mcp.AddTool(s, &mcp.Tool{Name: "report_step", Description: "Report your flow step result before ending your turn. The daemon advances only after your report and settled idle. Use blocked with a question when you need the user. A second report corrects the first until the task ends. You can only report on your own pane's task."},
 		func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
-			if err := r.local.requireDaemon("report_step"); err != nil {
+			if err := r.local.requireDaemonAtLeast("report_step", reportStepMinVersion); err != nil {
 				return nil, nil, err
 			}
 			if r.selfPane == "" {
@@ -51,6 +51,33 @@ func registerReportStepTool(s *mcp.Server, r *mcpRouter) {
 type hostedTask struct {
 	ipc.TaskInfo
 	Host string `json:"host,omitempty"`
+}
+
+func registerFlowGetTaskTool(s *mcp.Server, r *mcpRouter) {
+	type Input struct {
+		TaskID string `json:"task_id" jsonschema:"your flow task id returned by report_step"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "get_task", Description: "Get your own flow task on this daemon."},
+		func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
+			if err := r.local.requireDaemon("get_task"); err != nil {
+				return nil, nil, err
+			}
+			resp, err := r.local.request(ipc.MsgGetTaskReq, ipc.GetTaskReqPayload{TaskID: input.TaskID})
+			if err != nil {
+				return nil, nil, err
+			}
+			var payload ipc.GetTaskRespPayload
+			if err := resp.DecodePayload(&payload); err != nil {
+				return nil, nil, err
+			}
+			if payload.Error != "" {
+				return nil, nil, fmt.Errorf("get_task: %s", payload.Error)
+			}
+			if r.selfPane == "" || payload.Task.ToPane != r.selfPane {
+				return nil, nil, fmt.Errorf("get_task: task does not belong to this pane")
+			}
+			return jsonResult(payload.Task), nil, nil
+		})
 }
 
 func registerDelegateTaskTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {

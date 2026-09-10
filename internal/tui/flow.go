@@ -92,7 +92,15 @@ func (m *Model) adoptFlowState(state WorkspaceStateMsg) tea.Cmd {
 				if role == "" && f.Stage == flow.StagePreparing {
 					role = flow.Analyst
 				}
-				if p, _, _ := m.findPaneAndTab(f.Panes[role]); p != nil && f.Paused {
+				p, _, _ := m.findPaneAndTab(f.Panes[role])
+				if p == nil {
+					for _, candidate := range flow.Roles {
+						if p, _, _ = m.findPaneAndTab(f.Panes[candidate]); p != nil {
+							break
+						}
+					}
+				}
+				if p != nil && f.Paused {
 					p.blockedSince = time.UnixMilli(f.UpdatedAt)
 					p.blockedReason = f.PauseWhy
 				}
@@ -132,20 +140,33 @@ func (m *Model) focusNewFlowTab() tea.Cmd {
 	return nil
 }
 
-func (m *Model) flowAttention(paneID, typ string) {
+func (m *Model) flowAttention(msg paneEventMsg) {
+	paneID, typ := msg.PaneID, msg.Type
 	if typ != "flow_paused" && typ != "flow_ready" {
 		return
 	}
 	p, proj, _ := m.findPaneAndTab(paneID)
 	if p == nil {
+		for _, candidate := range m.projects {
+			for _, tab := range candidate.tabs {
+				if tab.ID == msg.TabID && len(tab.Leaves()) > 0 {
+					p, proj = tab.Leaves()[0], candidate
+					break
+				}
+			}
+		}
+	}
+	if p == nil {
 		return
 	}
 	if typ == "flow_paused" {
+		p.blockedReason = msg.Title
 		if p.blockedSince.IsZero() {
 			p.blockedSince = time.Now()
 		}
 	} else {
 		p.unseen = true
+		p.unseenFromSeed = false
 	}
 	// The workspace frame precedes this event and already carries the pause
 	// marker. The event is the one toast edge; the frame itself never toasts.
@@ -175,7 +196,11 @@ func (m Model) openFlowSettings() (tea.Model, tea.Cmd) {
 	if m.client != nil {
 		msg, _ := ipc.NewMessage(ipc.MsgPluginCatalogReq, struct{}{})
 		msg.ID = m.flowUI.requestID
-		_ = m.sendForDestStrict(m.flowUI.dest, msg)
+		if err := m.sendForDestStrict(m.flowUI.dest, msg); err != nil {
+			m.flowUI.err = "Cannot load flow agents: " + err.Error()
+			m.flowUI.pending = false
+			m.flowUI.requestID = "" // Ignore the config reply after the destination failed.
+		}
 	}
 	return m, tea.Batch(tea.ClearScreen, cmd)
 }
@@ -227,11 +252,14 @@ func (m *Model) applyFlowReply(reply flowReplyMsg) tea.Cmd {
 		if p.Error != "" {
 			return nil
 		}
-		m.flowUI.cfg = p.Config
+		m.flowUI.cfg = config.FlowsFromWire(p.Config)
 		if msg.Type == ipc.MsgSaveFlowConfigResp {
-			m.dialog, m.dialogCursor = dialogSettings, 0
 			reload, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
-			_ = m.sendForDestStrict(m.flowUI.dest, reload)
+			if err := m.sendForDestStrict(m.flowUI.dest, reload); err != nil {
+				m.flowUI.err = "Settings saved; reload failed: " + err.Error()
+				return nil
+			}
+			m.dialog, m.dialogCursor = dialogSettings, 0
 			return tea.ClearScreen
 		}
 	case ipc.MsgStartFlowResp, ipc.MsgResumeFlowResp:
@@ -376,7 +404,7 @@ func (m Model) handleFlowDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if key == "ctrl+s" {
-		cmd := m.sendFlowRequest(ipc.MsgSaveFlowConfigReq, ipc.SaveFlowConfigReqPayload{Config: f.cfg})
+		cmd := m.sendFlowRequest(ipc.MsgSaveFlowConfigReq, ipc.SaveFlowConfigReqPayload{Config: f.cfg.Wire()})
 		return m, cmd
 	}
 	rows := m.flowSettingRows()
@@ -417,6 +445,15 @@ func (m Model) handleFlowDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(names) > 0 {
 			idx = (idx + delta + len(names)) % len(names)
 			r.Agent, r.Toggles = names[idx], nil
+			for _, p := range f.plugins {
+				if p.Name == r.Agent {
+					for _, toggle := range p.Toggles {
+						if toggle.Default {
+							r.Toggles = append(r.Toggles, toggle.Name)
+						}
+					}
+				}
+			}
 		}
 	case "prompt", "fix":
 		text := r.Prompt
