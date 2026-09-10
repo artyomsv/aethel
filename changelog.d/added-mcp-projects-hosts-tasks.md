@@ -12,8 +12,10 @@ headline: MCP gains projects, remote hosts and pane-to-pane tasks
   mutation answers whether it applied; tabs and panes report their `project_id`.
 - **Remote hosts.** The bridge dials every `[[destinations]]` host and every tool takes
   an optional `host`; ids discovered through the list tools route to their host on their
-  own. `list_hosts` shows connection state. The list and notification tools aggregate
-  across hosts.
+  own. `list_hosts` shows connection state and each daemon's version. The list and
+  notification tools aggregate across hosts and skip a host whose request fails rather
+  than failing the whole list. A tool that needs the new request types refuses a daemon
+  older than 1.72.0 by name instead of timing out.
 - **`delegate_task`: hand another pane a job and hear when it is done.** The prompt is
   pasted as one block; the daemon follows the target's own agent state — a new
   `agent_state` (`working` / `blocked` / `idle`) on every AI pane — and marks the task

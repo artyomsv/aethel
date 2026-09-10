@@ -47,6 +47,9 @@ func registerDelegateTaskTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("delegate_task: %w", err)
 		}
+		if err := bridge.requireDaemon("delegate_task"); err != nil {
+			return nil, nil, fmt.Errorf("delegate_task: %w", err)
+		}
 		notify := input.Notify == nil || *input.Notify
 		from := r.selfPane
 		if host != "" {
@@ -97,6 +100,9 @@ func registerGetTaskTool(s *mcp.Server, r *mcpRouter) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("get_task: %w", err)
 		}
+		if err := bridge.requireDaemon("get_task"); err != nil {
+			return nil, nil, fmt.Errorf("get_task: %w", err)
+		}
 		resp, err := bridge.request(ipc.MsgGetTaskReq, ipc.GetTaskReqPayload{TaskID: input.TaskID})
 		if err != nil {
 			return nil, nil, fmt.Errorf("get_task: %w", err)
@@ -131,6 +137,9 @@ func registerWaitTaskTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		}
 		bridge, host, err := r.bridgeFor(input.Host, input.TaskID)
 		if err != nil {
+			return nil, nil, fmt.Errorf("wait_task: %w", err)
+		}
+		if err := bridge.requireDaemon("wait_task"); err != nil {
 			return nil, nil, fmt.Errorf("wait_task: %w", err)
 		}
 		mcpLog.Log("", "wait_task", fmt.Sprintf("task=%s timeout=%ds", input.TaskID, timeout))
@@ -170,23 +179,26 @@ func registerListTasksTool(s *mcp.Server, r *mcpRouter) {
 			}
 		}
 		var out []hostedTask
-		hosts, err := r.targets(host)
-		if err != nil {
-			return nil, nil, fmt.Errorf("list_tasks: %w", err)
-		}
-		for _, hb := range hosts {
+		err := r.forEachHost(host, func(hb hostBridge) error {
+			if err := hb.bridge.requireDaemon("list_tasks"); err != nil {
+				return err
+			}
 			resp, err := hb.bridge.request(ipc.MsgListTasksReq, ipc.ListTasksReqPayload{PaneID: input.PaneID})
 			if err != nil {
-				return nil, nil, fmt.Errorf("list_tasks%s: %w", hostSuffix(hb.host), err)
+				return fmt.Errorf("list_tasks%s: %w", hostSuffix(hb.host), err)
 			}
 			var payload ipc.ListTasksRespPayload
 			if err := resp.DecodePayload(&payload); err != nil {
-				return nil, nil, fmt.Errorf("list_tasks decode: %w", err)
+				return fmt.Errorf("list_tasks decode: %w", err)
 			}
 			for _, t := range payload.Tasks {
 				r.remember(hb.host, t.ID)
 				out = append(out, hostedTask{TaskInfo: t, Host: hb.host})
 			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("list_tasks: %w", err)
 		}
 		if out == nil {
 			out = []hostedTask{}

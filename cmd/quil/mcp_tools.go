@@ -78,23 +78,23 @@ func registerListPanesTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 			"The pane this bridge runs inside is marked self. Use this to discover pane IDs for other tools.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		var out []hostedPane
-		hosts, err := r.targets(input.Host)
-		if err != nil {
-			return nil, nil, fmt.Errorf("list_panes: %w", err)
-		}
-		for _, hb := range hosts {
+		err := r.forEachHost(input.Host, func(hb hostBridge) error {
 			resp, err := hb.bridge.request(ipc.MsgListPanesReq, nil)
 			if err != nil {
-				return nil, nil, fmt.Errorf("list_panes%s: %w", hostSuffix(hb.host), err)
+				return fmt.Errorf("list_panes%s: %w", hostSuffix(hb.host), err)
 			}
 			var payload ipc.ListPanesRespPayload
 			if err := resp.DecodePayload(&payload); err != nil {
-				return nil, nil, fmt.Errorf("list_panes decode: %w", err)
+				return fmt.Errorf("list_panes decode: %w", err)
 			}
 			for _, p := range payload.Panes {
 				r.remember(hb.host, p.ID, p.TabID, p.ProjectID)
 				out = append(out, hostedPane{PaneInfo: p, Host: hb.host, Self: hb.host == "" && p.ID == r.selfPane})
 			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("list_panes: %w", err)
 		}
 		if out == nil {
 			out = []hostedPane{}
@@ -291,6 +291,13 @@ type createPaneInput struct {
 	InstanceArgs    []string `json:"instance_args,omitempty" jsonschema:"instance arguments for plugins with instances (ssh, stripe); they REPLACE the plugin's own args and are REFUSED for AI panes — use toggles there"`
 }
 
+// usesDialogOptions reports whether the request carries any field a daemon
+// older than mcpDaemonMinVersion would silently drop.
+func (in createPaneInput) usesDialogOptions() bool {
+	return in.Name != "" || len(in.Toggles) > 0 || in.ResumeSessionID != "" ||
+		in.WorktreeBranch != "" || in.SandboxImage != "" || in.SandboxAuth != ""
+}
+
 func (in createPaneInput) toReq(tabID string) ipc.CreatePaneReqPayload {
 	req := ipc.CreatePaneReqPayload{
 		TabID:           tabID,
@@ -335,6 +342,15 @@ func registerCreatePaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		bridge, host, err := r.bridgeFor(input.Host, input.TabID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("create_pane: %w", err)
+		}
+		// The bare create (tab, cwd, type) is the request every daemon has
+		// answered since M10; the dialog options are not, and an older daemon
+		// IGNORES unknown fields — it would start the pane without the
+		// permission mode or worktree that was asked for, silently.
+		if input.usesDialogOptions() {
+			if err := bridge.requireDaemon("create_pane with name/toggles/resume/worktree/sandbox"); err != nil {
+				return nil, nil, fmt.Errorf("create_pane: %w", err)
+			}
 		}
 		resp, err := bridge.requestWithTimeout(ipc.MsgCreatePaneReq, input.toReq(input.TabID), createTimeout(input.WorktreeBranch != ""))
 		if err != nil {
@@ -538,23 +554,29 @@ func registerListTabsTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 			}
 		}
 		var out []hostedTab
-		hosts, err := r.targets(host)
-		if err != nil {
-			return nil, nil, fmt.Errorf("list_tabs: %w", err)
-		}
-		for _, hb := range hosts {
+		err := r.forEachHost(host, func(hb hostBridge) error {
 			resp, err := hb.bridge.request(ipc.MsgListTabsReq, ipc.ListTabsReqPayload{ProjectID: input.ProjectID})
 			if err != nil {
-				return nil, nil, fmt.Errorf("list_tabs%s: %w", hostSuffix(hb.host), err)
+				return fmt.Errorf("list_tabs%s: %w", hostSuffix(hb.host), err)
 			}
 			var payload ipc.ListTabsRespPayload
 			if err := resp.DecodePayload(&payload); err != nil {
-				return nil, nil, fmt.Errorf("list_tabs decode: %w", err)
+				return fmt.Errorf("list_tabs decode: %w", err)
 			}
 			for _, tb := range payload.Tabs {
+				// A daemon older than the filter ignores it and answers with
+				// every tab; drop the strays here so the answer is the same
+				// whichever side filtered.
+				if input.ProjectID != "" && tb.ProjectID != "" && tb.ProjectID != input.ProjectID {
+					continue
+				}
 				r.remember(hb.host, tb.ID, tb.ProjectID)
 				out = append(out, hostedTab{TabInfo: tb, Host: hb.host})
 			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("list_tabs: %w", err)
 		}
 		if out == nil {
 			out = []hostedTab{}
@@ -664,22 +686,22 @@ func registerGetNotificationsTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger
 			"output pattern matches, agent turn boundaries (agent_idle), task completions (task_done) and other pane events, across every connected host.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		var out []hostedEvent
-		hosts, err := r.targets(input.Host)
-		if err != nil {
-			return nil, nil, fmt.Errorf("get_notifications: %w", err)
-		}
-		for _, hb := range hosts {
+		err := r.forEachHost(input.Host, func(hb hostBridge) error {
 			resp, err := hb.bridge.request(ipc.MsgGetNotificationsReq, nil)
 			if err != nil {
-				return nil, nil, fmt.Errorf("get_notifications%s: %w", hostSuffix(hb.host), err)
+				return fmt.Errorf("get_notifications%s: %w", hostSuffix(hb.host), err)
 			}
 			var payload ipc.GetNotificationsRespPayload
 			if err := resp.DecodePayload(&payload); err != nil {
-				return nil, nil, fmt.Errorf("get_notifications decode: %w", err)
+				return fmt.Errorf("get_notifications decode: %w", err)
 			}
 			for _, e := range payload.Events {
 				out = append(out, hostedEvent{PaneEventPayload: e, Host: hb.host})
 			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("get_notifications: %w", err)
 		}
 		if out == nil {
 			out = []hostedEvent{}

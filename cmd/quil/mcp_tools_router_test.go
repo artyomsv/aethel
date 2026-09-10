@@ -20,17 +20,30 @@ type fakeIPCDaemon struct {
 	paneID   string
 	received []*ipc.Message
 	sock     string
+	// version is what the fake reports to the bridge's probe. Empty means
+	// "do not answer", the pre-versioning daemon shape.
+	version string
 }
 
 func newFakeIPCDaemon(t *testing.T, paneID string) *fakeIPCDaemon {
+	return newFakeIPCDaemonVersion(t, paneID, mcpDaemonMinVersion)
+}
+
+func newFakeIPCDaemonVersion(t *testing.T, paneID, version string) *fakeIPCDaemon {
 	t.Helper()
-	f := &fakeIPCDaemon{paneID: paneID, sock: filepath.Join(t.TempDir(), "fake.sock")}
+	shortenVersionProbe(t)
+	f := &fakeIPCDaemon{paneID: paneID, sock: filepath.Join(t.TempDir(), "fake.sock"), version: version}
 	srv := ipc.NewServer(f.sock, func(conn *ipc.Conn, m *ipc.Message) {
 		f.mu.Lock()
 		f.received = append(f.received, m)
 		f.mu.Unlock()
 		var resp *ipc.Message
 		switch m.Type {
+		case ipc.MsgVersionReq:
+			if f.version == "" {
+				return
+			}
+			resp, _ = ipc.NewMessage(ipc.MsgVersionResp, ipc.VersionRespPayload{Version: f.version})
 		case ipc.MsgListPanesReq:
 			resp, _ = ipc.NewMessage(ipc.MsgListPanesResp, ipc.ListPanesRespPayload{Panes: []ipc.PaneInfo{{ID: f.paneID, TabID: "tab-" + f.paneID, AgentState: "idle"}}})
 		case ipc.MsgPaneInput:

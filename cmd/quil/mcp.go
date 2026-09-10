@@ -32,6 +32,10 @@ type mcpBridge struct {
 	// later request would only time out. The host router reads it to
 	// decide whether a remote needs re-dialling.
 	dead atomic.Bool
+	// daemonVersion is what the daemon reported at dial time; "" when it did
+	// not answer. Read by requireDaemon so a tool aimed at a daemon too old
+	// to know its request type is refused at once instead of timing out.
+	daemonVersion string
 }
 
 func newMCPBridge(client *ipc.Client) *mcpBridge {
@@ -191,6 +195,10 @@ func runMCP() {
 	defer cancel()
 
 	bridge := newMCPBridge(client)
+	// Before the read loop takes the connection: the probe reads its own
+	// reply. The local daemon is normally this build's twin, but a bridge can
+	// outlive an upgrade (an old quil.exe beside a new quild, or the reverse).
+	bridge.daemonVersion = probeDaemonVersion(client, daemonVersionProbeTimeout)
 	if err := bridge.declinePaneOutput(); err != nil {
 		log.Printf("mcp: decline pane output: %v", err)
 	}

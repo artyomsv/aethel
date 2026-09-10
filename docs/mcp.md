@@ -234,7 +234,11 @@ The bridge dials every `[[destinations]]` host of the machine running `quil mcp`
 
 | Tool | Input | Returns |
 |---|---|---|
-| `list_hosts` | — | `{local: true, hosts: [{host, label, connected, error}]}` |
+| `list_hosts` | — | `{local: true, hosts: [{host, label, connected, daemon_version, error}]}` |
+
+**The remote daemon must be new enough.** The project, tab, plugin-catalog and task tools, and `create_pane` with any dialog option, send request types a daemon older than **1.72.0** does not know — and an old daemon drops an unknown request silently, which would look like a 10 s timeout. The bridge asks each daemon its version when it connects (`daemon_version` in `list_hosts`) and refuses such a call against an older release by name: `list_projects needs quil 1.72.0 or newer on the daemon, and this one runs 1.71.0`. Upgrade the host with `quil remote setup <host>`. The tools every daemon has always answered (`list_panes`, `read_pane_output`, `send_to_pane`, a bare `create_pane`, `watch_notifications`, …) keep working against it. A dev daemon reports no release number and is never refused.
+
+**One failing host does not empty the workspace.** An unscoped list (`list_panes`, `list_tabs`, `list_projects`, `list_tasks`, `get_notifications` with no `host`) skips a remote whose request failed — too old, or a wedged link — returns every other host's entries, and records the failure as `error` on that host in `list_hosts` (`last request failed: …`) until a later request to it succeeds. A call that NAMES a host still fails loudly, and the local daemon's failure always fails the call.
 
 Addressing: every tool that takes an id also takes an optional `host`. The bridge resolves it in this order — an explicit `host` (`"local"` or empty names the local daemon); else the host the id was **discovered on** (every `list_*` and every create files its ids); else local. So `list_panes` once, then `read_pane_output pane_id=…` just works for a remote pane. To CREATE something on a remote (a project, a tab in a project you have not listed yet), pass `host`.
 

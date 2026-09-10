@@ -42,6 +42,9 @@ func bridgeTo(t *testing.T, sock string) *mcpBridge {
 	}
 	t.Cleanup(func() { client.Close() })
 	b := newMCPBridge(client)
+	// As runMCP does: the probe reads its own reply, so it runs before the
+	// read loop owns the connection.
+	b.daemonVersion = probeDaemonVersion(client, daemonVersionProbeTimeout)
 	go b.readLoop(context.Background())
 	return b
 }
@@ -59,8 +62,18 @@ func firstPaneID(t *testing.T, b *mcpBridge) string {
 	return p.Panes[0].ID
 }
 
+// shortenVersionProbe keeps a dial from waiting the production probe timeout
+// against a fake that answers no version request.
+func shortenVersionProbe(t *testing.T) {
+	t.Helper()
+	prev := daemonVersionProbeTimeout
+	daemonVersionProbeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { daemonVersionProbeTimeout = prev })
+}
+
 func testRouter(t *testing.T, dial hostDialFn, dests ...string) *mcpRouter {
 	t.Helper()
+	shortenVersionProbe(t)
 	cfg := config.Default()
 	for _, d := range dests {
 		cfg.Destinations = append(cfg.Destinations, config.Destination{Dest: d, Name: "box-" + d})

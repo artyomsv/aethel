@@ -76,24 +76,27 @@ func registerListProjectsTool(s *mcp.Server, r *mcpRouter) {
 		Description: "List projects (the grouping above tabs) on every connected host: id, name, root directory, whether it is the active project, and its tab ids.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		var out []hostedProject
-		hosts, err := r.targets(input.Host)
-		if err != nil {
-			return nil, nil, fmt.Errorf("list_projects: %w", err)
-		}
-		for _, hb := range hosts {
+		err := r.forEachHost(input.Host, func(hb hostBridge) error {
+			if err := hb.bridge.requireDaemon("list_projects"); err != nil {
+				return err
+			}
 			resp, err := hb.bridge.request(ipc.MsgListProjectsReq, nil)
 			if err != nil {
-				return nil, nil, fmt.Errorf("list_projects%s: %w", hostSuffix(hb.host), err)
+				return fmt.Errorf("list_projects%s: %w", hostSuffix(hb.host), err)
 			}
 			var payload ipc.ListProjectsRespPayload
 			if err := resp.DecodePayload(&payload); err != nil {
-				return nil, nil, fmt.Errorf("list_projects decode: %w", err)
+				return fmt.Errorf("list_projects decode: %w", err)
 			}
 			for _, p := range payload.Projects {
 				r.remember(hb.host, p.ID)
 				r.remember(hb.host, p.TabIDs...)
 				out = append(out, hostedProject{ProjectInfo: p, Host: hb.host})
 			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("list_projects: %w", err)
 		}
 		if out == nil {
 			out = []hostedProject{}
@@ -114,6 +117,9 @@ func registerCreateProjectTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		bridge, host, err := r.bridgeFor(input.Host)
 		if err != nil {
+			return nil, nil, fmt.Errorf("create_project: %w", err)
+		}
+		if err := bridge.requireDaemon("create_project"); err != nil {
 			return nil, nil, fmt.Errorf("create_project: %w", err)
 		}
 		resp, err := bridge.request(ipc.MsgCreateProjectReq, ipc.CreateProjectReqPayload{Name: input.Name, RootDir: input.RootDir})
@@ -150,6 +156,9 @@ func registerUpdateProjectTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		bridge, _, err := r.bridgeFor(input.Host, input.ProjectID)
 		if err != nil {
+			return nil, nil, fmt.Errorf("update_project: %w", err)
+		}
+		if err := bridge.requireDaemon("update_project"); err != nil {
 			return nil, nil, fmt.Errorf("update_project: %w", err)
 		}
 		rootDir := input.RootDir
@@ -194,6 +203,9 @@ func registerDestroyProjectTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) 
 		if err != nil {
 			return nil, nil, fmt.Errorf("destroy_project: %w", err)
 		}
+		if err := bridge.requireDaemon("destroy_project"); err != nil {
+			return nil, nil, fmt.Errorf("destroy_project: %w", err)
+		}
 		mcpLog.Log("", "destroy_project", "id="+input.ProjectID)
 		resp, err := bridge.request(ipc.MsgDestroyProject, ipc.DestroyProjectPayload{ProjectID: input.ProjectID})
 		return opResult("destroy_project", resp, err)
@@ -211,6 +223,9 @@ func registerSwitchProjectTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		bridge, _, err := r.bridgeFor(input.Host, input.ProjectID)
 		if err != nil {
+			return nil, nil, fmt.Errorf("switch_project: %w", err)
+		}
+		if err := bridge.requireDaemon("switch_project"); err != nil {
 			return nil, nil, fmt.Errorf("switch_project: %w", err)
 		}
 		resp, err := bridge.request(ipc.MsgSwitchProject, ipc.SwitchProjectPayload{ProjectID: input.ProjectID})
@@ -233,6 +248,9 @@ func registerCreateTabTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		bridge, host, err := r.bridgeFor(input.Host, input.ProjectID)
 		if err != nil {
+			return nil, nil, fmt.Errorf("create_tab: %w", err)
+		}
+		if err := bridge.requireDaemon("create_tab"); err != nil {
 			return nil, nil, fmt.Errorf("create_tab: %w", err)
 		}
 		req := ipc.CreateTabReqPayload{Name: input.Name, ProjectID: input.ProjectID}
@@ -277,6 +295,9 @@ func registerRenameTabTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("rename_tab: %w", err)
 		}
+		if err := bridge.requireDaemon("rename_tab"); err != nil {
+			return nil, nil, fmt.Errorf("rename_tab: %w", err)
+		}
 		resp, err := bridge.request(ipc.MsgUpdateTab, ipc.UpdateTabPayload{TabID: input.TabID, Name: input.Name})
 		return opResult("rename_tab", resp, err)
 	})
@@ -293,6 +314,9 @@ func registerDestroyTabTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		bridge, _, err := r.bridgeFor(input.Host, input.TabID)
 		if err != nil {
+			return nil, nil, fmt.Errorf("destroy_tab: %w", err)
+		}
+		if err := bridge.requireDaemon("destroy_tab"); err != nil {
 			return nil, nil, fmt.Errorf("destroy_tab: %w", err)
 		}
 		mcpLog.Log("", "destroy_tab", "tab="+input.TabID)
@@ -318,6 +342,9 @@ func registerRenamePaneTool(s *mcp.Server, r *mcpRouter, mcpLog *mcpLogger) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("rename_pane: %w", err)
 		}
+		if err := bridge.requireDaemon("rename_pane"); err != nil {
+			return nil, nil, fmt.Errorf("rename_pane: %w", err)
+		}
 		mcpLog.Log(input.PaneID, "rename_pane", fmt.Sprintf("name=%q", input.Name))
 		resp, err := bridge.request(ipc.MsgUpdatePane, ipc.UpdatePanePayload{PaneID: input.PaneID, Name: input.Name})
 		return opResult("rename_pane", resp, err)
@@ -336,6 +363,9 @@ func registerListPluginsTool(s *mcp.Server, r *mcpRouter) {
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		bridge, host, err := r.bridgeFor(input.Host)
 		if err != nil {
+			return nil, nil, fmt.Errorf("list_plugins: %w", err)
+		}
+		if err := bridge.requireDaemon("list_plugins"); err != nil {
 			return nil, nil, fmt.Errorf("list_plugins: %w", err)
 		}
 		resp, err := bridge.request(ipc.MsgPluginCatalogReq, nil)

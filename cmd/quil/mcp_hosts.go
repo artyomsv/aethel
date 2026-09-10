@@ -68,6 +68,11 @@ type hostConn struct {
 	// without holding the mutex every status read takes.
 	dialing  bool
 	dialDone chan struct{}
+	// reqErr is the last error a request to this CONNECTED host produced
+	// during an unscoped aggregation, which skips the host rather than
+	// failing the whole list. list_hosts shows it so the skip is visible.
+	// Cleared by the next request that succeeds.
+	reqErr error
 }
 
 // hostStatus is the list_hosts view.
@@ -75,7 +80,11 @@ type hostStatus struct {
 	Host      string `json:"host"`
 	Label     string `json:"label,omitempty"`
 	Connected bool   `json:"connected"`
-	Error     string `json:"error,omitempty"`
+	// DaemonVersion is what the host's daemon reported at dial; empty when
+	// it did not answer. Tools that need mcpDaemonMinVersion refuse an older
+	// release by name instead of timing out.
+	DaemonVersion string `json:"daemon_version,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 type mcpRouter struct {
@@ -213,9 +222,11 @@ func (r *mcpRouter) dialOutcome(h *hostConn) error {
 }
 
 // startHostBridge wraps a fresh client in a bridge and starts its read loop,
-// handing the caller the cancel that stops it.
+// handing the caller the cancel that stops it. The version probe runs first,
+// while nothing else reads the connection.
 func startHostBridge(client *ipc.Client, label string) (*mcpBridge, context.CancelFunc) {
 	bridge := newMCPBridge(client)
+	bridge.daemonVersion = probeDaemonVersion(client, daemonVersionProbeTimeout)
 	if err := bridge.declinePaneOutput(); err != nil {
 		log.Printf("mcp: host %s: decline pane output: %v", label, err)
 	}
@@ -334,6 +345,52 @@ func (r *mcpRouter) targets(host string) ([]hostBridge, error) {
 	return []hostBridge{{host: h, bridge: b}}, nil
 }
 
+// forEachHost runs fn against every target of an aggregating tool.
+//
+// A NAMED host's failure is the tool's failure. An UNSCOPED aggregation
+// skips a remote that fails — a connected host whose daemon is too old for
+// the request, or one whose link is wedged — records the error for
+// list_hosts, and still returns every other host's entries: one host must not
+// make the whole workspace look empty or broken. The LOCAL daemon's failure
+// propagates either way; there is nothing to fall back to.
+func (r *mcpRouter) forEachHost(host string, fn func(hb hostBridge) error) error {
+	hosts, err := r.targets(host)
+	if err != nil {
+		return err
+	}
+	for _, hb := range hosts {
+		err := fn(hb)
+		if err == nil {
+			r.noteHostError(hb.host, nil)
+			continue
+		}
+		if host == "" && hb.host != "" {
+			r.noteHostError(hb.host, err)
+			log.Printf("mcp: host %s skipped: %v", hb.host, err)
+			continue
+		}
+		return err
+	}
+	return nil
+}
+
+// noteHostError records (or clears, with nil) the last request failure on a
+// connected remote host. A no-op for the local daemon and unknown hosts.
+func (r *mcpRouter) noteHostError(host string, err error) {
+	if host == "" {
+		return
+	}
+	r.mu.Lock()
+	h, ok := r.hosts[host]
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	h.mu.Lock()
+	h.reqErr = err
+	h.mu.Unlock()
+}
+
 // watchTargets picks the hosts a watch spans: the named host; else the hosts
 // the watched pane ids were discovered on; else every connected host.
 func (r *mcpRouter) watchTargets(host string, paneIDs []string) ([]hostBridge, error) {
@@ -378,6 +435,10 @@ func (r *mcpRouter) statuses() []hostStatus {
 		st.Connected = h.bridge != nil && !h.bridge.dead.Load()
 		switch {
 		case st.Connected:
+			st.DaemonVersion = h.bridge.daemonVersion
+			if h.reqErr != nil {
+				st.Error = "last request failed: " + h.reqErr.Error()
+			}
 		case h.dialing:
 			// A dial in flight is neither connected nor failed, and this read
 			// must never wait for it to decide which.
