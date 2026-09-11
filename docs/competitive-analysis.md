@@ -1,4 +1,4 @@
-# Competitive Analysis — herdr & Agent of Empires
+# Competitive Analysis — herdr, Agent of Empires & the Ghostty axis
 
 > Deep comparison of Quil against the two closest direct competitors in the
 > "terminal multiplexer for AI coding agents" category, captured 2026-07-06.
@@ -10,12 +10,15 @@
 > at once, agent breadth is 24+ rather than 20+, and detection is a two-layer
 > system (installed lifecycle hooks are authoritative, screen manifests are the
 > fallback) rather than screen heuristics alone.
+> **Ghostty added 2026-09-10** in its own section — not a rival, but the emulator
+> Quil is drawn into, and the origin of the one credible future rival.
 > Feeds the [competitive-gap section of the roadmap](roadmap.md#planned--competitive-gaps-herdr-aoe).
 
-The classic-multiplexer comparisons (tmux, zellij, WezTerm, screen) live on the
-marketing site under `/vs/*`. This document covers the two products that share
-Quil's actual thesis — *persistent, agent-aware multiplexing* — and are therefore
-the more honest mirror of where Quil leads and where it trails.
+The classic-multiplexer comparisons (tmux, zellij, WezTerm, screen, Ghostty) live
+on the marketing site under `/vs/*`. This document covers the two products that
+share Quil's actual thesis — *persistent, agent-aware multiplexing* — and are
+therefore the more honest mirror of where Quil leads and where it trails, plus a
+section on Ghostty, which is neither.
 
 - **herdr** — <https://github.com/herdrdev/herdr> (Rust, Apache-2.0)
 - **Agent of Empires (aoe)** — <https://github.com/agent-of-empires/agent-of-empires> (Rust + React, MIT, Mozilla.ai-backed)
@@ -172,7 +175,7 @@ Legend: ✅ full · 🟡 partial/different · ❌ absent · ❓ not re-verified
 | OS/terminal desktop notifications | ✅ | ✅ (push) | 🟡 Windows toasts + click-to-route; no macOS/Linux |
 | In-TUI notification center | 🟡 | ✅ | ✅ |
 | Repo config + lifecycle hooks | 🟡 | ✅ | ❌ |
-| Profiles (per-project workspaces) | 🟡 | ✅ | ❌ |
+| Profiles (per-project workspaces) | 🟡 | ✅ | 🟡 (projects, v1.47 — a project scopes tabs and a root directory, not a saved profile) |
 | Auto-stop idle sessions | 🟡 | ✅ | ❌ |
 | Groups / favorites / snooze / archive / trash | 🟡 | ✅ | ❌ |
 | Self-update (in-app) | ✅ | ✅ | ✅ (check + stage in the background, prompt in the TUI, rename-aside swap with rollback applied at next launch) |
@@ -256,6 +259,69 @@ competition for this category is shifting from "which multiplexer is better" to
 "whose network of machines and plugins is easier to join." Quil's answer to the
 first half already exists and is arguably better positioned (`--remote` opens no
 port and needs no vendor in the path); the second half is A9.
+
+---
+
+## The Ghostty axis — the emulator underneath, and Superlogical
+
+> Captured 2026-09-10. Ghostty's newest release is **1.3.1 (2026-03-13)**; 1.4.0
+> is in progress. Ghostty is Zig, MIT, ~60.9k stars, and ships for **macOS and
+> Linux only** — there is no official Windows build, only community forks and a
+> rename-forced derivative called Noctty.
+
+[Ghostty](https://ghostty.org) is not a competitor. It is a terminal *emulator* —
+the window Quil is drawn into. Quil runs inside Ghostty exactly as it runs inside
+WezTerm, Windows Terminal or iTerm2, and the site's WezTerm page already makes
+that argument. Three things make it worth a section anyway.
+
+**1. Ghostty's author is now building a multiplexer.** On 2026-07-30 Mitchell
+Hashimoto announced [Superlogical](https://mitchellh.com/writing/superlogical), a
+company whose first product is a terminal multiplexer built on libghostty:
+server-side sessions, clients that reconnect from the web and from native macOS
+and iOS apps, live session sharing, and — per the launch coverage — human work
+and AI agents together in long-running sessions. That is Quil's thesis, funded,
+from the person who wrote the fastest terminal emulator in the field. Nothing has
+shipped and no timeline is public; the announcement deliberately withholds
+features, architecture and dates. Treat it as the most credible *future*
+competitor rather than a present one, and re-check it every release.
+
+**2. The emulator is growing multiplexer-shaped features.** Ghostty 1.3.0
+(2026-03-09) added scrollback search, native scrollbars, editable tab titles,
+split drag-and-drop, split zoom preservation, and separate working-directory
+inheritance for windows, tabs and splits. tmux control mode is an open request
+([#1935](https://github.com/ghostty-org/ghostty/issues/1935)) that Hashimoto has
+publicly framed as a step toward a libghostty-based tmux replacement. An emulator
+that renders a remote multiplexer's panes as native tabs takes the low end of
+multiplexing away from tmux — and from anyone whose pitch is only "tabs and
+splits". Quil's pitch is not, which is exactly why the distinction has to stay
+sharp on the marketing site.
+
+**3. libghostty-vt is the VT engine our closest rival already vendors.** It is
+MIT, zero-dependency, lifted from Ghostty's production core, and builds for
+macOS, Linux, Windows and WebAssembly. herdr vendors it; Quil uses
+`charmbracelet/x/vt`. Adopting it would mean cgo, and cgo would cost Quil the
+pure-Go cross-compile to five platforms and complicate the native-Windows story
+that is its strongest wedge. **Recommendation: do not adopt it.** Revisit only if
+`charmbracelet/x/vt` becomes a correctness problem we end up fixing ourselves.
+
+### What is worth borrowing from Ghostty
+
+Ranked. None of these is a multiplexer feature — they are terminal-craft features
+Quil is well placed to take.
+
+| # | Idea | Ghostty | Why Quil should care | Effort |
+|---|---|---|---|:---:|
+| G1 | **Use the OSC 133 marks we already emit** | 1.3.0 | `internal/shellinit/` already injects the marks and the daemon reads only `D` (`detectOSC133Exit`). Coverage is uneven and part of the work: bash and zsh emit A/B/D, PowerShell emits A and D but **no B**, and fish, sh and cmd.exe get no injection at all (`shellinit.go:52`). PowerShell needs the `B` mark added before anything timing-based works on Quil's flagship platform. Ghostty turns the same marks into jump-to-prompt, select-a-command's-whole-output, click-to-move-cursor inside the prompt, and "don't confirm close while the cursor sits at a prompt". We already pay the cost and take almost none of the value. Cheapest large win on this page. | M |
+| G2 | **Key tables** (modal binding sets) | 1.3.0 | Named binding sets that activate and deactivate, plus `chain` (one key runs several actions) and `catch_all` (match any unbound key). `internal/keymap/` already does sequences and presets; key tables are the next layer, and they are what a real vim-style copy mode needs. | M |
+| G3 | **A `quil +action` CLI** | since 1.0 | Ghostty ships `+list-themes`, `+list-keybinds`, `+list-actions`, `+show-config`, `+validate-config`, `+crash-report`. Quil has MCP for AI and nothing for humans or scripts — gap #7 above. The `+action` shape is a clean precedent that leaves the existing subcommands alone. | M |
+| G4 | **A duration floor on command-finish alerts** | 1.3.0 | `notify-on-command-finish-after` fires only when the command ran longer than N. Quil's `detectOSC133Exit` emits a `command_complete` for every command however short, with no duration attached. It is quiet today only because the `commands` event group is off by default (`EventGroupsConfig.Commands`) — turn it on, or consume the events over MCP, and a one-second command arrives exactly like a ten-minute one. A floor is what would make that group usable rather than noisy. Needs the `B` mark timestamped per pane, which is G1's work and does not exist on PowerShell yet. | S–M |
+| G5 | **Rich-text and raw-VT clipboard copy** | 1.3.0 | `copy_to_clipboard` takes `mixed`, `plain`, `html` or `vt`. Colours survive a paste into a document, and `vt` keeps the escape sequences intact. Useful for pasting agent output into a ticket. | S–M |
+| G6 | **Read-only pane mode** | 1.3.0 | A surface that refuses input to the PTY and warns on close. A good fit for a pane whose agent is mid-turn. | S |
+| G7 | **`theme = light:X,dark:Y` auto-switch** | 1.2 | Quil renders against the terminal's own OSC 10/11 colours and ships no presets, which is a defensible choice. If that ever changes, Ghostty's light/dark pair is the shape to copy. | M |
+
+Explicitly **not** worth chasing: GPU shaders, font shaping and ligatures, the
+quick terminal, background images, Metal/OpenGL rendering. Those are emulator
+jobs, and Quil is not an emulator.
 
 ---
 
