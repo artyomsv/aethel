@@ -53,6 +53,15 @@ func TestHandleRestartPaneReq_CodexResumesItsRecordedSession(t *testing.T) {
 	}
 	pane.Type = "codex"
 
+	// The pane has to have RUN before it can be restarted, and saying so with a
+	// real spawn is the point: ranBefore is pane.ptyGen, which only a spawn
+	// moves. CreatePane alone makes a pane record with no child, which is a
+	// state no restart reaches in production — a Pending pane is spawned by
+	// handleRestartPaneReq's own ensurePaneSpawned first.
+	if err := d.spawnPane(pane, &fakeSession{}, false); err != nil {
+		t.Fatalf("initial spawn: %v", err)
+	}
+
 	msg, err := ipc.NewMessage(ipc.MsgRestartPaneReq, ipc.RestartPaneReqPayload{PaneID: pane.ID})
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
@@ -171,7 +180,7 @@ func TestResolveSpawnArgs_RestartResumesSessionScrape(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			readCodexSessionFn = func(string) (codexhook.SessionRecord, error) { return tt.rec, nil }
-			got := resolveSpawnArgs(codexPlugin, tt.pane, false, "", claimAny)
+			got := resolveSpawnArgs(codexPlugin, tt.pane, false, true, "", claimAny)
 			if len(got) == 0 && len(tt.want) == 0 {
 				return
 			}
@@ -206,7 +215,7 @@ func TestResolveSpawnArgs_RestartLeavesOtherStrategiesAlone(t *testing.T) {
 					ResumeArgs: []string{"resume", "{session_id}"},
 				},
 			}
-			got := resolveSpawnArgs(p, &Pane{ID: "pane-abc"}, false, "", claimAny)
+			got := resolveSpawnArgs(p, &Pane{ID: "pane-abc"}, false, true, "", claimAny)
 			if len(got) != 0 {
 				t.Errorf("strategy %q restart argv = %v, want none", strategy, got)
 			}
@@ -223,3 +232,84 @@ func containsPair(args []string, first, second string) bool {
 	return false
 }
 
+
+// TestResolveSpawnArgs_FreshPaneIgnoresALeftoverRecord is the guard on the
+// restart branch, and it protects against a WORSE bug than the one that branch
+// fixes.
+//
+// Eight call sites reach spawnPane with restoring=false, and only one of them
+// is a restart: pane creation, both replace paths, the tab-bootstrap spawns and
+// the sandbox sign-in respawn arrive the same way. Pane ids are 32 bits and
+// nothing ever deletes $QUIL_HOME/sessions/codex-<paneID>.id, so a freshly
+// minted id can collide with a destroyed pane's leftover — and an ungated
+// branch would have the new pane silently open a stranger's conversation.
+//
+// ranBefore (pane.ptyGen > 0) is what separates the two, and it had to be a new
+// signal rather than preassign_id's `hadSession`: that reads
+// PluginState["session_id"], whose only writer for a session_scrape pane is
+// refreshPluginStateFromHooks, which runs at SHUTDOWN — so a codex pane created
+// and used within one daemon lifetime still has it empty, and reusing it would
+// skip the resume in exactly the case the fix exists for.
+func TestResolveSpawnArgs_FreshPaneIgnoresALeftoverRecord(t *testing.T) {
+	orig := readCodexSessionFn
+	readCodexSessionFn = func(string) (codexhook.SessionRecord, error) {
+		// A perfectly valid record — the point is that it is not THIS pane's.
+		return codexhook.SessionRecord{ID: restartTestSessionID}, nil
+	}
+	t.Cleanup(func() { readCodexSessionFn = orig })
+
+	p := &plugin.PanePlugin{
+		Name:        plugin.CodexPluginName,
+		Command:     plugin.CommandConfig{Cmd: "codex"},
+		Persistence: plugin.PersistenceConfig{Strategy: "session_scrape"},
+	}
+
+	got := resolveSpawnArgs(p, &Pane{ID: "pane-abc"}, false, false, "", claimAny)
+	if len(got) != 0 {
+		t.Errorf("a pane whose child has never run must ignore the record under its id, got %v — "+
+			"nothing deletes those files, so it can only belong to a destroyed pane that drew the same id", got)
+	}
+
+	// The control: the SAME record, the same pane, one bit different. Without
+	// it a fix that simply stopped resuming would pass the assertion above.
+	if got := resolveSpawnArgs(p, &Pane{ID: "pane-abc"}, false, true, "", claimAny); len(got) == 0 {
+		t.Error("a pane that HAS run must still resume its own recorded session")
+	}
+}
+
+// TestSpawnPane_FreshCodexPaneDoesNotAdoptALeftoverRecord drives the same guard
+// through spawnPane, because ranBefore is computed THERE — from pane.ptyGen,
+// under PluginMu, before the counter is incremented for this spawn. A table
+// test passing the bool directly cannot catch the counter being read after its
+// own increment, which would make every create look like a restart.
+func TestSpawnPane_FreshCodexPaneDoesNotAdoptALeftoverRecord(t *testing.T) {
+	origExe, origRead := quildExeFn, readCodexSessionFn
+	quildExeFn = func() (string, error) { return "/opt/quil/quild", nil }
+	readCodexSessionFn = func(string) (codexhook.SessionRecord, error) {
+		return codexhook.SessionRecord{ID: restartTestSessionID}, nil
+	}
+	t.Cleanup(func() { quildExeFn, readCodexSessionFn = origExe, origRead })
+
+	d := newTestDaemon(t)
+	registerCodexPlugin(t, d)
+
+	fake := &fakeSession{}
+	pane := &Pane{ID: "pane-c0dec0de", Type: "codex", CWD: t.TempDir()}
+	if err := d.spawnPane(pane, fake, false); err != nil {
+		t.Fatalf("spawnPane: %v", err)
+	}
+	if containsPair(fake.startArgs, "resume", restartTestSessionID) {
+		t.Fatalf("a brand-new codex pane resumed a record it did not write: %q", fake.startArgs)
+	}
+
+	// That spawn incremented ptyGen, so the NEXT one is a restart by the same
+	// rule — and must resume. Asserting both against one pane is what pins the
+	// counter's ordering rather than merely its value.
+	second := &fakeSession{}
+	if err := d.spawnPane(pane, second, false); err != nil {
+		t.Fatalf("spawnPane (restart): %v", err)
+	}
+	if !containsPair(second.startArgs, "resume", restartTestSessionID) {
+		t.Errorf("the second spawn of the same pane is a restart and must resume: %q", second.startArgs)
+	}
+}

@@ -4958,7 +4958,11 @@ func appendResumeTemplate(args, template []string, pane *Pane) []string {
 // one another pane already holds. It is never nil: callers with no occupancy
 // information pass claimAny, so a forgotten wiring fails in a test rather than
 // silently dropping the guard in production.
-func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID string, claim sessionClaimFn) []string {
+// ranBefore reports whether a child of this pane has already run in this
+// daemon (pane.ptyGen > 0), captured by the caller under PluginMu. It is what
+// separates a RESTART from a CREATE — both arrive with restoring=false — and
+// the session_scrape branch below is gated on it.
+func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ranBefore bool, resumeID string, claim sessionClaimFn) []string {
 	args := append([]string{}, p.Command.Args...)
 
 	// Instance-specific args override base args.
@@ -5005,11 +5009,36 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID
 	// when a child wedges — the moment a conversation is worth the MOST, not the
 	// least.
 	//
+	// GATED ON ranBefore, and the gate is the whole safety argument. EIGHT call
+	// sites reach spawnPane with restoring=false: pane creation, the two replace
+	// paths, the tab-bootstrap spawns, the sandbox sign-in respawn and the
+	// restart. Ungated, a BRAND-NEW pane would read a hook record under its own
+	// id — and pane ids are 32 bits, nothing ever deletes those files, so a
+	// freshly minted id can collide with a destroyed pane's leftover and the new
+	// pane would silently open a stranger's conversation. That is a worse bug
+	// than the one being fixed, in the opposite direction.
+	//
+	// preassign_id guards the same hazard with `hadSession`
+	// (PluginState["session_id"] != ""), which CANNOT be reused here:
+	// refreshPluginStateFromHooks is the only writer of that field for a
+	// session_scrape pane and it runs at SHUTDOWN, so a codex pane created and
+	// conversed with in this daemon's lifetime still has it empty — the guard
+	// would skip the resume in precisely the reported case. ptyGen is the honest
+	// signal: it counts PTY installs on this pane OBJECT, so >0 means a child of
+	// this pane has already run and the record under its id was written by that
+	// child rather than by whoever held the id before.
+	//
+	// Residual, shared with the claude path and deliberately not closed here: a
+	// recycled id whose new child dies before its SessionStart hook fires leaves
+	// the stranger's file in place for a later restart to read. Closing it means
+	// deleting records on the create path, which is a separate change with its
+	// own blast radius.
+	//
 	// The fallback is unchanged and still the safe one: a pane with no recorded
 	// session expands to the plugin's own ResumeArgs, which codex.toml
 	// deliberately leaves empty, so it starts fresh rather than guessing with
 	// `resume --last`.
-	if !restoring && p.Persistence.Strategy == "session_scrape" {
+	if !restoring && ranBefore && p.Persistence.Strategy == "session_scrape" {
 		args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
 	}
 
@@ -5188,7 +5217,20 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 	}
 
-	args := resolveSpawnArgs(p, pane, restoring, resumeID, d.claimResumeSession)
+	// ranBefore separates a RESTART from a CREATE, both of which reach here with
+	// restoring=false. Read under PluginMu for the same reason resumeID is:
+	// every other access to the pane's spawn state is lock-guarded, and the PTY
+	// output goroutine writes ptyGen.
+	//
+	// ptyGen counts PTY installs on THIS pane object and is incremented below,
+	// after the args are built — so zero here means no child of this pane has
+	// ever run, which is exactly what makes a hook record under its id somebody
+	// else's. See the session_scrape branch in resolveSpawnArgs.
+	pane.PluginMu.Lock()
+	ranBefore := pane.ptyGen > 0
+	pane.PluginMu.Unlock()
+
+	args := resolveSpawnArgs(p, pane, restoring, ranBefore, resumeID, d.claimResumeSession)
 
 	// Shell integration (only for terminal-type panes)
 	if p.Command.ShellIntegration {
