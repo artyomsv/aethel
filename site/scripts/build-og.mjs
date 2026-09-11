@@ -142,6 +142,14 @@ const pages = [
     subline: "Native Windows and MCP-native, versus a Unix-first agent fleet.",
   },
   {
+    slug: "vs-ghostty",
+    path: "/vs/ghostty",
+    kicker: "COMPARE",
+    headline: "Quil vs Ghostty",
+    headlineSize: 96,
+    subline: "The terminal draws the window. Quil keeps the work inside it.",
+  },
+  {
     slug: "vs-aoe",
     path: "/vs/aoe",
     kicker: "COMPARE",

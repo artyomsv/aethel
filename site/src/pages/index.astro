@@ -74,7 +74,7 @@ const topFeatures = [
     number: "◇ 04",
     title: "MCP server for agents",
     tag: "← AGENT LAYER",
-    body: `Run <span class="mono" style="color:var(--flame);">quil mcp</span> and any MCP-capable client — Claude Desktop, Cursor, Claude Code — can list panes, read output, send keystrokes, and snapshot your workspace. 18 tools. Your terminal becomes addressable by AI.`,
+    body: `Run <span class="mono" style="color:var(--flame);">quil mcp</span> and any MCP-capable client — Claude Desktop, Cursor, Claude Code — can manage projects across remote hosts, read output, create AI panes, and delegate work between them. 35 tools. Your terminal becomes addressable by AI.`,
   },
   {
     number: "◇ 05",
@@ -121,11 +121,12 @@ const compareRows = [
 ];
 
 const compareTiles = [
-  { slug: "herdr",   label: "herdr",             blurb: "The closest rival: a Rust agent multiplexer. Broader agent support; no native Windows, no MCP." },
+  { slug: "herdr",   label: "herdr",             blurb: "The closest rival: a Rust agent multiplexer. Broader agent support and a shell CLI; no MCP server of its own." },
   { slug: "aoe",     label: "Agent of Empires",  blurb: "A tmux-based agent manager with a web dashboard. Richer remote; WSL2-only, no MCP." },
   { slug: "tmux",    label: "tmux",       blurb: "The 2007 standard. Still the answer if you just need tabs on a remote host." },
   { slug: "zellij",  label: "Zellij",     blurb: "The modern Rust option. Friendly UX, WASM plugins. A reboot returns the layout, not the work." },
   { slug: "wezterm", label: "WezTerm",    blurb: "A terminal emulator with multiplexer bolted on. Use both — they complement." },
+  { slug: "ghostty", label: "Ghostty",    blurb: "Not a rival — the window Quil runs inside. Great renderer; nothing it draws outlives it." },
   { slug: "screen",  label: "GNU Screen", blurb: "1987. Still on every Unix host. Not a dev-experience tool anymore." },
 ];
 

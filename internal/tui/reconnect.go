@@ -781,6 +781,8 @@ func (m *Model) eachClientPane(dest string, fn func(*PaneModel)) {
 func (m *Model) armReattachReset(dest string) {
 	m.eachClientPane(dest, func(p *PaneModel) {
 		p.reattachReset = true
+		// The daemon may have restarted too, resetting its PTY run counter.
+		p.outputGeneration = 0
 		// Forget that this pane has been sized. The suppression in diffResizes
 		// describes a daemon-side guard (appliedCols/appliedRows) that a PTY
 		// reinstall zeroes, so carrying it across an outage would withhold the

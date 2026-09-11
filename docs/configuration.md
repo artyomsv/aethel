@@ -46,7 +46,7 @@ max_files = 10            # number of timestamped rotation archives to keep
 
 [ui]
 tab_dock = "top"
-theme = "default"
+theme = "default"           # reserved — no presets ship; Quil follows your terminal (OSC 10/11)
 mouse_scroll_lines = 3
 page_scroll_lines = 0           # 0 = half-page (dynamic) — terminal pane scrollback
 log_viewer_page_lines = 40      # Alt+Up/Alt+Down jump in F1 → log viewer
@@ -170,7 +170,7 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `tab_dock` | string | `"top"` | Where the tab bar sits. (Currently only `top` is implemented.) |
-| `theme` | string | `"default"` | Reserved for future theming. |
+| `theme` | string | `"default"` | Reserved for future theming; nothing reads it today. Quil ships no colour presets on purpose — it asks the terminal for its real foreground and background (OSC 10/11) and renders against those, so it inherits your terminal theme instead of competing with it. |
 | `mouse_scroll_lines` | int | `3` | Lines per mouse-wheel notch in pane scrollback. |
 | `page_scroll_lines` | int | `0` | Lines per `Alt+PgUp` / `Alt+PgDown`. `0` = half the pane height (dynamic). |
 | `log_viewer_page_lines` | int | `40` | `Alt+Up` / `Alt+Down` jump distance in the F1 log viewer. |

@@ -193,6 +193,11 @@ Previously these calls answered `"Sent N bytes"` regardless, so input aimed at a
 
 ### Pane lifecycle
 
+New panes start at a sibling pane's dimensions, or the last attached terminal's
+size when no sibling has a known size (80×24 only when neither is available).
+This also applies to MCP-created panes in hidden tabs. Restarting resets the
+TUI's terminal state before it displays the replacement child's output.
+
 | Tool | Input | Returns | Notes |
 |---|---|---|---|
 | `create_pane` | `tab_id` (optional, default = active), `cwd`, `type` (default `terminal`; also `claude-code`, `opencode`, `codex`, `ssh`, `stripe`), `name`, `toggles[]`, `resume_session_id`, `worktree_branch`, `sandbox_image`, `sandbox_auth`, `host` | JSON: `{pane_id, tab_id, host, error?}` | Spawns a new pane with the same options the Ctrl+N dialog collects — see below. An ERROR (no pane) names the refusal; `error` WITH a `pane_id` means the pane exists but its process failed to start. |
@@ -230,6 +235,11 @@ A project groups tabs and owns a root directory (new tabs open there). Every tab
 Every mutation answers `{id, ok, error}` — the daemon reports whether it applied, instead of the agent inferring it from the next listing. (The TUI's own sends stay fire-and-forget; only an ID-bearing request gets the answer.) Moving a single tab between projects is not offered — the daemon has no such primitive; `MergeProjects` moves all of a project's tabs.
 
 ### Remote hosts
+
+Unscoped lists and `list_hosts` retry down hosts in the background after the
+30-second backoff. The current call skips a host still connecting; later calls
+include it once recovered, without requiring a named-host request. Successful
+reconnection clears stale connection and request errors.
 
 The bridge dials every `[[destinations]]` host of the machine running `quil mcp` — the same hosts the TUI shows in its sidebar — in the background, with the same ssh transport, version gate and hello. The local daemon is always there and needs no host.
 

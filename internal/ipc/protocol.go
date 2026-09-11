@@ -472,6 +472,9 @@ type PaneOutputPayload struct {
 	PaneID string `json:"pane_id"`
 	Data   []byte `json:"data"`
 	Ghost  bool   `json:"ghost,omitempty"`
+	// Generation identifies the PTY run. Repeated on every live chunk so a
+	// dropped output frame cannot lose the reset between two child processes.
+	Generation uint64 `json:"generation,omitempty"`
 }
 
 // SubscribePayload narrows what a client is sent.

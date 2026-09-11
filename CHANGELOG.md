@@ -11,6 +11,30 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.72.2] - 2026-09-10
+
+### Fixed
+- **`delegate_task` results and notification excerpts were empty or a stray fragment
+  for real terminal output.** The excerpt helper treated the carriage return that ends
+  every PTY line (`\r\n`) as an overwrite and dropped the line, so `get_task` /
+  `wait_task` returned no `result` for a shell command and `task_done`, `agent_idle`
+  and `output_idle` events carried a blank or meaningless `excerpt`. A trailing carriage
+  return is now trimmed before the overwrite reset; a carriage return with text after
+  it still collapses to what the terminal shows.
+
+## [1.72.1] - 2026-09-10
+
+### Fixed
+- Unscoped MCP tools and `list_hosts` now retry disconnected remote hosts in the
+  background after the retry backoff, without waiting for SSH. A recovered host
+  reappears automatically and its stale connection and request errors are cleared.
+- New panes inherit a sibling's size or the attached terminal's dimensions before
+  their first paint, including panes created through MCP in hidden tabs. An unusable
+  1x1 client size falls back to 80x24 when no sibling size is available. Restarting
+  a pane resets its terminal emulator before the replacement child's output arrives;
+  late output and exit events from the previous child no longer corrupt its screen
+  or mark the replacement as exited. Tasks assigned to the old process fail on restart.
+
 ## [1.72.0] - 2026-09-10
 
 ### Added

@@ -4,9 +4,9 @@ Date: 2026-09-10. Status: approved for implementation (autonomous goal session).
 
 ## Why
 
-The MCP bridge (`quil mcp`) exposes 18 tools. They cover one local daemon, one
-tab-and-pane model, and a "type text, then poll" way of talking to another AI
-pane. Four things a user of Quil-as-orchestrator needs are missing:
+Before v1.72.0, the MCP bridge (`quil mcp`) exposed eighteen tools. They covered
+one local daemon, one tab-and-pane model, and a "type text, then poll" way of
+talking to another AI pane. This design addressed four missing capabilities:
 
 1. **AI pane options.** The Ctrl+N dialog collects CWD, worktree, sandbox, auth
    mode, resume-session and per-plugin toggles (permission mode, `--chrome`,

@@ -69,6 +69,8 @@ type Daemon struct {
 	// from any IPC dispatch goroutine and written by handleAttach on each
 	// connect — atomic.Pointer is what keeps that race-free.
 	clientCWD atomic.Pointer[string]
+	// Last attached terminal size, used before a client can resize a new pane.
+	clientSize atomic.Pointer[terminalSize]
 
 	memReport *memreport.Collector
 	// procReport enumerates per-pane process trees, and runs ONLY while a
@@ -1299,7 +1301,7 @@ func newRestoredPTY(cols, rows int) apty.Session {
 // paneVTSize floors at 1 precisely so those keep working. Collapsing to 1x1 in
 // both takes a terminal with no usable area at all.
 //
-// Two callers, and the restore one is not redundant: a workspace persisted
+// The restore guard is not redundant: a workspace persisted
 // while the bug was live holds `"cols": 1, "rows": 1`, and newRestoredPTY would
 // otherwise boot that pane's child at one column on every daemon start
 // thereafter — apty.NewWithSize floors only NON-POSITIVE values, so 1x1
@@ -1726,6 +1728,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	if rows <= 0 {
 		rows = 24
 	}
+	d.clientSize.Store(&terminalSize{cols: cols, rows: rows})
 
 	log.Printf("attach: client connected (%dx%d), tabs=%d, restored=%v",
 		cols, rows, len(d.session.Tabs()), d.restored)
@@ -2383,10 +2386,8 @@ func (d *Daemon) recoverEmptyProject(projectID string) {
 		return
 	}
 	setPaneType(pane, "terminal")
-	// Through newSessionFn rather than apty.NewWithSize directly: same 80×24
-	// default in production, and the seam is what lets a test assert the
-	// replacement shell's CWD without launching a child.
-	if err := d.spawnPane(pane, newSessionFn(80, 24), false); err != nil {
+	// Match the attached client's size even when this project has no sibling.
+	if err := d.spawnPane(pane, d.newPaneSession(pane), false); err != nil {
 		log.Printf("failed to start replacement shell: %v", err)
 	}
 	// DestroyTab moves the GLOBAL active tab to tabOrder[0], which can belong
@@ -2658,12 +2659,8 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 	d.applyResumeSessionID(pane, payload.ResumeSessionID)
 	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, payload.Overlay)
 
-	// Through newSessionFn rather than apty.New() — identical in production
-	// (the seam's zero pair IS apty.New()) and the smallest change that makes
-	// this function drivable from a test. It is the ONLY production call site
-	// of enforceOverlayCap, and a direct-call test of that function passes just
-	// as happily against a createPaneAt that no longer calls it.
-	ptySession := newSessionFn(0, 0)
+	// Size before spawn: the child can paint before a hidden tab's resize lands.
+	ptySession := d.newPaneSession(pane)
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
 		// Recorded ON THE PANE, not only returned. Every caller of this
 		// function logged the error and moved on, so a pane that failed to
@@ -2744,12 +2741,7 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	// the session maps).
 	d.applyResumeSessionID(newPane, payload.ResumeSessionID)
 
-	// Through newSessionFn rather than apty.New(), for the reason constructPaneAt
-	// gives for the same swap: identical in production (the seam's zero pair IS
-	// apty.New()) and the smallest change that makes this function's FAILURE
-	// path drivable from a test — which is where the empty-tab bug lived, and
-	// which no test could reach while the PTY was constructed directly.
-	ptySession := newSessionFn(0, 0)
+	ptySession := d.newPaneSession(newPane)
 	if err := d.spawnPane(newPane, ptySession, false); err != nil {
 		d.session.DestroyPane(newPane.ID)
 		// The tab can now be EMPTY, and for one caller it always is: the
@@ -3699,7 +3691,7 @@ func (d *Daemon) redrawKick(pane *Pane, typ string) {
 	resizeKick(pty, cols, rows)
 }
 
-func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
+func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session, generation uint64) {
 	readBuf := make([]byte, 32*1024)
 	dataCh := make(chan []byte, 64)
 
@@ -3732,14 +3724,14 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 				resizeKick(pty, cols, rows)
 			}
 		},
-		func(b []byte) { d.flushPaneOutput(paneID, b) },
+		func(b []byte) { d.flushPaneOutputGeneration(paneID, b, generation) },
 	)
 
 	// dataCh closed: PTY EOF. Capture process exit code (protected by
 	// PluginMu to avoid data race).
 	if pane := d.session.Pane(paneID); pane != nil {
 		code := pty.WaitExit()
-		d.onPaneExit(pane, code)
+		d.onPaneExitGeneration(pane, code, generation)
 	}
 }
 
@@ -3752,7 +3744,15 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 // are safe to call from any goroutine — the broadcast helpers already document
 // this property (see the nil-guarded broadcast helper).
 func (d *Daemon) onPaneExit(pane *Pane, code int) {
+	d.onPaneExitGeneration(pane, code, 0)
+}
+
+func (d *Daemon) onPaneExitGeneration(pane *Pane, code int, generation uint64) {
 	pane.PluginMu.Lock()
+	if generation != 0 && (generation != pane.ptyGen || pane.PTY == nil) {
+		pane.PluginMu.Unlock()
+		return
+	}
 	pane.ExitCode = &code
 	pane.ExitedAt = time.Now()
 	isOverlay := pane.Overlay
@@ -3815,8 +3815,17 @@ func (d *Daemon) onPaneExit(pane *Pane, code int) {
 const mouseModeBroadcastCooldown = 250 * time.Millisecond
 
 func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
+	d.flushPaneOutputGeneration(paneID, data, 0)
+}
+
+func (d *Daemon) flushPaneOutputGeneration(paneID string, data []byte, generation uint64) {
 	pane := d.session.Pane(paneID)
 	if pane == nil {
+		return
+	}
+	pane.PluginMu.Lock()
+	if generation != 0 && (generation != pane.ptyGen || pane.PTY == nil) {
+		pane.PluginMu.Unlock()
 		return
 	}
 	if pane.OutputBuf != nil {
@@ -3835,17 +3844,14 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 		// 2026-08-03. Reset is an index write under the ring's own mutex, not
 		// I/O, and PluginMu → ringbuf.mu is the order handleAttach's Bytes()
 		// already takes.
-		pane.PluginMu.Lock()
 		if pane.ghostSeeded {
 			pane.OutputBuf.Reset()
 			pane.ghostSeeded = false
 		}
-		pane.PluginMu.Unlock()
 		pane.OutputBuf.Write(data)
 	}
 
 	// Update idle tracking + mouse-mode state (guarded by PluginMu).
-	pane.PluginMu.Lock()
 	now := time.Now()
 	pane.LastOutputAt = now
 	pane.IdleNotified = false
@@ -3887,8 +3893,9 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 	d.applyPluginHandlers(pane, paneID, data)
 
 	msg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
-		PaneID: paneID,
-		Data:   data,
+		PaneID:     paneID,
+		Data:       data,
+		Generation: generation,
 	})
 	d.broadcast(msg)
 }
@@ -5363,8 +5370,9 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	pane.lastRedrawAt = time.Time{}
 	pane.redrawSeq = 0
 	pane.ptyGen++
+	generation := pane.ptyGen
 	pane.PluginMu.Unlock()
-	go d.streamPTYOutput(pane.ID, ptySession)
+	go d.streamPTYOutput(pane.ID, ptySession, generation)
 	return nil
 }
 
@@ -5775,11 +5783,19 @@ func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity, excerpt string) 
 // actually SEES is the trailing segment after the last `\r`. Without this
 // reset, excerpts capture text the user can never see (e.g. the prompt
 // rune that was immediately overwritten) and miss the text they DO see.
+//
+// The `\r` of a CRLF line ending is NOT an overwrite: a PTY terminates every
+// line with `\r\n`, so after the split each line ends in `\r` with nothing
+// after it. Applying the reset to that CR emptied every line of real terminal
+// output — a delegated shell command came back with no result and every
+// task_done / agent_idle excerpt was blank or a stray fragment (measured
+// 2026-09-10 on a remote host). Trailing CRs are trimmed first; only a CR
+// with text after it is the overwrite the reset exists for.
 func lastNLines(text string, n int) string {
 	lines := strings.Split(text, "\n")
 	var result []string
 	for i := len(lines) - 1; i >= 0 && len(result) < n; i-- {
-		line := lines[i]
+		line := strings.TrimRight(lines[i], "\r")
 		if cr := strings.LastIndex(line, "\r"); cr >= 0 {
 			line = line[cr+1:]
 		}
@@ -6220,6 +6236,22 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	old := pane.PTY
 	pane.PTY = nil
 	pane.PluginMu.Unlock()
+	// The old stream's exit is now ignored. End its delegated work here,
+	// before the replacement can accept input, rather than leaving wait_task
+	// parked forever or letting the new child's idle event complete old work.
+	d.failTasksForPane(pane.ID, "pane restarted")
+	pane.workMu.Lock()
+	if pane.idleTimer != nil {
+		pane.idleTimer.Stop()
+		pane.idleTimer = nil
+	}
+	subs := pane.idleSubs
+	pane.idleSubs = nil
+	pane.Work = hookevents.WorkLedger{}
+	pane.workMu.Unlock()
+	for _, fn := range subs {
+		fn(true)
+	}
 	if old != nil {
 		// Async: Close → cmd.Wait blocks until the child is reaped, and a
 		// wedged child is precisely when restart_pane gets called — a
@@ -6275,7 +6307,7 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	if d.refuseMissingWorktree(pane) {
 		success = false
 	} else {
-		ptySession := apty.NewWithSize(cols, rows)
+		ptySession := newSessionFn(cols, rows)
 		if err := d.spawnPane(pane, ptySession, false); err != nil {
 			log.Printf("handleRestartPaneReq: spawn: %v", err)
 			success = false

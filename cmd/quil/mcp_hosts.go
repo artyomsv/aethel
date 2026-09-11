@@ -21,7 +21,7 @@ import (
 // mcpRouter is the bridge's equivalent: one mcpBridge per configured host,
 // dialled in the background at startup with the same ssh transport, version
 // gate and hello the TUI's background dials use, and re-dialled lazily with
-// a backoff when a tool call names a host that is down. Tools address a host
+// a backoff when a tool lists hosts or needs a host that is down. Tools address a host
 // explicitly (`host`), or through the id→host cache every list and create
 // fills, or fall back to the local daemon.
 
@@ -68,6 +68,9 @@ type hostConn struct {
 	// without holding the mutex every status read takes.
 	dialing  bool
 	dialDone chan struct{}
+	// retryScheduled reserves a background retry before its goroutine starts.
+	// Repeated status reads must not queue waiters behind the same slow dial.
+	retryScheduled bool
 	// reqErr is the last error a request to this CONNECTED host produced
 	// during an unscoped aggregation, which skips the host rather than
 	// failing the whole list. list_hosts shows it so the skip is visible.
@@ -203,6 +206,7 @@ func (r *mcpRouter) connect(h *hostConn, initial bool) error {
 		return fmt.Errorf("host %s unreachable: %w", h.dest.Label(), err)
 	}
 	h.bridge, h.client, h.cancel, h.err = bridge, client, cancel, nil
+	h.reqErr = nil
 	h.mu.Unlock()
 	return nil
 }
@@ -314,10 +318,33 @@ func (r *mcpRouter) connected() []hostBridge {
 		h.mu.Lock()
 		if h.bridge != nil && !h.bridge.dead.Load() {
 			out = append(out, hostBridge{host: dest, bridge: h.bridge})
+		} else {
+			r.retryDisconnectedLocked(h)
 		}
 		h.mu.Unlock()
 	}
 	return out
+}
+
+// retryDisconnectedLocked schedules one retry without waiting for network I/O.
+// The caller holds h.mu. A dropped live bridge earns the same immediate retry
+// as a named call; a failed dial must wait out the backoff.
+func (r *mcpRouter) retryDisconnectedLocked(h *hostConn) {
+	if h.dialing || h.retryScheduled {
+		return
+	}
+	if h.bridge == nil && h.err != nil && time.Since(h.lastTry) < r.backoff {
+		return
+	}
+	h.retryScheduled = true
+	go func() {
+		if err := r.connect(h, false); err != nil {
+			log.Printf("mcp: host %s: %v", h.dest.Label(), err)
+		}
+		h.mu.Lock()
+		h.retryScheduled = false
+		h.mu.Unlock()
+	}()
 }
 
 type hostBridge struct {
@@ -433,13 +460,16 @@ func (r *mcpRouter) statuses() []hostStatus {
 		h.mu.Lock()
 		st := hostStatus{Host: dest, Label: h.dest.Name}
 		st.Connected = h.bridge != nil && !h.bridge.dead.Load()
+		if !st.Connected {
+			r.retryDisconnectedLocked(h)
+		}
 		switch {
 		case st.Connected:
 			st.DaemonVersion = h.bridge.daemonVersion
 			if h.reqErr != nil {
 				st.Error = "last request failed: " + h.reqErr.Error()
 			}
-		case h.dialing:
+		case h.dialing || h.retryScheduled:
 			// A dial in flight is neither connected nor failed, and this read
 			// must never wait for it to decide which.
 			st.Error = "connecting"

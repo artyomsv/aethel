@@ -712,22 +712,35 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 ## Planned — Competitive Gaps (herdr, AoE)
 
 > Derived from the [competitive analysis](competitive-analysis.md) of the two
-> closest direct competitors — [herdr](https://github.com/ogulcancelik/herdr)
+> closest direct competitors — [herdr](https://github.com/herdrdev/herdr)
 > and [Agent of Empires](https://github.com/agent-of-empires/agent-of-empires).
 > These are the 20 most interesting capabilities they ship that Quil lacks or
 > only partially supports, grouped into candidate milestones. Several extend
 > work already planned above — those are cross-referenced, not duplicated.
+> Ghostty is covered in the same document under *The Ghostty axis*, with its own
+> shortlist (G1–G7); it is not a rival, so its items are not ranked in here.
 
 Both competitors are agent-orchestrators like Quil, but each is broader in one
 axis: herdr on **agent breadth + scriptable extensibility**, AoE on **web/remote
-access + sandboxing**. Quil already leads on **native Windows** (including the
-bundled OpenConsole fix for Windows 10), the **MCP server**, **pane notes**,
+access + sandboxing**. Quil already leads on the **MCP server**, **pane notes**,
 **memory reporting**, **per-pane input history**, and **in-app auto-update** —
 those are moats to defend, not gaps to close.
 
+**Windows is no longer the clean moat it was.** As of the 2026-09-10 re-read herdr
+calls native Windows generally available, so "they are beta, we are not" is now a
+false claim and must not be repeated. What survives is narrower and still real: on
+herdr there is no direct terminal attach, no live server handoff and no clipboard
+image bridge in local native panes, while Quil's bundled OpenConsole fix for
+Windows 10 and its Win32 clipboard image-paste proxy remain genuine advantages.
+AoE is still WSL2-only. **Windows-as-a-remote-host is not a Quil advantage** —
+herdr excludes it and so does Quil (see [remote-daemon](roadmap/remote-daemon.md):
+no `uname`, no `sh`, and a running Windows executable cannot be replaced in place).
+
 ### M14: Agent Fleet — breadth + detection *(highest ROI)*
 
-The starkest deficit: rivals detect 13–18 agents out of the box; Quil ships 2.
+The starkest deficit: rivals detect 13–24 agents out of the box; Quil ships 3.
+Re-checked 2026-09-10 — herdr had grown from 20+ to 24+ since the original
+capture, so this gap is widening rather than holding.
 
 1. **Screen-content agent state detection** — infer blocked/working/done from
    terminal output for *any* agent, with no hooks required (herdr ships updatable

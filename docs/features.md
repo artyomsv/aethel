@@ -2,6 +2,8 @@
 
 A capability-by-capability tour of what Quil does. For configuration knobs, see [Configuration](configuration.md). For keystrokes, see [Keybindings](keybindings.md). For AI integration, see [MCP](mcp.md).
 
+Quil exposes **35 MCP tools**: agents can manage [projects and tabs](mcp.md#projects-and-tabs), discover and route work across [remote hosts](mcp.md#remote-hosts), and create AI panes with the TUI dialog's options. [`delegate_task`](mcp.md#delegating-work-to-another-pane) tracks pane-to-pane work and can notify the requester after completion, when it is ready to receive input.
+
 ## Table of contents
 
 - [Persistence](#persistence)
@@ -473,6 +475,8 @@ The `default` tier's `PreToolUse` registration is **not** the per-tool-call stre
 | Mute / unmute active pane | `Alt+M` |
 
 External AI agents can subscribe via MCP — `get_notifications` (non-blocking), `watch_notifications` (blocking, up to 5 min) and `dismiss_notifications` (ack from agent side) replace polling. See [MCP](mcp.md#event-observation).
+
+These events also support [pane-to-pane delegation](mcp.md#delegating-work-to-another-pane): settled agent-idle and task-completion events let a requester follow work across its project's tabs. The bridge aggregates events from connected [remote hosts](mcp.md#remote-hosts).
 
 ### Desktop notifications
 

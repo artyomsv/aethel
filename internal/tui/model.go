@@ -46,9 +46,10 @@ const (
 
 // Messages from daemon
 type PaneOutputMsg struct {
-	PaneID string
-	Data   []byte
-	Ghost  bool
+	PaneID     string
+	Data       []byte
+	Ghost      bool
+	Generation uint64
 }
 
 type WorkspaceStateMsg struct {
@@ -5266,6 +5267,9 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 	// Overlay panes live outside the layout tree — check them first.
 	for _, tab := range m.allTabs() {
 		if tab.overlayPane != nil && tab.overlayPane.ID == msg.PaneID {
+			if !tab.overlayPane.acceptOutputGeneration(msg.Generation) {
+				return nil, false
+			}
 			// Same armed-reset consume as the layout-tree branch below. This
 			// branch returns early, so without it an overlay pane's replay would
 			// append onto content it was supposed to replace. Today's only
@@ -5301,6 +5305,9 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) (tea.Cmd, bool) {
 			continue
 		}
 		if leaf := tab.Root.FindLeaf(msg.PaneID); leaf != nil {
+			if !leaf.Pane.acceptOutputGeneration(msg.Generation) {
+				return nil, false
+			}
 			// Base: a pane the user is looking at always redraws. The branches
 			// below raise this for state that is cheap to be conservative about.
 			changedView := m.paneIsVisible(msg.PaneID)
@@ -6898,7 +6905,7 @@ func (m Model) listenForMessages() tea.Cmd {
 		case ipc.MsgPaneOutput:
 			var payload ipc.PaneOutputPayload
 			msg.DecodePayload(&payload)
-			return PaneOutputMsg{PaneID: payload.PaneID, Data: payload.Data, Ghost: payload.Ghost}
+			return PaneOutputMsg{PaneID: payload.PaneID, Data: payload.Data, Ghost: payload.Ghost, Generation: payload.Generation}
 
 		case ipc.MsgWorkspaceState:
 			log.Print("ipc recv: workspace_state")

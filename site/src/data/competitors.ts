@@ -176,7 +176,7 @@ export interface VsRow {
 }
 
 export interface CompetitorInfo {
-  slug: "tmux" | "zellij" | "wezterm" | "screen" | "herdr" | "aoe";
+  slug: "tmux" | "zellij" | "wezterm" | "screen" | "herdr" | "aoe" | "ghostty";
   name: string;
   description: string;
   positioning: string;
@@ -201,11 +201,96 @@ export interface CompetitorInfo {
    * leave it unset for herdr/aoe, whose names are searched directly.
    */
   seoTitle?: string;
+  /**
+   * Optional override for the meta description. The shared template's
+   * default opens "Looking for a <name> alternative?", which is right for
+   * every rival and wrong for Ghostty — an emulator Quil runs INSIDE. A
+   * page that claims otherwise ranks us for a query we should not win and
+   * tells a visitor something untrue in the search result itself.
+   */
+  seoDescription?: string;
   /** Per-page FAQ — 3-4 Q&A pairs. */
   faq: { question: string; answer: string }[];
 }
 
 export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
+  // Ghostty is the one entry here that is NOT a rival: it is a terminal
+  // emulator, the window Quil is drawn into. It earns a /vs/ page anyway
+  // because it is the most-searched terminal in the category, because its
+  // author now runs a multiplexer company (Superlogical, announced
+  // 2026-07-30), and because "ghostty tmux" / "does ghostty keep my
+  // session" is real demand this page can answer honestly.
+  //
+  // The page must never imply Ghostty is a competitor. That is also why
+  // this is the only entry that sets `seoDescription` — the shared
+  // template's default opens "Looking for a <name> alternative?", which
+  // would be a lie here and would rank us for a query we should not win.
+  ghostty: {
+    slug: "ghostty",
+    name: "Ghostty",
+    seoTitle: "Quil vs Ghostty — the terminal, and what runs inside it",
+    seoDescription:
+      "Ghostty is a terminal emulator. Quil is a multiplexer that runs inside one. They stack rather than compete — see which job each does, and what Ghostty alone cannot keep when the window closes.",
+    description:
+      "A fast, feature-rich terminal emulator written in Zig by Mitchell Hashimoto, with platform-native UI and GPU-accelerated rendering. macOS and Linux, MIT-licensed, 1.3.1 current. It draws the window — it does not keep the work.",
+    positioning:
+      "This is the one comparison on this site whose honest answer is “use both”. Ghostty draws the window: GPU-accelerated glyphs, native tabs and splits, scrollback search, and the deepest shell integration of any emulator. Quil runs inside that window and keeps the work: a daemon owns the panes, snapshots them to disk, and hands them back after a reboot with the AI sessions still attached. Quit Ghostty and its splits are gone. Quit Ghostty with Quil inside it and nothing stopped — reopen, type quil, and the panes are still running. Different layers of the same stack.",
+    keyStrength:
+      "The best window you can put Quil in. GPU-accelerated rendering with a Metal backend on macOS and OpenGL on Linux, a SIMD-optimised terminal parser, Unicode 17 grapheme clustering, the Kitty graphics protocol, in-window scrollback search, native scrollbars, a large built-in theme catalogue, and prompt-aware shell integration that lets you jump between prompts, select a command's whole output, and click inside a prompt to move the cursor.",
+    keyGap:
+      "Ghostty is an emulator, so nothing it draws outlives it. Quit the app and every split, every running command and every AI conversation goes with it — its window restore is macOS-only and brings back windows and tabs, not processes. It has no server, so there is no detach, no reattach, and no way to reach a session on another machine from a local client. It has no notion of an AI agent, so it cannot tell you which one is mid-turn and which one is parked on a permission prompt. And there is no official Windows build at all.",
+    migrationNote:
+      "There is nothing to migrate — Quil is not a replacement for Ghostty and never wanted to be. Install Quil, keep Ghostty as your terminal, and run `quil` inside it. Ghostty keeps doing fonts, colours and GPU compositing; Quil takes over panes, persistence and AI sessions. If you already use Ghostty's own splits, the adjustment is that Quil's splits are the ones that survive — so make Quil's the outer layer and let Ghostty hold a single full-size surface.",
+    quilHeadline: "The window closes. The work doesn't.",
+    matrix: [
+      { feature: "Draws the terminal itself (GPU, fonts, ligatures)", quil: "no", them: "yes", note: "Deliberate on both sides. Quil is a TUI with no renderer of its own — it runs inside Ghostty, WezTerm, Windows Terminal, iTerm2 or a bare Linux console. Ghostty is where that work belongs, and it is very good at it." },
+      { feature: "Work survives quitting the terminal app", quil: "yes", them: "no", note: "Quil's panes are owned by a background daemon, not by the window. Ghostty's splits are windows; closing the app ends the processes in them." },
+      { feature: "Survives a full host reboot", quil: "yes", them: "no", note: "Ghostty's `window-save-state` is macOS-only and restores windows and tabs, not the programs that were running in them. Quil snapshots the whole workspace continuously, so a reboot returns the projects, tabs, split layout, working directories and scrollback, and resumes the Claude Code, OpenCode or Codex conversation by session id. A plain terminal pane comes back as a fresh shell in its own directory — an arbitrary foreground command is not resumed, and no multiplexer resumes one." },
+      { feature: "AI session auto-resume (Claude Code, OpenCode, Codex)", quil: "yes", them: "no" },
+      { feature: "Agent state at a glance (working / blocked / done)", quil: "yes", them: "no", note: "Quil reads hook events from the agent itself, so it knows the difference between mid-turn and parked on a permission prompt. An emulator has no feed for that." },
+      { feature: "Typed panes (Terminal / AI / SSH / tools)", quil: "yes", them: "no" },
+      { feature: "MCP server an AI assistant can drive", quil: "yes", them: "no", note: "Ghostty is scriptable on macOS through AppleScript and Apple Shortcuts, which is a genuinely nice control surface — but it is not a protocol Claude Desktop, Cursor or VS Code speak, and it is macOS-only." },
+      { feature: "Remote attach: client local, sessions on another host", quil: "yes", them: "no", note: "Ghostty wraps `ssh` to set up the remote environment correctly, which is useful and not the same thing. It has no server, so there is nothing to attach to." },
+      { feature: "Several hosts' sessions side by side in one client", quil: "yes", them: "no" },
+      { feature: "Tabs and splits", quil: "yes", them: "yes", note: "Ghostty 1.3 added split drag-and-drop, zoom preservation across navigation, editable tab titles and per-surface working-directory inheritance. Both tools do this well; only one of them keeps the result." },
+      { feature: "Command palette", quil: "yes", them: "yes", note: "Ghostty's is `cmd+shift+p` / `ctrl+shift+p` and reaches every keybind action, bound or not. Quil's `Alt+Shift+P` also fuzzy-finds panes, tabs and projects." },
+      { feature: "Search scrollback", quil: "yes", them: "partial", note: "Ghostty added in-window search in 1.3 and runs it on its own thread — but it searches the focused surface. Quil's search runs daemon-wide and returns matches from every pane at once, with a preview and a match count per pane." },
+      { feature: "Prompt-aware navigation (jump to prompt, select a command's output)", quil: "no", them: "yes", note: "An honest gap, and one we intend to close. Quil already injects the OSC 133 marks that make this possible and currently reads only the command-finished one. Ghostty turns the same marks into prompt jumping, output selection and click-to-move-cursor." },
+      { feature: "Native Windows (no WSL)", quil: "yes", them: "no", note: "Ghostty ships macOS and Linux builds only. Native Windows exists solely as community forks and a separate derivative, Noctty. Quil ships a native Windows binary on ConPTY with bundled OpenConsole for Windows 10." },
+      { feature: "Themes with light/dark auto-switch", quil: "no", them: "yes", note: "Ghostty carries a large theme catalogue and can pair a light and a dark one. Quil ships no presets on purpose — it asks the terminal for its real foreground and background over OSC 10/11 and renders against those, so it inherits Ghostty's theme instead of fighting it." },
+      { feature: "Desktop notification when a long command finishes", quil: "partial", them: "yes", note: "Ghostty's fires only past a configurable duration, so a fast command stays silent. Quil raises Windows toasts on agent attention states and routes a click back to the pane, but has no duration floor and no macOS or Linux transport yet." },
+      { feature: "Per-pane Docker sandbox for an AI agent", quil: "yes", them: "no" },
+      { feature: "Git worktree per tab", quil: "yes", them: "no" },
+    ],
+    faq: [
+      {
+        question: "Is Quil a Ghostty alternative?",
+        answer:
+          "No, and we would rather you did not treat it as one. Ghostty is a terminal emulator — it owns the window, the font rendering and the GPU. Quil is a multiplexer and workflow orchestrator that runs inside a terminal emulator. The nearest true comparison is Quil vs tmux or Quil vs Zellij. Against Ghostty the right question is not which to pick, it is which layer you were missing.",
+      },
+      {
+        question: "Does Quil run inside Ghostty?",
+        answer:
+          "Yes, and it is a good pairing. Quil needs a terminal with PTY support and sensible colour handling, which describes Ghostty exactly. Ghostty also implements the Kitty keyboard protocol, which is what lets Quil distinguish key combinations that older terminals collapse. Run Ghostty as a single full-size surface and let Quil own the splits, so the splits are the ones that survive a reboot.",
+      },
+      {
+        question: "Ghostty already has tabs and splits. Do I still need Quil?",
+        answer:
+          "If you only need tabs and splits for the length of one sitting, no — Ghostty's are excellent and cost you nothing extra. You need Quil when the sitting ends: when you close the laptop, reboot for an update, or lose the SSH link, and want the same panes, the same scrollback and the same Claude Code conversation back. Ghostty's splits are windows and end with the app. Quil's panes are owned by a daemon and do not.",
+      },
+      {
+        question: "Ghostty's author is building a multiplexer. Should I wait for it?",
+        answer:
+          "Mitchell Hashimoto announced Superlogical on 30 July 2026, and its first product is a server-side terminal multiplexer built on libghostty, with web, macOS and iOS clients and live session sharing. We think it will be very good. As of September 2026 nothing has shipped, no timeline is public, and the announcement deliberately withholds features and pricing. Quil is available now, is Apache-2.0, runs natively on Windows, and needs no account and no server you do not own.",
+      },
+      {
+        question: "Does Ghostty run on Windows?",
+        answer:
+          "Not officially. Ghostty ships macOS and Linux builds; native Windows support exists only as community forks and a separate derivative called Noctty. If you are on Windows, pair Quil with Windows Terminal or WezTerm — Quil itself is native there, using ConPTY with a bundled OpenConsole on Windows 10, and needs no WSL.",
+      },
+    ],
+  },
+
   tmux: {
     slug: "tmux",
     name: "tmux",
@@ -256,11 +341,11 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
     description:
       "Modern Rust terminal multiplexer with a friendly UX, WASM plugins, and sane defaults. Released in 2021.",
     positioning:
-      "Zellij is the closest competitor on UX — both tools prioritise gentle defaults and a modern feel. Where they diverge: Zellij is a multiplexer first, Quil is a workflow orchestrator first. Zellij is also the only classic multiplexer that gives you anything back after a reboot, so the honest question is not whether a session returns but what returns with it — Zellij rebuilds the layout and waits for you to re-run each command, while Quil restores the running workspace and the AI conversation attached to it.",
+      "Zellij is the closest competitor on UX — both tools prioritise gentle defaults and a modern feel. Where they diverge: Zellij is a multiplexer first, Quil is a workflow orchestrator first. Zellij is also the only classic multiplexer that gives you anything back after a reboot, so the honest question is not whether a session returns but what returns with it — Zellij rebuilds the layout and waits for you to re-run each command, while Quil brings back the layout, the directories and the scrollback and resumes the AI conversation attached to them by session id.",
     keyStrength:
       "Modern UX, clean WASM plugin model, excellent defaults, discoverable status bar. Zellij users rarely need to read a manual.",
     keyGap:
-      "Zellij serializes a session to its cache folder by default, so a reboot gives you the shape back — tabs, panes, directories, and each pane's command waiting behind a “Press ENTER to run” prompt. It does not give you the work back: nothing is still running, scrollback is off unless you enabled it, and an AI session is just a command line to re-type. Quil restores the running workspace, and resumes the Claude Code or OpenCode conversation with its current session id.",
+      "Zellij serializes a session to its cache folder by default, so a reboot gives you the shape back — tabs, panes, directories, and each pane's command waiting behind a “Press ENTER to run” prompt. It does not give you the work back: nothing is still running, scrollback is off unless you enabled it, and an AI session is just a command line to re-type. Quil brings back the layout, the directories and the scrollback, and resumes the Claude Code, OpenCode or Codex conversation with its current session id. A plain shell pane returns as a fresh shell in its own directory — no multiplexer resumes an arbitrary foreground command.",
     migrationNote:
       "Zellij users will feel at home in Quil — both tools use Alt-based keys and avoid prefix chords by default. The main adjustment is Quil's typed panes (Terminal / AI / SSH / etc.), which Zellij doesn't have.",
     faq: [
@@ -364,31 +449,32 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
     description:
       "A Rust terminal multiplexer purpose-built for AI coding agents — 'the runtime your coding agents live on.' Single binary, its own PTY and VT engine, a socket API agents can drive, and a language-agnostic plugin system. Quil's closest philosophical twin.",
     positioning:
-      "herdr and Quil made almost the same bet: build your own multiplexer, keep it a single lightweight binary, and make it agent-aware. herdr is further ahead on agent breadth (20+ agents detected, with native integrations for most of them) and on scriptable plugins; Quil is further ahead on native Windows and on speaking MCP, the protocol AI assistants already understand. The honest read: herdr is the stronger Unix-first agent fleet manager today, Quil is the stronger Windows-native, MCP-native one.",
+      "herdr and Quil made almost the same bet: build your own multiplexer, keep it a single lightweight binary, and make it agent-aware. herdr is further ahead on agent breadth (24+ agents detected, one-command native integrations for 18 of them) and on scriptable plugins; Quil is further ahead on speaking MCP, the protocol AI assistants already understand, and on the Windows edges herdr still excludes. The honest read: herdr is the stronger Unix-first agent fleet manager today, Quil is the stronger MCP-native one.",
     keyStrength:
-      "Agent breadth and extensibility. Detects 20+ agents with screen-content heuristics, installs native integrations with one command, exposes a full socket API + CLI that agents and scripts can drive, and runs language-agnostic plugins with actions, event hooks, and a marketplace.",
+      "Agent breadth and extensibility. Detects 24+ agents from bundled TOML screen manifests that update themselves from herdr.dev, takes an authoritative state feed from installed lifecycle hooks where an agent offers one, installs those integrations with one command, exposes a full socket API + CLI with a subscribable event stream that agents and scripts can drive, and runs language-agnostic plugins with actions, event hooks and link handlers from a marketplace.",
     keyGap:
-      "Native Windows is still beta, there is no MCP server — herdr's own pitch is that agents talk to each other through it without one, so they drive it through a bespoke socket API and an installed skill instead of a protocol assistants already speak — and it has no pane-notes editor or per-pane memory reporting.",
+      "There is no first-party MCP server — herdr's own pitch is that agents talk to each other through it without one, so they drive it through a bespoke socket API and an installed skill instead of a protocol assistants already speak; the community has since wrapped that socket in third-party MCP bridges, which is a real answer but not one herdr ships or supports. On Windows — generally available now, no longer beta — it still has no live server handoff, no direct terminal attach and no clipboard image bridge in local native panes. It has no pane-notes editor and no per-pane memory reporting.",
     migrationNote:
-      "herdr uses a tmux-style prefix (Ctrl+B) where Quil uses direct Alt-based keys. Both keep agents alive on detach and restore AI sessions. If you're on Windows without WSL, Quil is the smoother path; if you drive many different agents from Unix and want to script the multiplexer from a shell, herdr is very strong.",
-    quilHeadline: "Native Windows. MCP-native. Notes + memory built in.",
+      "herdr uses a tmux-style prefix (Ctrl+B) where Quil uses direct Alt-based keys. Both keep agents alive on detach, restore AI sessions, and hold several machines in one window. Pick Quil if your assistant should drive the multiplexer over MCP with no glue, or if you work on Windows 10 and want bundled OpenConsole and clipboard image paste. Pick herdr if you drive many different agents, want a shell CLI and an event stream to script it from, or want plugins you can write in any language.",
+    quilHeadline: "MCP-native. Windows 10 handled properly. Notes + memory built in.",
     matrix: [
       { feature: "Own multiplexer + PTY (not a tmux wrapper)", quil: "yes", them: "yes" },
       { feature: "Survives a full host reboot", quil: "yes", them: "yes" },
       { feature: "AI session auto-resume", quil: "yes", them: "yes", note: "herdr restores native sessions for most of the agents it integrates with; Quil for Claude Code, OpenCode and Codex." },
-      { feature: "Native Windows (no WSL)", quil: "yes", them: "partial", note: "herdr's native Windows support is a ConPTY beta; Quil ships bundled ConPTY/OpenConsole and a Windows clipboard image-paste proxy." },
-      { feature: "MCP server for AI agents", quil: "yes", them: "no", note: "herdr exposes a bespoke socket API + an installed agent skill instead of the MCP protocol." },
+      { feature: "Native Windows (no WSL)", quil: "yes", them: "partial", note: "herdr calls native Windows generally available now — it is no longer a beta, and what is left is a list of named exclusions rather than a maturity gap: no direct terminal attach, no live server handoff, and no clipboard image bridge in local native panes. Quil's remaining edge is that last one — a Win32 DIB→PNG clipboard image-paste proxy — plus bundled OpenConsole so Windows 10's inbox conhost cannot mangle an agent's rendering. Neither tool lets a Windows machine act as a remote host others attach to." },
+      { feature: "MCP server for AI agents", quil: "yes", them: "no", note: "herdr ships no first-party MCP server — it exposes a bespoke newline-delimited JSON socket API plus a CLI and an installed agent skill instead. Third-party bridges that wrap that socket in MCP now exist, so an MCP client can reach herdr; they are community projects, versioned and supported separately from herdr itself." },
       { feature: "Pane notes editor", quil: "yes", them: "no" },
       { feature: "Per-pane memory reporting", quil: "yes", them: "no" },
-      { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes", note: "Quil pattern-matches idle only; herdr ships updatable detection manifests for every agent it lists." },
-      { feature: "Breadth of agents detected", quil: "partial", them: "yes", note: "Quil: 3 deep (Claude Code, OpenCode, Codex) + tools. herdr: 20+." },
+      { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes", note: "Quil pattern-matches idle only. herdr evaluates bundled TOML manifests against the live screen, the pane title and OSC progress sequences to classify idle / working / blocked, refreshes those manifests from herdr.dev without a new binary, and lets you override one locally — but adding a genuinely new agent still needs a herdr release, because process detection is compiled in." },
+      { feature: "Breadth of agents detected", quil: "partial", them: "yes", note: "Quil: 3 deep (Claude Code, OpenCode, Codex) + tools. herdr: 24+ detected, 18 with a one-command integration installer." },
+      { feature: "Subscribable event stream for scripts", quil: "partial", them: "yes", note: "herdr's socket API has events.subscribe — a long-lived push stream of workspace, tab, pane, layout and worktree lifecycle events. Quil's equivalent is narrower: watch_notifications blocks for sidebar-worthy events, and task delegation reports its own completion, but there is no general subscription to pane or layout changes." },
       { feature: "One-command agent integration installer", quil: "no", them: "yes" },
       { feature: "Git worktree-per-session", quil: "yes", them: "yes", note: "Quil opens a tab straight onto a new worktree — the pane is a placeholder with a spinner while git worktree add runs, so a slow monorepo checkout can never be mistaken for an agent started in the wrong tree — and closing that tab or pane offers to remove the worktree, naming what it holds and refusing to call a dirty one clean." },
       { feature: "Executable plugins (actions / event hooks / link handlers)", quil: "partial", them: "yes", note: "Quil plugins are declarative TOML pane types; herdr runs any-language plugins." },
       { feature: "Plugin marketplace", quil: "no", them: "yes" },
       { feature: "General CLI to script the multiplexer", quil: "no", them: "yes", note: "Quil scripts via MCP (for AI); herdr adds a shell CLI for humans." },
       { feature: "Remote SSH thin-client attach", quil: "yes", them: "yes", note: "`quil --remote <host>` since v1.44; opens no port, reconnects on its own after a dropped link, and installs itself on a bare server." },
-      { feature: "Several hosts in one window at once", quil: "yes", them: "no", note: "Since v1.47 a Quil client holds the local daemon and any number of remote ones together, each project tagged with the machine that owns it and each host with its own reconnect state. herdr's remote attach drives one server per client." },
+      { feature: "Several hosts in one window at once", quil: "yes", them: "yes", note: "Both do this now, and the shape is nearly identical: each machine keeps its own server, one client holds them all, and losing one host does not disconnect the others. Quil tags each project with the machine that owns it and gives each host its own reconnect state; herdr saves an SSH machine once and switches between it and Local in the sidebar, streaming pane screens only for the selected machine while the rest keep reporting workspace info, agent state and notifications." },
       { feature: "Named sessions / live server handoff", quil: "no", them: "yes" },
       { feature: "Sound + desktop notifications", quil: "partial", them: "yes", note: "Quil raises real Windows toasts when an agent parks on a prompt or finishes a turn, and clicking one routes you to the pane that sent it. Still missing: sound, and macOS/Linux — herdr does all three, and can hand the notification to the outer terminal as well as the OS." },
       { feature: "Themes with light/dark auto-switch", quil: "partial", them: "yes", note: "Quil ships no theme presets — it asks the terminal for its real foreground and background (OSC 10/11) and renders against those, so it follows your terminal instead of theming itself. herdr carries named themes and switches between a light and a dark one when the terminal reports the change." },
@@ -397,17 +483,17 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       {
         question: "Is herdr basically Quil in Rust?",
         answer:
-          "Architecturally they're remarkably close — both build their own multiplexer and PTY layer rather than wrapping tmux, both keep agents alive on detach, both restore AI sessions. The divergence is emphasis: herdr optimizes for agent breadth and shell scriptability on Unix; Quil optimizes for native Windows and for being an MCP server that AI assistants drive directly.",
+          "Architecturally they're remarkably close — both build their own multiplexer and PTY layer rather than wrapping tmux, both keep agents alive on detach, both restore AI sessions, and both now hold several machines in one client with per-host reconnect. The divergence is emphasis: herdr optimizes for agent breadth and for being scriptable from a shell; Quil optimizes for being an MCP server that AI assistants drive directly, with no bespoke API to teach them.",
       },
       {
         question: "Can herdr run on Windows without WSL?",
         answer:
-          "It has an experimental native Windows (ConPTY) beta, but several features are unsupported there. Quil treats Windows as a first-class target with bundled ConPTY/OpenConsole and a clipboard image-paste proxy.",
+          "Yes — herdr now calls native Windows generally available, so this is no longer the clear split it once was. What is still unsupported there is specific: no direct terminal attach, no live server handoff, and no clipboard image bridge in local native panes. Quil's edge is narrower than it used to be but concrete: bundled OpenConsole so Windows 10's inbox conhost cannot mangle an agent's output, and a Win32 clipboard image-paste proxy that gets screenshots into a Claude Code pane. To be straight about it, neither tool can use a Windows machine as a remote host you attach to from elsewhere.",
       },
       {
         question: "How do agents control each tool?",
         answer:
-          "herdr exposes a Unix-socket API plus a CLI, and ships an installable 'skill' so an agent learns to call it. Quil exposes 18 tools over the Model Context Protocol, which Claude Desktop, Cursor, and VS Code speak natively with no glue.",
+          "herdr exposes a Unix-socket API plus a CLI, and ships an installable 'skill' so an agent learns to call it. Quil exposes 35 tools for panes, projects, remote hosts and task delegation over the Model Context Protocol, which Claude Desktop, Cursor, and VS Code speak natively with no glue.",
       },
     ],
   },
@@ -442,7 +528,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       { feature: "Built-in diff viewer (review + edit)", quil: "no", them: "yes" },
       { feature: "Container sandboxing (Docker/Podman/Apple)", quil: "partial", them: "yes", note: "Quil sandboxes an AI pane in Docker — one container per pane, an image you build yourself, and the mount set as the whole boundary. Podman and Apple Containers are untested. AoE also offers shared auth volumes; Quil's sandbox panes are per-pane by default, because one shared agent config directory merges every sandbox pane into one trust domain." },
       { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes" },
-      { feature: "Breadth of agents supported", quil: "partial", them: "yes", note: "Quil: 2 deep + tools. AoE: ~13 terminal + 7 ACP." },
+      { feature: "Breadth of agents supported", quil: "partial", them: "yes", note: "Quil: 3 deep (Claude Code, OpenCode, Codex) + tools. AoE: ~13 terminal + 7 ACP." },
       { feature: "Session fork / import from disk", quil: "no", them: "yes" },
       { feature: "Sound + push notifications", quil: "partial", them: "yes", note: "Quil raises real Windows toasts when an agent parks on a prompt or finishes a turn, and clicking one routes you to the pane that sent it. Still missing: sound, macOS/Linux, and anything that reaches a phone — AoE's Web Push does, which is the point of its browser surface." },
       { feature: "Session lifecycle mgmt (auto-stop idle, groups, archive)", quil: "no", them: "yes" },
@@ -491,7 +577,8 @@ const compareNavOrder: Record<CompetitorInfo["slug"], number> = {
   tmux: 3,
   zellij: 4,
   wezterm: 5,
-  screen: 6,
+  ghostty: 6,
+  screen: 7,
 };
 
 /** Ordered `{ href, label }` pairs for every /vs/ page. Hrefs carry the

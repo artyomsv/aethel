@@ -5,194 +5,164 @@
 | Priority | 5 |
 | Effort | Medium |
 | Impact | Very High (differentiation) |
-| Status | Done |
-| Depends on | — |
+| Status | Done — expanded to 34 tools in v1.72.0 |
+| Depends on | Projects, remote daemon connections and agent hook events |
 
 ## Problem
 
-**Layer 5: Cross-tool blindness** — AI assistants can't see the build error in the next pane. Claude Code, VS Code Copilot, Cursor — they're all blind to what's happening in other terminal sessions. The AI fixes code but can't see that the build is still failing in another pane. The developer becomes a copy-paste bridge between tools.
+An AI assistant needs to see the test failure in another pane, find the project
+that owns it, and ask another agent to work on it. Without a workspace API, the
+developer copies output between sessions and polls for completion. Remote hosts
+make this harder: the relevant project may be on another machine.
 
-**No other terminal multiplexer offers this.** Quil becomes the **bridge between AI and the dev environment** — not just a container for AI sessions but an active collaborator.
+## Implemented solution
 
-## Implemented Solution
+`quil mcp` exposes 35 Model Context Protocol tools over stdio. An MCP-capable
+client can discover the workspace, create tabs and AI panes using the same
+validated options as the TUI, manage projects across configured remote hosts,
+and delegate work between panes with completion tracking and notify-back.
 
-Expose Quil as a [Model Context Protocol](https://modelcontextprotocol.io/) server so AI assistants can interact with the terminal environment:
+This PRD records the capability and its constraints. The [MCP guide](../mcp.md)
+is the reference for client configuration, input schemas, responses and examples.
 
-```
-AI: "Check the test output in the build pane and fix the failing test"
-→ MCP call: quil.read_pane_output(pane="build", last_lines=50)
-→ AI sees: "FAIL src/auth.test.ts - Expected 200, got 401"
-→ AI fixes the code
-→ MCP call: quil.send_to_pane(pane="build", input="npm test")
-```
+## Tools by purpose (35 total)
 
-### MCP Tools (13 total)
+### Discovery (6)
 
-**Phase A — Core Interaction:**
+Agents discover IDs and capabilities before acting; plugin availability and
+session occupancy come from the daemon that will perform the action.
 
-| Tool | Description |
-|------|-------------|
-| `list_panes` | Enumerate all panes with types, names, CWDs |
-| `read_pane_output` | Read last N lines from ring buffer (ANSI-stripped) |
-| `send_to_pane` | Send text/commands to a pane (appends newline by default) |
-| `get_pane_status` | Process running/exited, exit code, type, CWD |
-| `create_pane` | Create new pane with plugin type |
+| Tool | Purpose |
+|------|---------|
+| `list_panes` | Find panes, their projects, hosts and known agent work state |
+| `list_tabs` | Find tabs, optionally within a project |
+| `list_projects` | Discover project roots and tab membership |
+| `list_hosts` | Inspect remote connection status, version and errors |
+| `list_plugins` | Discover available pane types, toggles and sandbox support |
+| `list_sessions` | Find Claude Code sessions for a directory and their occupancy |
 
-**Phase B — Navigation & Lifecycle:**
+### Inspection (3)
 
-| Tool | Description |
-|------|-------------|
-| `send_keys` | Named key sequences (arrows, F-keys, ctrl+a-z) with pacing |
-| `restart_pane` | Kill + respawn with same plugin/CWD/args |
-| `screenshot_pane` | VT-emulated text screenshot of actual screen state |
-| `switch_tab` | Switch active tab |
-| `list_tabs` | List tabs with pane counts |
-| `destroy_pane` | Remove pane (auto-creates replacement if last) |
-| `set_active_pane` | Focus pane in TUI (cross-tab) |
-| `close_tui` | Exit TUI, daemon persists |
+| Tool | Purpose |
+|------|---------|
+| `read_pane_output` | Read ANSI-stripped recent output |
+| `screenshot_pane` | Inspect the terminal screen as VT-emulated text |
+| `get_pane_status` | Check process state, exit code and worktree preparation |
 
-## Architecture: `quil mcp` Subcommand (Not a Separate Process)
+### Interaction (2)
 
-The MCP server should be a **new subcommand** (`quil mcp`) that acts as a thin bridge — exactly like the TUI client is a bridge between Bubble Tea and the daemon:
+| Tool | Purpose |
+|------|---------|
+| `send_to_pane` | Queue text or a bracketed paste, optionally pressing Enter |
+| `send_keys` | Navigate interactive programs with named keys and pacing |
 
-```
-┌──────────────┐    ┌───────────────┐    ┌──────────────┐
-│ AI Tool       │    │ quil mcp    │    │ quild      │
-│ (Claude, etc) │←──→│ (MCP↔IPC      │←──→│ (daemon)     │
-│               │stdio│  bridge)     │sock │              │
-│ JSON-RPC      │    │ Translates    │    │ Ring buffers  │
-│               │    │ MCP ↔ IPC msgs│    │ PTY sessions  │
-│               │    │               │    │ Plugins       │
-└──────────────┘    └───────────────┘    └──────────────┘
-```
+### Pane lifecycle (4)
 
-### Why not directly in the daemon?
+| Tool | Purpose |
+|------|---------|
+| `create_pane` | Create a pane with named toggles, session resume, worktree or sandbox options |
+| `rename_pane` | Label a pane |
+| `restart_pane` | Restart the child with the pane's configuration and dimensions |
+| `destroy_pane` | Remove a pane, preserving the last-pane replacement behavior |
 
-MCP servers are invoked by the AI tool as a child process via stdio. Claude Desktop, VS Code, Cursor — they all spawn `quil mcp` and talk JSON-RPC over stdin/stdout. The daemon is a long-running background service over sockets — fundamentally different lifecycle.
+### Projects and tabs (8)
 
-### Why not a separate binary?
+Projects let an orchestrator group related workers and keep their working
+directories explicit. Creating a tab does not take the user's focus.
 
-All data lives in the daemon — ring buffers, session state, PTY handles, plugin registry. A separate binary would need its own IPC connection, which is exactly what `quil mcp` already is. A third binary fragments the project for no gain.
+| Tool | Purpose |
+|------|---------|
+| `create_project` | Create a project with a root directory and initial shell tab |
+| `update_project` | Rename a project or change its root |
+| `switch_project` | Show the project's last active tab |
+| `destroy_project` | Remove the project and its tabs and panes |
+| `create_tab` | Create a tab with a configurable first pane |
+| `rename_tab` | Label a tab |
+| `switch_tab` | Show a tab |
+| `destroy_tab` | Remove a tab, retaining a shell tab when its project becomes empty |
 
-### Why `quil mcp` is the right design
+### Task delegation and flow reporting (5)
 
-| Concern | How it's handled |
-|---------|-----------------|
-| Data access | Connects to daemon via existing IPC socket — same as TUI client |
-| Lifecycle | AI tool spawns/kills it — no new daemon management needed |
-| Protocol | Translates MCP JSON-RPC (stdio) ↔ length-prefixed JSON (IPC) |
-| New daemon messages | 2-3 new IPC message types: `ReadPaneOutput`, `ListPanesDetailed`, `PaneStatus` |
-| Deployment | Already in the `quil` binary — zero extra install steps |
-| Existing state | Ring buffers already have `Bytes()` for output replay — MCP just reads them |
+| Tool | Purpose |
+|------|---------|
+| `delegate_task` | Deliver a prompt to a target pane and track its outcome |
+| `get_task` | Read one task's status |
+| `wait_task` | Wait for completion or a bounded timeout |
+| `list_tasks` | List the daemon's retained tasks |
+| `report_step` | Report a structured result for the caller's current flow step |
 
-## Technical Implementation
+An AI task finishes when the target's hook-derived work state settles idle,
+including subagent activity; a raw Stop event alone is insufficient. A terminal
+task finishes on shell command completion. Notify-back waits until the requester
+can receive input and is limited to panes on the same daemon. Tasks are bounded
+and runtime-only. See [task delegation](../mcp.md#delegating-work-to-another-pane).
 
-### 1. IPC Protocol Extension
+Flow steps require a structured report as well as settled idle. Role panes use
+a restricted bridge with `report_step` and caller-local `get_task`; see
+[agent flows](../agent-flows.md) for configuration and the adapter limits.
 
-Added `ID` field to `ipc.Message` (omitempty, backward compatible) for request-response correlation.
+### TUI cooperation (2)
 
-4 new request-response message pairs:
+| Tool | Purpose |
+|------|---------|
+| `set_active_pane` | Focus a pane, including across tabs |
+| `close_tui` | Close the frontend while the daemon and panes remain alive |
 
-| Request | Response | Purpose |
-|---------|----------|---------|
-| `list_panes_req` | `list_panes_resp` | Enumerate panes with metadata |
-| `read_pane_output_req` | `read_pane_output_resp` | Read ANSI-stripped text from ring buffer |
-| `pane_status_req` | `pane_status_resp` | Process running/exited state, exit code |
-| `create_pane_req` | `create_pane_resp` | Create pane, return new ID |
+### Event observation (3)
 
-### 2. Process Exit Tracking
+| Tool | Purpose |
+|------|---------|
+| `get_notifications` | Read queued workspace events |
+| `watch_notifications` | Wait for an event, including agent-idle and task completion |
+| `dismiss_notifications` | Acknowledge events |
 
-Added `WaitExit() int` to `pty.Session` interface. `Pane.ExitCode` and `Pane.ExitedAt` captured at end of `streamPTYOutput()`. Unix: `cmd.Wait()` + `ProcessState.ExitCode()`. Windows: `WaitForSingleObject` + `GetExitCodeProcess`.
+### Memory reporting (2)
 
-### 3. MCP SDK
+| Tool | Purpose |
+|------|---------|
+| `get_memory_report` | Inspect workspace and per-tab memory use |
+| `get_pane_memory` | Inspect one pane's memory breakdown |
 
-Official `github.com/modelcontextprotocol/go-sdk` (v1.4+). Typed tool handlers with struct-based input schemas (`jsonschema` tags). `StdioTransport` for JSON-RPC 2.0 over stdin/stdout.
+## Architecture and behavior
 
-### 4. AI Tool Configuration
+The AI client spawns `quil mcp` as a child process. The bridge translates MCP
+JSON-RPC on stdio into the daemon's length-prefixed IPC protocol; `Message.ID`
+correlates requests and replies. PTYs, buffers, project state and task tracking
+remain in the daemon. This keeps the MCP process independent of the TUI's
+lifetime and requires no extra installed binary.
 
-```json
-// claude_desktop_config.json or VS Code MCP settings
-{
-  "mcpServers": {
-    "quil": {
-      "command": "quil",
-      "args": ["mcp"]
-    }
-  }
-}
-```
+The bridge connects to its local daemon and dials configured `[[destinations]]`
+over SSH in the background. An explicit host wins, then a cached pane/tab/project
+ID determines the host, then the local daemon is the fallback. Unscoped lists
+aggregate connected hosts; named-host failures are errors. A failed remote does
+not hide other hosts' results, and `list_hosts` exposes its error. Unscoped lists
+and status reads schedule retries after the 30-second backoff without waiting
+for the dial. Successful reconnection clears stale errors.
 
-The daemon doesn't even need to know MCP exists — it just sees another client connecting to the socket.
+The daemon validates create options before mutation: named toggles cannot clash,
+worktrees must resolve to a repository, and rejected sandbox options cannot
+silently create an unsandboxed pane. New panes start with known dimensions when
+available. Restarted PTY output identifies its run so attached TUIs reset the
+old terminal state and discard late output from the replaced process.
 
-### 5. Phase B: Navigation & Lifecycle Tools (8 additional tools)
+## Safety and visibility
 
-| Tool | Description |
-|------|-------------|
-| `send_keys` | Named key sequences (arrows, F-keys, ctrl+a-z) with 50ms pacing between escape sequences |
-| `restart_pane` | Kill PTY + respawn with same plugin/CWD/args; uses pane's last known dimensions |
-| `screenshot_pane` | VT-emulated text screenshot via `charmbracelet/x/vt`; shows actual screen state |
-| `switch_tab` | Switch active tab by ID |
-| `list_tabs` | List all tabs with pane counts and active status |
-| `destroy_pane` | Remove pane; auto-creates replacement if last in tab |
-| `set_active_pane` | TUI cooperation: broadcasts to TUI to switch focus (cross-tab) |
-| `close_tui` | TUI cooperation: broadcasts quit signal; daemon stays running |
+- Input tools acknowledge queue acceptance or report why input could not be queued.
+- Destructive tools document user confirmation before removing or restarting panes.
+- Per-pane interaction logs redact explicit secret markers and common secret patterns.
+- MCP control highlights the affected pane and emits visible activity events.
+- Version checks refuse newer requests against daemons that cannot understand them.
+- Per-project MCP authorization/scoping remains deferred; project filters and
+  multi-host routing are discovery and addressing features, not access boundaries.
 
-### 6. MCP Interaction Logging & Redaction
+## Acceptance
 
-Per-pane log files in `~/.quil/mcp-logs/`. Two-layer redaction:
-- **Layer 1 (AI markers):** `<<REDACT>>value<</REDACT>>` — stripped before PTY, counted in log
-- **Layer 2 (regex fallback):** Common patterns (OpenAI keys, GitHub PATs, JWTs, passwords, BIP-32 keys) caught automatically
+- MCP clients can connect through stdio and discover all 35 registered tools.
+- Agents can manage projects, tabs and panes on local and configured remote daemons.
+- Unscoped discovery recovers hosts after the retry backoff without a named call.
+- Pane creation honors TUI-equivalent options and reports validation or spawn errors.
+- Delegated tasks expose completion/failure and notify the requester when appropriate.
+- Event watching, memory reporting, redaction and TUI cooperation remain available.
 
-MCP server `Instructions` field guides AI on tool usage and redaction marker protocol.
-
-### 7. Visual Feedback
-
-Orange pane border highlight (ANSI color 208) when MCP interacts with a pane. Duration configurable via `[mcp] highlight_duration` (default 10s, max 60s). Timer resets on rapid interactions.
-
-### 8. Files
-
-| File | Change |
-|------|--------|
-| `cmd/quil/mcp.go` | New — MCP bridge: daemon connection, request-response, server instructions |
-| `cmd/quil/mcp_tools.go` | New — 13 tool implementations with typed input structs |
-| `cmd/quil/mcp_keys.go` | New — Key name → escape sequence map (50+ keys) |
-| `cmd/quil/mcp_log.go` | New — Per-pane logging, redaction markers, regex fallback |
-| `internal/ipc/protocol.go` | Add `ID` field, 27 new message types + payload structs |
-| `internal/daemon/daemon.go` | 10 new handlers, `respondTo()`, `highlightPane()`, exit code capture |
-| `internal/daemon/session.go` | Add `ExitCode`, `ExitedAt`, `Cols`, `Rows` to Pane struct |
-| `internal/config/config.go` | Add `MCPConfig` with `HighlightDuration`, `LogDir` |
-| `internal/pty/session.go` | Add `WaitExit() int` to Session interface |
-| `internal/pty/session_unix.go` | Implement `WaitExit()` with `sync.Once` |
-| `internal/pty/session_windows.go` | Implement `WaitExit()` with `sync.Once`, `windows.Handle` |
-| `internal/tui/model.go` | Handle `MsgHighlightPane`, `MsgSetActivePane`, `MsgCloseTUI` |
-| `internal/tui/pane.go` | Orange border when `mcpHighlight` flag set |
-| `internal/tui/styles.go` | `mcpHighlightBorder` style (color 208) |
-| `cmd/quil/main.go` | Add `mcp` subcommand routing, extract daemon retry constants |
-
-## Success Criteria
-
-- [x] `quil mcp` starts and speaks MCP JSON-RPC over stdio
-- [x] Claude Desktop / Claude Code can connect via `.mcp.json` config
-- [x] `list_panes` returns all panes with metadata
-- [x] `read_pane_output` returns last N lines from any pane (ANSI-stripped)
-- [x] `send_to_pane` sends input to a pane's PTY
-- [x] `get_pane_status` returns process state and exit code
-- [x] `create_pane` creates new panes with plugin type support
-- [x] `send_keys` navigates interactive TUI menus (paced escape sequences)
-- [x] `screenshot_pane` shows VT-emulated screen state
-- [x] `restart_pane` kills and respawns with same config
-- [x] `set_active_pane` switches TUI focus (cross-tab)
-- [x] `close_tui` exits TUI while daemon persists
-- [x] Orange border highlights pane during MCP interaction
-- [x] Per-pane MCP logs with redaction (no secrets on disk)
-- [x] AI can communicate with Claude Code in another pane (tested end-to-end)
-
-## Resolved Questions
-
-- **ANSI stripping** — `read_pane_output` returns stripped text via `charmbracelet/x/ansi.Strip()`. Raw output deferred.
-- **Rate limiting** — Deferred. AI tools self-regulate via conversation flow. `send_keys` capped at 1000 keys.
-- **Workspace definitions** — Deferred to M9 (workspace files).
-- **MCP resources** — Deferred. Tools sufficient for v1. Event subscriptions planned for M12 integration.
-- **Key pacing** — Escape sequences sent individually with 50ms delays. Plain text batched. Solved interactive TUI menu navigation.
-- **Screenshot dimensions** — Uses pane's last known `Cols`/`Rows` from resize events. Capped at 500x200.
-- **Sensitive data** — Two-layer redaction (AI markers + regex). Logs only metadata (byte counts, line counts). Verified no secrets in daemon/TUI/MCP logs.
+The [user guide](../mcp.md) provides the detailed tool contract; the runtime
+registrations in `cmd/quil/mcp_tools*.go` are the source of truth for tool names.
