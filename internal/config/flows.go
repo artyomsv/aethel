@@ -18,11 +18,22 @@ import (
 var defaultFlows string
 
 type FlowRole struct {
-	Agent     string   `toml:"agent" json:"agent"`
-	Toggles   []string `toml:"toggles" json:"toggles"`
-	Prompt    string   `toml:"prompt" json:"prompt"`
-	FixPrompt string   `toml:"fix_prompt,omitempty" json:"fix_prompt,omitempty"`
+	Agent   string   `toml:"agent" json:"agent"`
+	Toggles []string `toml:"toggles" json:"toggles"`
+	// Model is passed to the agent's own model flag at spawn (--model for
+	// Claude Code and OpenCode, -m for Codex). Empty keeps the agent's
+	// default. Quil validates the charset only; which ids exist is the
+	// agent's business and a wrong one fails loudly in the pane.
+	Model     string `toml:"model,omitempty" json:"model,omitempty"`
+	Prompt    string `toml:"prompt" json:"prompt"`
+	FixPrompt string `toml:"fix_prompt,omitempty" json:"fix_prompt,omitempty"`
 }
+
+// flowModelShape bounds a model id to what every supported agent accepts on
+// its command line: OpenCode ids carry a provider prefix (anthropic/claude-…),
+// Claude aliases carry dots and hyphens (claude-3.5-…), and nothing legitimate
+// starts with "-", which is what keeps the value from reading as a flag.
+var flowModelShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$`)
 
 type Flows struct {
 	MaxReviewRounds    int                    `toml:"max_review_rounds" json:"max_review_rounds"`
@@ -79,6 +90,9 @@ func (f Flows) Validate() error {
 		}
 		if strings.TrimSpace(r.Agent) == "" {
 			return fmt.Errorf("%s agent is empty", role)
+		}
+		if r.Model != "" && !flowModelShape.MatchString(r.Model) {
+			return fmt.Errorf("%s model %q is not a valid model id", role, r.Model)
 		}
 	}
 	return nil
@@ -149,14 +163,14 @@ func (cfg Flows) Prompt(f flow.Flow) string {
 func (f Flows) Wire() ipc.FlowConfig {
 	out := ipc.FlowConfig{MaxReviewRounds: f.MaxReviewRounds, StepTimeoutMinutes: f.StepTimeoutMinutes, Roles: make(map[flow.Role]ipc.FlowRoleConfig, len(f.Roles))}
 	for role, r := range f.Roles {
-		out.Roles[role] = ipc.FlowRoleConfig{Agent: r.Agent, Toggles: append([]string(nil), r.Toggles...), Prompt: r.Prompt, FixPrompt: r.FixPrompt}
+		out.Roles[role] = ipc.FlowRoleConfig{Agent: r.Agent, Toggles: append([]string(nil), r.Toggles...), Model: r.Model, Prompt: r.Prompt, FixPrompt: r.FixPrompt}
 	}
 	return out
 }
 func FlowsFromWire(f ipc.FlowConfig) Flows {
 	out := Flows{MaxReviewRounds: f.MaxReviewRounds, StepTimeoutMinutes: f.StepTimeoutMinutes, Roles: make(map[flow.Role]FlowRole, len(f.Roles))}
 	for role, r := range f.Roles {
-		out.Roles[role] = FlowRole{Agent: r.Agent, Toggles: append([]string(nil), r.Toggles...), Prompt: r.Prompt, FixPrompt: r.FixPrompt}
+		out.Roles[role] = FlowRole{Agent: r.Agent, Toggles: append([]string(nil), r.Toggles...), Model: r.Model, Prompt: r.Prompt, FixPrompt: r.FixPrompt}
 	}
 	return out
 }

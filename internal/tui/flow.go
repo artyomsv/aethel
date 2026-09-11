@@ -17,16 +17,21 @@ import (
 type flowDialogState struct {
 	dest, projectID, projectName string
 	branch, feature              string
-	editor                       *TextEditor
-	editRole                     flow.Role
-	editFix                      bool
-	row                          int
-	cfg                          config.Flows
-	plugins                      []ipc.PluginCatalogEntry
-	requestID                    string
-	pending                      bool
-	err                          string
-	focusTab                     string
+	// cwd is the repository the flow works in, typed or picked. repos is the
+	// daemon's git discovery near the project root, offered on the same row
+	// with ←/→; a scan that fails or is slow leaves the typed path alone.
+	cwd       string
+	repos     []string
+	editor    *TextEditor
+	editRole  flow.Role
+	editFix   bool
+	row       int
+	cfg       config.Flows
+	plugins   []ipc.PluginCatalogEntry
+	requestID string
+	pending   bool
+	err       string
+	focusTab  string
 }
 
 type flowReplyMsg struct{ msg *ipc.Message }
@@ -52,6 +57,43 @@ func (m Model) paneFlow(id string) *flow.Flow {
 		}
 	}
 	return nil
+}
+
+// flowPaneRoles maps every role pane in a workspace broadcast to its role, so
+// the layout code can place the panes the daemon created for a flow.
+func flowPaneRoles(state WorkspaceStateMsg) map[string]flow.Role {
+	out := make(map[string]flow.Role)
+	for _, f := range state.Flows {
+		for role, id := range f.Panes {
+			if id != "" {
+				out[id] = role
+			}
+		}
+	}
+	return out
+}
+
+// splitForNewPane places a pane the daemon created into an existing tree.
+//
+// An ordinary pane stacks below the first leaf, as it always has. A flow's
+// role panes arrive two at a time after the analyst's worktree is ready, and
+// stacking them gave three full-width rows nobody can read a diff in. They
+// go analyst | (developer / reviewer): the second pane splits the only leaf
+// side by side, and every later one splits the LAST leaf top/bottom, so the
+// left column keeps its height and the right column grows downward. The
+// user can still drag the borders afterwards.
+func splitForNewPane(tab *TabModel, leaves []*PaneModel, pane *PaneModel, role flow.Role) {
+	target, dir := leaves[0].ID, SplitVertical
+	if role != "" {
+		if len(leaves) == 1 {
+			dir = SplitHorizontal
+		} else {
+			target = leaves[len(leaves)-1].ID
+		}
+	}
+	tab.Root.SplitLeaf(target, dir)
+	tab.Root.FillPlaceholder(pane)
+	tab.invalidateLeaves()
 }
 
 func flowTabLabel(tab *TabModel) string {
@@ -182,11 +224,52 @@ func newFlowEditor(text string, width, height int) *TextEditor {
 func (m Model) openNewFlow() (tea.Model, tea.Cmd) {
 	f := flowDialogState{dest: m.activeDest(), branch: "feat/feature"}
 	if p := m.activeProjectModel(); p != nil {
-		f.projectID, f.projectName = p.ID, p.Name
+		f.projectID, f.projectName, f.cwd = p.ID, p.Name, p.RootDir
 	}
 	f.editor = newFlowEditor("", dialogWidth, m.height)
 	m.flowUI, m.dialog = f, dialogNewFlow
-	return m, tea.ClearScreen
+	// Ask the daemon, not the local disk, which repositories sit near the
+	// project root: the daemon holds the disk the flow will run on.
+	var scan tea.Cmd
+	if m.client != nil && f.cwd != "" {
+		scan = m.requestGitRepos(f.cwd, "", repoScanFlow, "")
+	}
+	return m, tea.Batch(tea.ClearScreen, scan)
+}
+
+// applyGitReposFlow files the discovered repositories on the open New flow
+// dialog. The typed path is never replaced: the list is an offer on the same
+// row, and a scan answering after the user typed a path must not undo it.
+func (m *Model) applyGitReposFlow(repos []string) tea.Cmd {
+	if m.dialog != dialogNewFlow {
+		return nil
+	}
+	m.flowUI.repos = repos
+	return nil
+}
+
+// flowCycleRepo moves the repository row through the discovered list. A typed
+// path that is not in the list starts from its head.
+func (f *flowDialogState) flowCycleRepo(delta int) {
+	if len(f.repos) == 0 {
+		return
+	}
+	idx := -1
+	for i, r := range f.repos {
+		if r == f.cwd {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		idx = 0
+		if delta < 0 {
+			idx = len(f.repos) - 1
+		}
+	} else {
+		idx = (idx + delta + len(f.repos)) % len(f.repos)
+	}
+	f.cwd = f.repos[idx]
 }
 
 func (m Model) openFlowSettings() (tea.Model, tea.Cmd) {
@@ -313,7 +396,7 @@ type flowSettingRow struct {
 func (m Model) flowSettingRows() []flowSettingRow {
 	rows := []flowSettingRow{{label: "Max review rounds", kind: "rounds"}, {label: "Step timeout (minutes)", kind: "timeout"}}
 	for _, role := range flow.Roles {
-		rows = append(rows, flowSettingRow{label: string(role) + " agent", kind: "agent", role: role}, flowSettingRow{label: string(role) + " prompt", kind: "prompt", role: role})
+		rows = append(rows, flowSettingRow{label: string(role) + " agent", kind: "agent", role: role}, flowSettingRow{label: string(role) + " model", kind: "model", role: role}, flowSettingRow{label: string(role) + " prompt", kind: "prompt", role: role})
 		if role == flow.Developer {
 			rows = append(rows, flowSettingRow{label: "developer fix prompt", kind: "fix", role: role})
 		}
@@ -361,25 +444,44 @@ func (m Model) handleFlowDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				f.err = "Enter a feature request."
 				return m, nil
 			}
-			cmd := m.sendFlowRequest(ipc.MsgStartFlowReq, ipc.StartFlowReqPayload{Feature: f.feature, Branch: f.branch, ProjectID: f.projectID})
+			// An empty repository row means the project root; the daemon
+			// resolves that itself, so nothing is guessed on this side.
+			cmd := m.sendFlowRequest(ipc.MsgStartFlowReq, ipc.StartFlowReqPayload{Feature: f.feature, Branch: f.branch, ProjectID: f.projectID, CWD: strings.TrimSpace(f.cwd)})
 			return m, cmd
 		}
+		// Rows: 0 feature, 1 branch, 2 repository.
 		if key == "tab" || key == "shift+tab" {
 			if f.editor != nil && f.row == 0 && (f.branch == "feat/feature" || f.branch == flowBranch(f.feature)) {
 				f.branch = flowBranch(f.editor.Content())
 				f.feature = f.editor.Content()
 			}
-			f.row = 1 - f.row
+			if key == "tab" {
+				f.row = (f.row + 1) % 3
+			} else {
+				f.row = (f.row + 2) % 3
+			}
 			return m, nil
 		}
-		if f.row == 1 {
+		if f.row == 2 && (key == "left" || key == "right") {
+			delta := 1
+			if key == "left" {
+				delta = -1
+			}
+			f.flowCycleRepo(delta)
+			return m, nil
+		}
+		if f.row == 1 || f.row == 2 {
+			field := &f.branch
+			if f.row == 2 {
+				field = &f.cwd
+			}
 			if key == "backspace" {
-				r := []rune(f.branch)
+				r := []rune(*field)
 				if len(r) > 0 {
-					f.branch = string(r[:len(r)-1])
+					*field = string(r[:len(r)-1])
 				}
 			} else if len([]rune(key)) == 1 {
-				f.branch += key
+				*field += key
 			}
 			return m, nil
 		}
@@ -409,11 +511,30 @@ func (m Model) handleFlowDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	rows := m.flowSettingRows()
 	f.row = max(0, min(f.row, len(rows)-1))
-	if key == "up" || key == "k" {
+	// The model row is typed, not cycled: Quil does not know which ids an
+	// agent accepts, so there is nothing to cycle through. Letters go into
+	// the id here, so the j/k navigation aliases apply on every other row.
+	onModel := rows[f.row].kind == "model"
+	if onModel && key != "up" && key != "down" {
+		row := rows[f.row]
+		r := f.cfg.Roles[row.role]
+		if key == "backspace" {
+			if runes := []rune(r.Model); len(runes) > 0 {
+				r.Model = string(runes[:len(runes)-1])
+			}
+		} else if len([]rune(key)) == 1 && key != " " {
+			r.Model += key
+		} else {
+			return m, nil
+		}
+		f.cfg.Roles[row.role] = r
+		return m, nil
+	}
+	if key == "up" || (key == "k" && !onModel) {
 		f.row = max(0, f.row-1)
 		return m, nil
 	}
-	if key == "down" || key == "j" {
+	if key == "down" || (key == "j" && !onModel) {
 		f.row = min(len(rows)-1, f.row+1)
 		return m, nil
 	}
@@ -562,6 +683,11 @@ func (m Model) renderFlowDialog() string {
 				value = strconv.Itoa(f.cfg.StepTimeoutMinutes)
 			case "agent":
 				value = f.cfg.Roles[r.role].Agent
+			case "model":
+				value = f.cfg.Roles[r.role].Model
+				if value == "" {
+					value = "(agent default — type an id)"
+				}
 			case "toggle":
 				value = "off"
 				for _, t := range f.cfg.Roles[r.role].Toggles {
@@ -592,9 +718,21 @@ func (m Model) renderFlowDialog() string {
 		}
 	}
 	if m.dialog == dialogNewFlow {
-		b.WriteString("Branch: " + sanitizeRemoteText(f.branch) + "\nTab: feature / branch · Ctrl+S: start · Esc: cancel")
+		mark := func(row int) string {
+			if f.row == row {
+				return "> "
+			}
+			return "  "
+		}
+		repoHint := ""
+		if n := len(f.repos); n > 0 {
+			repoHint = fmt.Sprintf("  (←→ pick from %d found)", n)
+		}
+		b.WriteString(mark(1) + "Branch: " + sanitizeRemoteText(f.branch) + "\n")
+		b.WriteString(mark(2) + "Repository: " + sanitizeRemoteText(f.cwd) + repoHint + "\n")
+		b.WriteString("Tab: feature / branch / repository · Ctrl+S: start · Esc: cancel")
 	} else {
-		b.WriteString("↑↓: select · Enter/←→: edit · Ctrl+S: save · Esc: back")
+		b.WriteString("↑↓: select · Enter/←→: edit · type on a model row · Ctrl+S: save · Esc: back")
 	}
 	return b.String()
 }

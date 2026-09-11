@@ -5663,6 +5663,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 // Returns the project's tabs, the pane IDs it created (the caller arms a
 // spinner per ID) and the overlay resize commands the caller must batch.
 func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingTabs map[string]*TabModel, existingPanes map[string]*PaneModel, paneMap map[string]*PaneInfo, dest string) ([]*TabModel, []string, []tea.Cmd) {
+	flowRoleOf := flowPaneRoles(state)
 	var newPaneIDs []string
 	var overlayResizeCmds []tea.Cmd
 
@@ -5692,7 +5693,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
-				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
+				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes, flowRoleOf)
 				tab.Dest = dest
 				// All non-overlay panes in a restored tab are new.
 				for _, pid := range tabInfo.Panes {
@@ -5872,10 +5873,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
 			} else {
-				// Split the root vertically (stacked) to accommodate the new pane.
-				tab.Root.SplitLeaf(leaves[0].ID, SplitVertical)
-				tab.Root.FillPlaceholder(pane)
-				tab.invalidateLeaves()
+				splitForNewPane(tab, leaves, pane, flowRoleOf[pane.ID])
 			}
 		}
 
@@ -5925,7 +5923,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
-func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel) *TabModel {
+func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel, flowRoleOf map[string]flow.Role) *TabModel {
 	log.Printf("restoreLayout: tab %s %q with %d panes", tab.ID, tabInfo.Name, len(tabInfo.Panes))
 	tab.Name = tabInfo.Name
 	tab.Color = tabInfo.Color
@@ -5977,11 +5975,10 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 		pane := paneModels[paneID]
 		if tab.Root == nil {
 			tab.Root = NewLeaf(pane)
+			tab.invalidateLeaves()
 		} else {
-			tab.Root.SplitLeaf(tab.Leaves()[0].ID, SplitVertical)
-			tab.Root.FillPlaceholder(pane)
+			splitForNewPane(tab, tab.Leaves(), pane, flowRoleOf[pane.ID])
 		}
-		tab.invalidateLeaves()
 	}
 
 	m.finalizeTabPanes(tab)

@@ -145,6 +145,20 @@ func (d *Daemon) startFlow(req ipc.StartFlowReqPayload) (ipc.StartFlowRespPayloa
 	if req.ProjectID != "" && !d.projectExists(req.ProjectID) {
 		return fail(fmt.Errorf("no such project: %s", req.ProjectID))
 	}
+	// The repository is chosen by the user, so a directory that cannot be
+	// used is REFUSED rather than replaced by the project root the way
+	// resolveRequestedCWD does for an ordinary pane: a flow silently started
+	// in another repository makes a branch and a PR in the wrong place.
+	repoDir := d.projectCWD(req.ProjectID)
+	if req.CWD != "" {
+		if flow.UnsafePromptText(req.CWD) {
+			return fail(fmt.Errorf("repository path contains control characters"))
+		}
+		repoDir = resolveSpawnDirWithin(req.CWD, spawnDirProbeTimeout)
+		if repoDir == "" {
+			return fail(fmt.Errorf("repository directory is missing, not a directory, or did not answer: %s", req.CWD))
+		}
+	}
 	cfg, err := d.flowsConfig()
 	if err != nil {
 		return fail(err)
@@ -160,7 +174,7 @@ func (d *Daemon) startFlow(req ipc.StartFlowReqPayload) (ipc.StartFlowRespPayloa
 		if role == flow.Analyst {
 			branch = req.Branch
 		}
-		p, dir, err := d.buildCreatePayload(ipc.CreatePaneReqPayload{Type: r.Agent, Toggles: r.Toggles, WorktreeBranch: branch}, "", d.projectCWD(req.ProjectID))
+		p, dir, err := d.buildCreatePayload(ipc.CreatePaneReqPayload{Type: r.Agent, Toggles: r.Toggles, WorktreeBranch: branch}, "", repoDir)
 		if err != nil {
 			return fail(err)
 		}

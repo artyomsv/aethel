@@ -1,10 +1,16 @@
 # Agent flows
 
 Open the command palette and choose **New flow**. Enter the feature request,
-press Tab to edit the suggested `feat/<slug>` branch, and press Ctrl+S to start.
-Quil creates a worktree tab in the active project with analyst, developer, and
-reviewer panes. The new tab becomes active in the client that requested it.
-Other clients keep their focus. The destination is fixed when the dialog opens.
+press Tab to edit the suggested `feat/<slug>` branch, press Tab again to pick
+the **repository**, and press Ctrl+S to start. The repository row starts at the
+active project's root; ←/→ cycle through the git repositories the daemon
+found near it, or type any path. A path that does not exist is refused before
+anything is created, because a flow in the wrong repository is a branch and a
+PR in the wrong place. Quil then creates a worktree tab in the active project
+with analyst, developer, and reviewer panes, laid out analyst on the left and
+developer over reviewer on the right; drag the borders to change it. The new
+tab becomes active in the client that requested it. Other clients keep their
+focus. The destination is fixed when the dialog opens.
 
 The analyst plans the whole epic and files its tickets; the developer implements
 it on one branch and opens one PR; the reviewer reviews that PR. Changes go back
@@ -27,10 +33,15 @@ pane cannot be repaired by the flow; close its tab and start another flow.
 ## Configuration
 
 **F1 → Settings → Flows** edits the selected daemon's `$QUIL_HOME/flows.toml`.
-Choose each role's available AI plugin, named toggles, task prompt, developer fix
-prompt, maximum review rounds, and step timeout in minutes. Arrow keys select
-rows; Enter edits a prompt or cycles an option; Ctrl+S saves a prompt back to the
-settings page, and Ctrl+S there saves the file atomically and reloads the daemon.
+Choose each role's available AI plugin, model, named toggles, task prompt,
+developer fix prompt, maximum review rounds, and step timeout in minutes. Arrow
+keys select rows; Enter edits a prompt or cycles an option; on a model row you
+type the id (`claude-opus-5`, `gpt-5-codex`, `anthropic/claude-sonnet-5`) and an
+empty row keeps the agent's default. The model reaches the agent's own flag at
+spawn (`--model` for Claude Code and OpenCode, `-m` for Codex); Quil checks the
+charset only, so an id the agent does not know fails in that pane. Ctrl+S saves a
+prompt back to the settings page, and Ctrl+S there saves the file atomically
+and reloads the daemon.
 Unknown `{{placeholders}}` are retained and flagged in the prompt editor.
 Prompts cannot be empty. Changing an agent seeds its plugin's default-on toggles.
 If a permission mode still needs selecting, focus moves to that group and a
@@ -38,7 +49,17 @@ hint asks you to choose before saving.
 
 A missing file uses the embedded defaults: Claude Code for analyst/reviewer
 with `dangerously_skip_permissions`, Codex for developer with
-`auto_workspace_write`, three change rounds, and no step timeout. Role panes are
+`auto_workspace_write`, each agent's default model, three change rounds, and no
+step timeout. The shipped prompts are complete role briefs: the analyst reads
+the repository's own rules, writes a plan with scope, files, tests, risks and
+acceptance criteria, files an epic with sub-issues through `gh`, and returns
+the plan; the developer implements it step by step with tests, follows the
+repository's commit and PR conventions, opens one PR and returns its number;
+the reviewer checks correctness, security, tests and conventions against the
+plan, leaves `gh` review comments ranked must/should/consider, and returns a
+verdict with notes; the fix prompt has the developer answer every comment on
+the same PR. Each prompt tells the agent that the next role sees only the
+reported result, never the conversation. Edit them in F1 to fit a project. Role panes are
 plain AI panes; sandbox panes and flows spanning multiple hosts are not supported.
 Unavailable agents and unknown/conflicting toggle names refuse creation before a
 tab or worktree is made. Supported per-spawn MCP adapters are Claude Code, Codex,

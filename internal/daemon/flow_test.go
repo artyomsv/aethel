@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -508,5 +509,74 @@ func TestFlow_Shutdown_RefusesNewWork(t *testing.T) {
 	}
 	if err := d.resumeFlow("f"); err == nil {
 		t.Fatal("resumed during shutdown")
+	}
+}
+
+func TestSpawnPane_FlowRoles_PassConfiguredModel(t *testing.T) {
+	d := newTestDaemon(t)
+	registerShippedPlugins(t, d)
+	stubFlowCodexProbe(t)
+	old := flowMCPExeFn
+	flowMCPExeFn = func() (string, error) { return "/test/quil", nil }
+	t.Cleanup(func() { flowMCPExeFn = old })
+	cfg := config.DefaultFlows()
+	models := map[flow.Role]struct{ agent, model, flag string }{
+		flow.Analyst:   {"claude-code", "claude-opus-5", "--model"},
+		flow.Developer: {"codex", "gpt-5-codex", "-m"},
+		flow.Reviewer:  {"opencode", "anthropic/claude-sonnet-5", "--model"},
+	}
+	for role, m := range models {
+		r := cfg.Roles[role]
+		r.Agent, r.Model = m.agent, m.model
+		cfg.Roles[role] = r
+		d.registry.Get(m.agent).Available = true
+	}
+	d.session.mu.Lock()
+	d.session.flowConfig = cfg
+	d.session.mu.Unlock()
+	for role, m := range models {
+		for _, flowRole := range []string{string(role), ""} {
+			fake := &fakeSession{}
+			pane := &Pane{ID: "pane-m0de1000", Type: m.agent, FlowRole: flowRole, CWD: t.TempDir()}
+			if err := d.spawnPane(pane, fake, false); err != nil {
+				t.Fatal(role, err)
+			}
+			idx := -1
+			for i, arg := range fake.startArgs {
+				if arg == m.flag && i+1 < len(fake.startArgs) && fake.startArgs[i+1] == m.model {
+					idx = i
+				}
+			}
+			if (idx >= 0) != (flowRole != "") {
+				t.Fatalf("%s role %q: model flag present=%v in %v", role, flowRole, idx >= 0, fake.startArgs)
+			}
+		}
+	}
+}
+
+func TestFlowStart_Repository_UsesGivenDirectoryAndRefusesMissing(t *testing.T) {
+	d, _ := flowTestDaemon(t)
+	other := t.TempDir()
+	resp, _ := d.startFlow(ipc.StartFlowReqPayload{Feature: "in another repo", Branch: "feat/other", CWD: other})
+	if resp.Error != "" {
+		t.Fatal(resp)
+	}
+	panes := d.session.Panes(resp.TabID)
+	if len(panes) != 1 {
+		t.Fatal("expected the analyst placeholder", len(panes))
+	}
+	want, _ := filepath.EvalSymlinks(other)
+	got, _ := filepath.EvalSymlinks(panes[0].CWD)
+	if !strings.EqualFold(got, want) {
+		t.Fatalf("placeholder cwd %q, want %q", panes[0].CWD, other)
+	}
+	tabs := len(d.session.Tabs())
+	missing := filepath.Join(other, "no-such-dir")
+	resp, _ = d.startFlow(ipc.StartFlowReqPayload{Feature: "x", Branch: "feat/missing", CWD: missing})
+	if resp.Error == "" || !strings.Contains(resp.Error, "repository directory") {
+		t.Fatal("missing repository accepted", resp)
+	}
+	if len(d.session.Tabs()) != tabs {
+		t.Fatal("refused flow created a tab")
 	}
 }

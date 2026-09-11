@@ -307,3 +307,130 @@ func TestFlowUpdate_DestinationPinnedAndForeignReplyIgnored(t *testing.T) {
 		t.Fatal("accepted reply from another daemon")
 	}
 }
+
+func flowLayoutState(panes []string, f flow.Flow) WorkspaceStateMsg {
+	state := WorkspaceStateMsg{ActiveTab: "tab-9", Tabs: []TabInfo{{ID: "tab-9", Name: "feat", Panes: panes}}, Projects: []ProjectInfo{{ID: "proj-local", Name: "quil", TabIDs: []string{"tab-9"}}}, ActiveProject: "proj-local", Flows: []flow.Flow{f}}
+	for _, id := range panes {
+		state.Panes = append(state.Panes, PaneInfo{ID: id, TabID: "tab-9"})
+	}
+	return state
+}
+
+func assertFlowLayout(t *testing.T, tab *TabModel) {
+	t.Helper()
+	root := tab.Root
+	if root == nil || root.IsLeaf() || root.Split != SplitHorizontal || root.Left == nil || !root.Left.IsLeaf() || root.Left.Pane.ID != "an" {
+		t.Fatalf("root is not analyst | rest: %+v", root)
+	}
+	right := root.Right
+	if right == nil || right.IsLeaf() || right.Split != SplitVertical || right.Left.Pane == nil || right.Left.Pane.ID != "dev" || right.Right.Pane == nil || right.Right.Pane.ID != "rev" {
+		t.Fatalf("right column is not developer / reviewer: %+v", right)
+	}
+}
+
+func TestFlowUpdate_RolePanes_LayoutAnalystLeftOthersStacked(t *testing.T) {
+	// The real sequence: the tab exists with the analyst placeholder while
+	// the worktree is prepared, then developer and reviewer land together.
+	m := paletteModelWithProjects(t)
+	m.initKeymap()
+	m.notifications = NewNotificationCenter(30, 200)
+	f := flow.Flow{ID: "f", TabID: "tab-9", Stage: flow.StagePreparing, Panes: map[flow.Role]string{flow.Analyst: "an"}}
+	m = flowUpdate(t, m, flowLayoutState([]string{"an"}, f))
+	f.Stage, f.Panes = flow.StagePlan, map[flow.Role]string{flow.Analyst: "an", flow.Developer: "dev", flow.Reviewer: "rev"}
+	m = flowUpdate(t, m, flowLayoutState([]string{"an", "dev", "rev"}, f))
+	assertFlowLayout(t, m.tabByID("tab-9"))
+
+	// A client attaching after the fact sees all three at once.
+	m = paletteModelWithProjects(t)
+	m.initKeymap()
+	m = flowUpdate(t, m, flowLayoutState([]string{"an", "dev", "rev"}, f))
+	assertFlowLayout(t, m.tabByID("tab-9"))
+
+	// Panes that belong to no flow keep stacking below the first leaf.
+	m = paletteModelWithProjects(t)
+	m.initKeymap()
+	m = flowUpdate(t, m, flowLayoutState([]string{"an", "dev", "rev"}, flow.Flow{ID: "elsewhere", TabID: "tab-other"}))
+	if root := m.tabByID("tab-9").Root; root.IsLeaf() || root.Split != SplitVertical {
+		t.Fatalf("plain tab changed shape: %+v", root)
+	}
+}
+
+func TestFlowUpdate_NewDialog_RepositoryRowPicksAndSubmitsCWD(t *testing.T) {
+	m := paletteModelWithProjects(t)
+	m.initKeymap()
+	m.projects[0].RootDir = "/repo/root"
+	m.dialog = dialogCommandPalette
+	m.palette = paletteState{filtered: []paletteCommand{{action: palActNewFlow, label: "New flow", enabled: true}}}
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.dialog != dialogNewFlow || m.flowUI.cwd != "/repo/root" || m.repoScan.cwd != "/repo/root" || m.repoScan.purpose != repoScanFlow {
+		t.Fatalf("dialog did not open on the project root with a scan: %+v %+v", m.flowUI, m.repoScan)
+	}
+	m = flowUpdate(t, m, gitReposMsg{Resp: ipc.GitReposRespPayload{CWD: "/repo/root", Repos: []string{"/repo/root", "/repo/root/sub"}}, Gen: m.repoScan.gen})
+	if len(m.flowUI.repos) != 2 || m.flowUI.cwd != "/repo/root" {
+		t.Fatal("scan result replaced the typed path or was dropped", m.flowUI.repos, m.flowUI.cwd)
+	}
+	m = flowUpdate(t, m, editorPasteMsg("Ship it"))
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.flowUI.row != 2 {
+		t.Fatal("repository row not reachable by Tab", m.flowUI.row)
+	}
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.flowUI.cwd != "/repo/root/sub" || !strings.Contains(m.renderFlowDialog(), "Repository: /repo/root/sub") {
+		t.Fatal("right did not pick the next repository", m.flowUI.cwd)
+	}
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	msg := m.client.(*fakeConn).lastSent()
+	var req ipc.StartFlowReqPayload
+	if msg == nil || msg.Type != ipc.MsgStartFlowReq || msg.DecodePayload(&req) != nil {
+		t.Fatal("start not sent", msg)
+	}
+	if req.CWD != "/repo/root/sux" || req.Feature != "Ship it" {
+		t.Fatal(req)
+	}
+	// An emptied repository row means the project root: sent empty, so the
+	// daemon resolves it rather than the client guessing a path.
+	m.flowUI.pending, m.flowUI.cwd = false, "   "
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	var second ipc.StartFlowReqPayload // fresh: cwd is omitempty, so a reused struct keeps the old value
+	if err := m.client.(*fakeConn).lastSent().DecodePayload(&second); err != nil || second.CWD != "" {
+		t.Fatal("blank repository row was not sent as the project root", second.CWD, err)
+	}
+}
+
+func TestFlowUpdate_SettingsModelRow_TypesAndSaves(t *testing.T) {
+	m := paletteModelWithProjects(t)
+	m.initKeymap()
+	m.dialog = dialogFlowSettings
+	m.flowUI.cfg = config.DefaultFlows()
+	for i, row := range m.flowSettingRows() {
+		if row.role == flow.Developer && row.kind == "model" {
+			m.flowUI.row = i
+		}
+	}
+	if !strings.Contains(m.renderFlowDialog(), "developer model: (agent default") {
+		t.Fatal(m.renderFlowDialog())
+	}
+	for _, r := range "gpt-jk5" { // j and k are typed here, not navigation
+		m = flowUpdate(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if got := m.flowUI.cfg.Roles[flow.Developer].Model; got != "gpt-jk" {
+		t.Fatal(got)
+	}
+	row := m.flowUI.row
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.flowUI.row != row-1 {
+		t.Fatal("arrow keys stopped navigating on the model row")
+	}
+	m = flowUpdate(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	var req ipc.SaveFlowConfigReqPayload
+	if err := m.client.(*fakeConn).lastSent().DecodePayload(&req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Config.Roles[flow.Developer].Model != "gpt-jk" {
+		t.Fatal(req.Config.Roles[flow.Developer])
+	}
+}

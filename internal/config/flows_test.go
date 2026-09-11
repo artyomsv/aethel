@@ -90,3 +90,57 @@ func TestFlows_EmptyPrompts_RefusesSave(t *testing.T) {
 		t.Fatal("accepted empty fix prompt")
 	}
 }
+
+func TestFlows_Model_ValidatesShapeAndRoundTrips(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	for _, role := range flow.Roles {
+		if DefaultFlows().Roles[role].Model != "" {
+			t.Fatal("shipped default pins a model for", role)
+		}
+	}
+	f := DefaultFlows()
+	r := f.Roles[flow.Developer]
+	r.Model = "gpt-5.1-codex"
+	f.Roles[flow.Developer] = r
+	a := f.Roles[flow.Analyst]
+	a.Model = "anthropic/claude-opus-5"
+	f.Roles[flow.Analyst] = a
+	if err := WriteFlows(f); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadFlows()
+	if err != nil || loaded.Roles[flow.Developer].Model != "gpt-5.1-codex" || loaded.Roles[flow.Analyst].Model != "anthropic/claude-opus-5" {
+		t.Fatal(loaded, err)
+	}
+	if wire := FlowsFromWire(f.Wire()); !reflect.DeepEqual(wire.Roles[flow.Developer], f.Roles[flow.Developer]) {
+		t.Fatal("model lost on the wire", wire.Roles[flow.Developer])
+	}
+	for _, bad := range []string{"-m", "a b", "x\x1b[0m", "id;rm", strings.Repeat("a", 81)} {
+		r.Model = bad
+		f.Roles[flow.Developer] = r
+		if err := WriteFlows(f); err == nil {
+			t.Fatalf("accepted model %q", bad)
+		}
+	}
+}
+
+func TestFlows_DefaultPrompts_CarryEachStepsPlaceholders(t *testing.T) {
+	f := DefaultFlows()
+	want := map[flow.Role][]string{
+		flow.Analyst:   {"{{feature}}", "gh", "plan"},
+		flow.Developer: {"{{plan}}", "gh", "pull request"},
+		flow.Reviewer:  {"{{pr}}", "gh", "verdict"},
+	}
+	for role, needles := range want {
+		for _, needle := range needles {
+			if !strings.Contains(f.Roles[role].Prompt, needle) {
+				t.Fatalf("%s prompt lacks %q", role, needle)
+			}
+		}
+	}
+	for _, needle := range []string{"{{pr}}", "{{review}}"} {
+		if !strings.Contains(f.Roles[flow.Developer].FixPrompt, needle) {
+			t.Fatalf("fix prompt lacks %q", needle)
+		}
+	}
+}

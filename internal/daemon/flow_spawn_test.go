@@ -195,3 +195,24 @@ func TestFlowCodexProbe_InstalledCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestFlowModelArgs_PerAgentFlagBeforePositional(t *testing.T) {
+	cases := []struct {
+		agent string
+		in    []string
+		want  []string
+	}{
+		{"claude-code", []string{"--dangerously-skip-permissions"}, []string{"--dangerously-skip-permissions", "--model", "m1"}},
+		{"opencode", nil, []string{"--model", "m1"}},
+		{"codex", []string{"--full-auto", "--", "resume"}, []string{"--full-auto", "-m", "m1", "--", "resume"}},
+		{"terminal", []string{"-l"}, []string{"-l"}},
+	}
+	for _, c := range cases {
+		if got := flowModelArgs(c.agent, "m1", c.in); !reflect.DeepEqual(got, c.want) {
+			t.Fatalf("%s: got %v want %v", c.agent, got, c.want)
+		}
+		if got := flowModelArgs(c.agent, "", c.in); !reflect.DeepEqual(got, c.in) {
+			t.Fatalf("%s: empty model changed args: %v", c.agent, got)
+		}
+	}
+}

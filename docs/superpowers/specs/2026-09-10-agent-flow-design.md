@@ -406,6 +406,23 @@ undone: the worktree, branch and PR stay as they are.
 - Flows spanning hosts.
 - Quil reading or writing GitHub itself.
 
+## 7a. Addendum, 2026-09-11: first manual run
+
+The first hands-on run of the built flow found four gaps in this design, all
+fixed on the same branch:
+
+- **Repository choice.** 4.6 said "project (the active one)" and let the daemon
+  pick the project root. The dialog now has a Repository row (daemon git
+  discovery on ←/→, or a typed path) and `StartFlowReqPayload.CWD` carries it.
+  The daemon refuses an unusable directory instead of falling back.
+- **Layout.** Role panes stacked into three full-width rows. The TUI now places
+  them analyst | developer / reviewer when it adds panes it did not create.
+- **Model per role.** `FlowRole.Model` (F1 row, `flows.toml` key) reaches the
+  agent's own `--model` / `-m` flag at spawn. Charset-validated only.
+- **Prompts.** The two-line defaults in 4.4 were placeholders. The shipped
+  `flows.toml` now carries full role briefs; 4.4's listing is superseded by
+  that file.
+
 ## 8. Open items for the plan
 
 1. Exact per-spawn MCP registration flags for claude-code, codex, opencode

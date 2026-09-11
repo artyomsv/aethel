@@ -515,8 +515,9 @@ default_image = ""
 ## Flow configuration (`flows.toml`)
 
 `$QUIL_HOME/flows.toml` holds the built-in agent flow's roles, named plugin
-toggles, prompts, `max_review_rounds` (default 3), and
-`step_timeout_minutes` (default 0, unlimited). A missing file uses embedded
-defaults. F1 → Settings → Flows saves atomically on the selected daemon and
+toggles, an optional `model` per role (passed to the agent's `--model` / `-m`
+flag; empty keeps the agent's default), prompts, `max_review_rounds` (default
+3), and `step_timeout_minutes` (default 0, unlimited). A missing file uses
+embedded defaults. F1 → Settings → Flows saves atomically on the selected daemon and
 reloads it. See [Agent flows](agent-flows.md#configuration) for the complete
 configuration and prompt protocol.

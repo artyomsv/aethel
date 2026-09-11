@@ -19,6 +19,11 @@ type StartFlowReqPayload struct {
 	Feature   string `json:"feature"`
 	Branch    string `json:"branch"`
 	ProjectID string `json:"project_id,omitempty"`
+	// CWD names the repository the flow works in: the worktree is added off
+	// the repository containing it. Empty means the project root. The daemon
+	// refuses a directory it cannot use rather than falling back, because a
+	// flow started in the wrong repository is a wrong branch and a wrong PR.
+	CWD string `json:"cwd,omitempty"`
 }
 
 type StartFlowRespPayload struct {
@@ -61,6 +66,7 @@ type FlowConfig struct {
 type FlowRoleConfig struct {
 	Agent     string   `json:"agent"`
 	Toggles   []string `json:"toggles"`
+	Model     string   `json:"model,omitempty"`
 	Prompt    string   `json:"prompt"`
 	FixPrompt string   `json:"fix_prompt,omitempty"`
 }

@@ -18,6 +18,35 @@ func flowMCPSupported(agent string) bool {
 	return agent == "claude-code" || agent == "codex" || agent == "opencode"
 }
 
+// flowModelArgs translates a role's configured model into the agent's own
+// flag. Empty means the agent's default and yields nothing. For codex the
+// flag is inserted before a "--" if one is present, because everything after
+// it is the positional prompt. Claude Code and OpenCode take --model anywhere.
+func flowModelArgs(agent, model string, args []string) []string {
+	if model == "" {
+		return args
+	}
+	var flag []string
+	switch agent {
+	case "claude-code", "opencode":
+		flag = []string{"--model", model}
+	case "codex":
+		flag = []string{"-m", model}
+	default:
+		return args
+	}
+	end := len(args)
+	for i, arg := range args {
+		if arg == "--" {
+			end = i
+			break
+		}
+	}
+	out := append([]string(nil), args[:end]...)
+	out = append(out, flag...)
+	return append(out, args[end:]...)
+}
+
 // Use the matched sibling bridge, including the dev/debug suffix. A PATH
 // lookup could select a production bridge talking to another workspace.
 var flowMCPExeFn = func() (string, error) {

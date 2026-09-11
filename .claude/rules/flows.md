@@ -28,4 +28,6 @@ Claude uses `--strict-mcp-config`. Codex probes effective server names with boun
 
 Only tasks marked as daemon-owned flow steps accept reports. Fallback completion resolves the pane before taking the task registry lock and checks UNKNOWN under `workMu` atomically with completion. No `sm.mu` acquisition is allowed while that work lock is held.
 
+`StartFlowReqPayload.CWD` names the repository; `startFlow` REFUSES an unusable directory rather than falling back to the project root the way `resolveRequestedCWD` does for an ordinary pane. `FlowRole.Model` is read at SPAWN from the daemon's flow config (`flowModelArgs`, inserted before a codex `--`), so an F1 edit applies on the pane's next restart; the charset is validated, the id is not. The TUI places role panes with `splitForNewPane` (analyst | developer / reviewer) keyed on `flow.Panes`, at both insertion sites in `model.go`; ordinary panes keep stacking.
+
 Reject terminal controls in feature, prompt, and result text; keep newlines as text. PR results must be a number, `owner/repo#N`, or a GitHub PR URL. Configuration requires nonempty prompts and an explicit permission-mode toggle when the plugin exposes that group.

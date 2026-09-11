@@ -5286,6 +5286,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	if flowRole != "" {
 		var err error
 		var codexServers []string
+		// The model is read at spawn, not frozen at flow start, so a role's
+		// model edited in F1 applies on the pane's next restart. An unloadable
+		// config keeps the agent's default rather than refusing the pane: the
+		// flow itself already refused to START on that config.
+		if cfg, cfgErr := d.flowsConfig(); cfgErr == nil {
+			args = flowModelArgs(typ, cfg.Roles[flow.Role(flowRole)].Model, args)
+		}
 		if typ == "codex" {
 			codexServers, err = flowCodexServersFn(cmd, pane.CWD, args, envVars)
 			if err != nil {
