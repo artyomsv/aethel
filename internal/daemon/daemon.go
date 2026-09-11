@@ -4909,6 +4909,37 @@ func templateHasPlaceholder(template []string) bool {
 	return false
 }
 
+// appendResumeTemplate expands one resume template against the pane's plugin
+// state and appends it to args.
+//
+// Static templates (no {placeholder}) pass through directly, so a
+// session_scrape pane that never received a hook event still gets its
+// configured fallback. Templates with placeholders require PluginState, and an
+// unresolved one appends NOTHING rather than a literal "{session_id}" —
+// ExpandResumeArgs returns nil when state is missing or any placeholder is
+// unresolved, and passing the raw token to argv would have the agent look for a
+// session by that name.
+//
+// Extracted so the restore branch and the restart branch cannot drift: the two
+// differ in WHEN they resume, never in how a template becomes argv, and the
+// restart branch was added by making that sameness structural rather than
+// copying twenty lines.
+func appendResumeTemplate(args, template []string, pane *Pane) []string {
+	if len(template) == 0 {
+		return args
+	}
+	if !templateHasPlaceholder(template) {
+		return append(args, template...)
+	}
+	if len(pane.PluginState) == 0 {
+		return args
+	}
+	if resumeArgs := plugin.ExpandResumeArgs(template, pane.PluginState); resumeArgs != nil {
+		return append(args, resumeArgs...)
+	}
+	return args
+}
+
 // resolveSpawnArgs computes the argv (excluding cmd) that spawnPane should use
 // for the given pane and plugin, applying base args, the InstanceArgs override,
 // preassign_id start args, and the restore-branch resume-args append. It is a
@@ -4956,6 +4987,32 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID
 		}
 	}
 
+	// RESTART under session_scrape (Alt+R, and the MCP restart_pane tool):
+	// reattach to the session this pane's own hook recorded, exactly as the
+	// preassign_id branch above reattaches claude.
+	//
+	// Restart reaches spawnPane with restoring=false, and only preassign_id was
+	// handled there — so restarting a codex or opencode pane started a BRAND NEW
+	// conversation and abandoned the running one, with no warning and nothing to
+	// undo it. The record was on disk the whole time
+	// ($QUIL_HOME/sessions/codex-<paneID>.id): the restore path reads it and the
+	// restart path simply never asked. Observed 2026-09-11 — two codex panes
+	// restarted a minute apart, both spawned with no `resume` argument while
+	// their id files sat beside the panes that had just written them.
+	//
+	// Alt+R means "give this pane a working process", not "throw away my work".
+	// It is what the error screen itself advertises, and what a user reaches for
+	// when a child wedges — the moment a conversation is worth the MOST, not the
+	// least.
+	//
+	// The fallback is unchanged and still the safe one: a pane with no recorded
+	// session expands to the plugin's own ResumeArgs, which codex.toml
+	// deliberately leaves empty, so it starts fresh rather than guessing with
+	// `resume --last`.
+	if !restoring && p.Persistence.Strategy == "session_scrape" {
+		args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
+	}
+
 	// Resume branch: append ResumeArgs to whatever args already exist so
 	// InstanceArgs (e.g., "--dangerously-skip-permissions" from a setup
 	// toggle) survives daemon restart. Before this fix, args were replaced
@@ -4963,23 +5020,7 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID
 	if restoring {
 		switch p.Persistence.Strategy {
 		case "preassign_id", "session_scrape":
-			template := resumeTemplateFor(p, pane, claim)
-			if len(template) > 0 {
-				// Static templates (no {placeholder}) pass through directly so
-				// a session_scrape pane that never received a hook event still
-				// gets its --continue fallback. Templates with placeholders
-				// require PluginState; ExpandResumeArgs returns nil if state
-				// is missing or any placeholder is unresolved.
-				if templateHasPlaceholder(template) {
-					if len(pane.PluginState) > 0 {
-						if resumeArgs := plugin.ExpandResumeArgs(template, pane.PluginState); resumeArgs != nil {
-							args = append(args, resumeArgs...)
-						}
-					}
-				} else {
-					args = append(args, template...)
-				}
-			}
+			args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
 		case "rerun":
 			// args already set from InstanceArgs above
 		case "none":
