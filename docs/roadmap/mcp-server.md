@@ -17,7 +17,7 @@ make this harder: the relevant project may be on another machine.
 
 ## Implemented solution
 
-`quil mcp` exposes 34 Model Context Protocol tools over stdio. An MCP-capable
+`quil mcp` exposes 35 Model Context Protocol tools over stdio. An MCP-capable
 client can discover the workspace, create tabs and AI panes using the same
 validated options as the TUI, manage projects across configured remote hosts,
 and delegate work between panes with completion tracking and notify-back.
@@ -25,7 +25,7 @@ and delegate work between panes with completion tracking and notify-back.
 This PRD records the capability and its constraints. The [MCP guide](../mcp.md)
 is the reference for client configuration, input schemas, responses and examples.
 
-## Tools by purpose (34 total)
+## Tools by purpose (35 total)
 
 ### Discovery (6)
 
@@ -81,7 +81,7 @@ directories explicit. Creating a tab does not take the user's focus.
 | `switch_tab` | Show a tab |
 | `destroy_tab` | Remove a tab, retaining a shell tab when its project becomes empty |
 
-### Task delegation (4)
+### Task delegation and flow reporting (5)
 
 | Tool | Purpose |
 |------|---------|
@@ -89,12 +89,17 @@ directories explicit. Creating a tab does not take the user's focus.
 | `get_task` | Read one task's status |
 | `wait_task` | Wait for completion or a bounded timeout |
 | `list_tasks` | List the daemon's retained tasks |
+| `report_step` | Report a structured result for the caller's current flow step |
 
 An AI task finishes when the target's hook-derived work state settles idle,
 including subagent activity; a raw Stop event alone is insufficient. A terminal
 task finishes on shell command completion. Notify-back waits until the requester
 can receive input and is limited to panes on the same daemon. Tasks are bounded
 and runtime-only. See [task delegation](../mcp.md#delegating-work-to-another-pane).
+
+Flow steps require a structured report as well as settled idle. Role panes use
+a restricted bridge with `report_step` and caller-local `get_task`; see
+[agent flows](../agent-flows.md) for configuration and the adapter limits.
 
 ### TUI cooperation (2)
 
@@ -152,7 +157,7 @@ old terminal state and discard late output from the replaced process.
 
 ## Acceptance
 
-- MCP clients can connect through stdio and discover all 34 registered tools.
+- MCP clients can connect through stdio and discover all 35 registered tools.
 - Agents can manage projects, tabs and panes on local and configured remote daemons.
 - Unscoped discovery recovers hosts after the retry backoff without a named call.
 - Pane creation honors TUI-equivalent options and reports validation or spawn errors.

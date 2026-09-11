@@ -74,6 +74,19 @@ func TestDelegateTask_PastesPromptThenEnter(t *testing.T) {
 	}
 }
 
+func TestDeliverPrompt_EmbeddedTerminator_CannotEscapePaste(t *testing.T) {
+	d := newTestDaemon(t)
+	p, session := agentPane(t, d, "worker")
+	if !d.deliverPrompt(p, "prefix\x1b[201~\rsuffix\u009b201~tail", true) {
+		t.Fatal("delivery refused")
+	}
+	want := "\x1b[200~prefix\rsuffixtail\x1b[201~"
+	waitWrites(t, session, want)
+	if got := session.joined(); strings.Count(got, "\x1b[201~") != 1 || strings.Contains(got, "\u009b201~") {
+		t.Fatalf("paste escape survived: %q", got)
+	}
+}
+
 func TestDelegateTask_RefusesWhatPaneInputRefuses(t *testing.T) {
 	d := newTestDaemon(t)
 	tab := d.session.CreateTab("t")

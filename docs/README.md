@@ -20,7 +20,8 @@
 | [Keybindings](keybindings.md) | Full keymap, customization syntax, what to bind and what to leave for the PTY |
 | [tmux comparison](tmux-comparison.md) | The `tmux` preset against tmux's own default prefix table, and how to switch between keymaps |
 | [Configuration](configuration.md) | `~/.quil/config.toml` reference — every section + every key |
-| [MCP](mcp.md) | **Let your AI assistant drive Quil.** Wiring for Claude Desktop / Claude Code / Cursor / VS Code Copilot + all 34 tools documented + redaction model |
+| [MCP](mcp.md) | **Let your AI assistant drive Quil.** Wiring for Claude Desktop / Claude Code / Cursor / VS Code Copilot + all 35 tools documented + redaction model |
+| [Agent flows](agent-flows.md) | Analyst, developer, and reviewer handoffs in one worktree, with explicit pause/resume and editable prompts |
 
 ## Customization
 

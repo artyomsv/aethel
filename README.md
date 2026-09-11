@@ -5,7 +5,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8.svg)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#install)
-[![MCP](https://img.shields.io/badge/MCP-34%20tools-orange.svg)](docs/mcp.md)
+[![MCP](https://img.shields.io/badge/MCP-35%20tools-orange.svg)](docs/mcp.md)
 
 ---
 
@@ -223,7 +223,7 @@ Add this to your AI client's MCP config (Claude Desktop, Claude Code, Cursor, VS
 }
 ```
 
-Restart the client. The AI can now `list_panes`, `read_pane_output`, `send_to_pane`, `watch_notifications`, `screenshot_pane`, and 13 more tools. Read the build pane and react to errors without copy-paste.
+Restart the client. The AI can now `list_panes`, `read_pane_output`, `send_to_pane`, `watch_notifications`, `screenshot_pane`, and 30 more tools. Read the build pane and react to errors without copy-paste.
 
 Full guide: [docs/mcp.md](docs/mcp.md).
 
@@ -256,6 +256,7 @@ Define your own pane types in TOML — see the [plugin reference](docs/plugin-re
 | **Keybindings** | [keybindings.md](docs/keybindings.md) |
 | **tmux comparison** | [tmux-comparison.md](docs/tmux-comparison.md) |
 | **Configuration** | [configuration.md](docs/configuration.md) |
+| **Agent flows** | [agent-flows.md](docs/agent-flows.md) |
 | **MCP (AI integration)** | [mcp.md](docs/mcp.md) |
 | **Custom plugins** | [plugin-reference.md](docs/plugin-reference.md) |
 | **Sandbox panes (Docker)** | [sandbox-panes.md](docs/sandbox-panes.md) |

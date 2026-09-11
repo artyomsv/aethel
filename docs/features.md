@@ -2,7 +2,7 @@
 
 A capability-by-capability tour of what Quil does. For configuration knobs, see [Configuration](configuration.md). For keystrokes, see [Keybindings](keybindings.md). For AI integration, see [MCP](mcp.md).
 
-Quil exposes **34 MCP tools**: agents can manage [projects and tabs](mcp.md#projects-and-tabs), discover and route work across [remote hosts](mcp.md#remote-hosts), and create AI panes with the TUI dialog's options. [`delegate_task`](mcp.md#delegating-work-to-another-pane) tracks pane-to-pane work and can notify the requester after completion, when it is ready to receive input.
+Quil exposes **35 MCP tools**: agents can manage [projects and tabs](mcp.md#projects-and-tabs), discover and route work across [remote hosts](mcp.md#remote-hosts), and create AI panes with the TUI dialog's options. [`delegate_task`](mcp.md#delegating-work-to-another-pane) tracks pane-to-pane work and can notify the requester after completion, when it is ready to receive input.
 
 ## Table of contents
 
@@ -793,3 +793,10 @@ list you pick a working directory from. The real name is always what gets opened
 ### Cross-platform
 
 Linux, macOS, and Windows from day one. PTY management via `creack/pty` (Unix) and ConPTY (Windows). IPC over Unix domain sockets or Named Pipes. All persistence paths use atomic temp+rename so a crash during snapshot leaves the previous state on disk.
+
+## Agent flows
+
+The command palette's **New flow** creates an analyst/developer/reviewer worktree
+for one epic and one PR. Quil owns the handoffs and pauses for user help instead
+of automatically retrying. See [Agent flows](agent-flows.md) for stages, recovery,
+and the F1 settings editor.

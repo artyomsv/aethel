@@ -14,7 +14,7 @@ The result: your AI can **see what's in your build pane and react**, instead of 
   - [VS Code (GitHub Copilot Chat)](#vs-code-github-copilot-chat)
   - [Any MCP-capable client](#any-mcp-capable-client)
 - [Verify the connection](#verify-the-connection)
-- [The 34 tools](#the-34-tools)
+- [The 35 tools](#the-35-tools)
   - [Discovery](#discovery)
   - [Reading pane output](#reading-pane-output)
   - [Interacting with panes](#interacting-with-panes)
@@ -22,6 +22,7 @@ The result: your AI can **see what's in your build pane and react**, instead of 
   - [Projects and tabs](#projects-and-tabs)
   - [Remote hosts](#remote-hosts)
   - [Delegating work to another pane](#delegating-work-to-another-pane)
+  - [report_step](#report_step)
   - [TUI cooperation](#tui-cooperation)
   - [Event observation](#event-observation)
   - [Memory reporting](#memory-reporting)
@@ -70,7 +71,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 34 tools.
+Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 35 tools.
 
 ### Claude Code (CLI)
 
@@ -139,7 +140,7 @@ In your AI client, ask:
 
 The AI should call `list_panes` and return a JSON array with each pane's `id`, `type`, `tab_id`, `cwd`, etc. If you see "no Quil panes" or an error, check [Troubleshooting](#troubleshooting).
 
-## The 34 tools
+## The 35 tools
 
 Tools are grouped below by purpose. Every tool returns a `text` content block; many return JSON-formatted payloads.
 
@@ -290,6 +291,17 @@ A terminal target is `done` when its shell reports the command finished (OSC 133
    **It also needs the requester's hooks.** A pane whose `agent_state` is empty is UNKNOWN, not idle — no hook edge has ever been seen for it, and such a pane may be mid-turn — so the notice waits for a real idle edge and is never delivered if none comes. `wait_task` and the `task_done` event need no hooks and always work.
 
 The daemon does not parse the target's reply. The excerpt is raw output; the requester decides what to do with it (read more with `read_pane_output`, follow up with another `delegate_task`).
+
+### report_step
+
+Report the caller pane's current flow step: `status` is `done` or `blocked`,
+`result` is an object of string values, and `task_id` is optional. Plan requires
+`plan`, build requires `pr`, review requires `verdict` (`approved` or `changes`)
+and accepts `notes`, and fix requires no key. `pr` must be a PR number, `owner/repo#N`, or a GitHub PR URL. A blocked step supplies `question`.
+At most 16 values, each at most 8 KiB. The daemon rejects ordinary delegated tasks, foreign targets, ended steps, and terminal control characters.
+A correction replaces an earlier report until settled idle ends the task. A
+hookless pane completes after the report's settle window. This tool always uses
+the bridge's local daemon and requires Quil 1.73.0+. See [Agent flows](agent-flows.md).
 
 ### TUI cooperation
 

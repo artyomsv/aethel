@@ -24,6 +24,7 @@ import (
 	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/codexhook"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/flow"
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -305,6 +306,7 @@ func New(cfg config.Config) *Daemon {
 }
 
 func (d *Daemon) Start() error {
+	d.reloadFlows()
 	quilDir := config.QuilDir()
 	if err := probeExistingDaemon(config.SocketPath()); err != nil {
 		return err
@@ -652,8 +654,8 @@ func (d *Daemon) snapshot() {
 	// allowed a pane create/destroy between the two calls to slip through
 	// — the workspace.json said N panes while the buffer flush iterated
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
-	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
+	activeTab, tabs, panesByTab, projects, activeProject, flows := d.session.snapshotStateWithFlows()
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false, flows)
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
@@ -925,6 +927,7 @@ func (d *Daemon) restoreWorkspace() error {
 				}
 				unseen, _ := paneData["unseen"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
+				flowRole, _ := paneData["flow_role"].(string)
 				worktreePath, _ := paneData["worktree_path"].(string)
 				worktreeInterrupted, _ := paneData["worktree_interrupted"].(bool)
 				sandboxImage, _ := paneData["sandbox_image"].(string)
@@ -976,6 +979,7 @@ func (d *Daemon) restoreWorkspace() error {
 					// right default: a pane nobody recorded as owning a
 					// worktree keeps the ordinary CWD fallback.
 					WorktreeOwned: worktreeOwned,
+					FlowRole:      flowRole,
 					// Absent on every snapshot written before the marker
 					// existed → false, so such a pane restores exactly as it
 					// did before: a shell in whatever CWD was recorded. The
@@ -1016,6 +1020,7 @@ func (d *Daemon) restoreWorkspace() error {
 	}
 
 	d.restored = true
+	d.restoreFlows(state["flows"])
 	log.Printf("restored %d tabs, %d panes from disk", len(tabs), restoredPanes)
 	return nil
 }
@@ -1538,6 +1543,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleCreateTabReq(conn, msg)
 	case ipc.MsgPluginCatalogReq:
 		d.handlePluginCatalogReq(conn, msg)
+	case ipc.MsgStartFlowReq:
+		d.handleStartFlowReq(conn, msg)
+	case ipc.MsgResumeFlowReq:
+		d.handleResumeFlowReq(conn, msg)
+	case ipc.MsgReportStepReq:
+		d.handleReportStepReq(conn, msg)
+	case ipc.MsgFlowConfigReq, ipc.MsgSaveFlowConfigReq:
+		d.handleFlowConfigReq(conn, msg)
 	case ipc.MsgDelegateTaskReq:
 		d.handleDelegateTaskReq(conn, msg)
 	case ipc.MsgGetTaskReq:
@@ -2618,6 +2631,7 @@ func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType st
 	pane.Type = paneType
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
+	pane.FlowRole = payload.FlowRole
 	pane.PluginMu.Unlock()
 	// The sandbox spec joins the fields above, and its absence here was the
 	// whole feature failing open: spawnPane gates the container branch on
@@ -2698,6 +2712,7 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 	newPane.Type = paneType
 	newPane.InstanceName = payload.InstanceName
 	newPane.InstanceArgs = payload.InstanceArgs
+	newPane.FlowRole = payload.FlowRole
 	// Before the swap, deliberately. This pane is not published yet, so a
 	// refusal costs nothing — whereas past ReplacePane the OLD pane is gone
 	// whatever else fails, and refusing there would leave the tab short a
@@ -3541,6 +3556,7 @@ func updateTouchesBroadcastState(p ipc.UpdatePanePayload) bool {
 }
 
 func (d *Daemon) handleReloadPlugins() {
+	d.reloadFlows()
 	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
 		log.Printf("reload: ensure defaults: %v", err)
 	}
@@ -3996,8 +4012,14 @@ func (d *Daemon) broadcastState() {
 }
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
-	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true)
+	activeTab, tabs, panesByTab, projects, activeProject, flows := d.session.snapshotStateWithFlows()
+	// Broadcast only presentation fields. Features, plans, and notes stay on disk.
+	for i := range flows {
+		flows[i].Feature = ""
+		flows[i].Results.Plan = ""
+		flows[i].Results.Notes = ""
+	}
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true, flows)
 	// Broadcast-only (never persisted): announced newer release, if any.
 	if info := d.currentUpdateInfo(); info != nil {
 		state["update"] = info
@@ -4019,7 +4041,7 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 // snapshot and the live broadcast because this function is shared by both
 // (buildWorkspaceState and snapshot()); writing them only at the persist.Save
 // call site would leave every broadcast project-less.
-func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string, includeOverlays bool) map[string]any {
+func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string, includeOverlays bool, flows []flow.Flow) map[string]any {
 	tabList := make([]map[string]any, 0, len(tabs))
 	paneList := make([]map[string]any, 0)
 
@@ -4129,6 +4151,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// the snapshot carries only CWD, which cannot distinguish them.
 			if pane.WorktreeOwned {
 				paneData["worktree_owned"] = true
+			}
+			if pane.FlowRole != "" {
+				paneData["flow_role"] = pane.FlowRole
 			}
 			// Persisted for the same reason, and it is the half that says WHICH
 			// directory. Without it a restored pane can only name its CWD, which
@@ -4315,6 +4340,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 
 	return map[string]any{
 		"active_tab":     activeTab,
+		"flows":          flows,
 		"tabs":           tabList,
 		"panes":          paneList,
 		"projects":       projectList,
@@ -5139,6 +5165,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// on the next lazy spawn — after the user had already retried it.
 	pane.WorktreeInterrupted = false
 	typ := pane.Type
+	flowRole := pane.FlowRole
 	sandboxImage := pane.SandboxImage
 	pane.PluginMu.Unlock()
 
@@ -5152,6 +5179,9 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	sandboxed = sandboxed || sandboxImage != ""
 
 	p := d.registry.Get(typ)
+	if flowRole != "" && (sandboxed || p == nil || p.Category != "ai" || !p.Available || !flowMCPSupported(typ)) {
+		return fmt.Errorf("flow agent %q is unavailable or does not support per-spawn MCP", typ)
+	}
 	if p == nil {
 		p = d.registry.Get("terminal") // fallback
 	}
@@ -5407,6 +5437,37 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 			args = append(settingsArgs, args...)
 		}
 		envVars = append(envVars, hookEnv...)
+	}
+
+	if flowRole != "" {
+		var err error
+		var codexServers []string
+		// The model is read at spawn, not frozen at flow start, so a role's
+		// model edited in F1 applies on the pane's next restart. An unloadable
+		// config keeps the agent's default rather than refusing the pane: the
+		// flow itself already refused to START on that config.
+		//
+		// The configured AGENT must match this pane's own type before its
+		// model is applied. A role's agent can be changed after its panes
+		// exist, and those panes keep their original Type — so keying on the
+		// role name alone handed a live claude pane `--model gpt-5-codex` the
+		// moment the analyst role was switched to codex, and every restart of
+		// that pane then failed on a model its agent has never heard of.
+		if cfg, cfgErr := d.flowsConfig(); cfgErr == nil {
+			if role := cfg.Roles[flow.Role(flowRole)]; role.Agent == typ {
+				args = flowModelArgs(typ, role.Model, args)
+			}
+		}
+		if typ == "codex" {
+			codexServers, err = flowCodexServersFn(cmd, pane.CWD, args, envVars)
+			if err != nil {
+				return err
+			}
+		}
+		args, envVars, err = flowMCPSpawn(typ, args, envVars, codexServers)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Generic opt-in: any plugin whose hook producer records input history

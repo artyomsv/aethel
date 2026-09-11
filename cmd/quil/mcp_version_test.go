@@ -19,7 +19,8 @@ func TestRequireDaemon_RefusesOnlyAnOlderRelease(t *testing.T) {
 		{"dev", false},     // a developer's own daemon
 		{"1.71.0", true},   // the release measured against: drops the new types
 		{"1.71.9", true},   //
-		{"1.72.0", false},  // the floor itself
+		{"1.72.0", false},  // existing project/tab/task floor
+		{"1.73.0", false},  // the floor itself
 		{"1.80.3", false},  // newer
 		{"garbage", false}, // unparseable is unknown
 	}

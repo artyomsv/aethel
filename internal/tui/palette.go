@@ -13,6 +13,7 @@ import (
 	"github.com/rivo/uniseg"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 const paletteVisibleLines = 12 // rendered lines shown before the list scrolls (a hit row is 2 lines)
@@ -94,6 +95,9 @@ const (
 	palActPrevProject    // bounce to the previous project
 	palActMoveProjectUp
 	palActMoveProjectDown
+	palActNewFlow
+	palActResumeFlow
+	palActCancelFlow
 )
 
 // paletteCommand is one row of the palette. Disabled rows render greyed and are
@@ -398,6 +402,9 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		newTabEnabled = m.projectActionable(p) || m.onlyOfflineProjects()
 	}
 	cmds = append(cmds,
+		paletteCommand{action: palActNewFlow, enabled: newTabEnabled, label: "New flow", keywords: []string{"flow", "agents", "feature"}},
+		paletteCommand{action: palActResumeFlow, enabled: m.activeFlow() != nil && m.activeFlow().Paused, label: "Resume flow", keywords: []string{"flow", "resume"}},
+		paletteCommand{action: palActCancelFlow, enabled: m.activeFlow() != nil, label: "Cancel flow…", keywords: []string{"flow", "cancel"}},
 		paletteCommand{
 			action:   palActNewTab,
 			enabled:  newTabEnabled,
@@ -1066,6 +1073,17 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch c.action {
+	case palActNewFlow:
+		return m.openNewFlow()
+	case palActResumeFlow:
+		if f := m.activeFlow(); f != nil && f.Paused {
+			m.flowUI.dest = m.activeDest()
+			cmd := m.sendFlowRequest(ipc.MsgResumeFlowReq, ipc.ResumeFlowReqPayload{FlowID: f.ID})
+			return m, cmd
+		}
+		return m, nil
+	case palActCancelFlow:
+		return m.openCloseTabConfirm()
 	// --- Navigation --------------------------------------------------------
 	case palActGoToPane:
 		return m.goToPane(c.arg)
