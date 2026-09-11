@@ -239,3 +239,84 @@ func TestFinishReconnect_ClearsTheOutageStamp(t *testing.T) {
 		t.Fatal("finishReconnect left the previous outage's downAt behind — the next drop would start unfrozen")
 	}
 }
+
+// TestEnqueueInput_OfflineDestDropsPTYBytesInsteadOfQueueingThem is the
+// regression test for the review finding that bounding the freeze reopened the
+// exact hazard the freeze existed for.
+//
+// Releasing the freeze after reconnectFreezeWindow releases PTY-bound bytes
+// along with navigation, and there is a QUEUE in between: enqueueInput hands the
+// entry to inputForwarder, which resolves the connection later, and Router.Send
+// looks up r.conns[dest] at SEND time. So an entry still in the channel when
+// finishReconnect swaps the conn in is delivered to the REPLACEMENT — bytes
+// typed at an offline host landing in the live agent session that came back,
+// at a prompt that moved on.
+//
+// Dropping at enqueue is what closes it, and it is the only place that can:
+// freezeInput matches on message TYPE and cannot tell a key the client consumes
+// from one headed at a PTY, while everything reaching enqueueInput is bytes for
+// a child process by construction.
+func TestEnqueueInput_OfflineDestDropsPTYBytesInsteadOfQueueingThem(t *testing.T) {
+	m := escapeModel(t)
+	m.inputCh = make(chan paneInput, inputForwardBuffer)
+	m.handleLinkLost("gpu01", errors.New("connection timed out"))
+	ageOutage(t, &m, "gpu01", reconnectFreezeWindow+time.Second)
+
+	// Past the window, so the key is no longer frozen and reaches the PTY path.
+	m.enqueueInput("pane-gpu", []byte("rm -rf /\r"))
+
+	if n := len(m.inputCh); n != 0 {
+		got := <-m.inputCh
+		t.Fatalf("queued %d entry for an offline destination (%q) — the forwarder resolves the conn "+
+			"later, so finishReconnect can hand these bytes to the recovered pane", n, got.data)
+	}
+}
+
+// The control: the same call on a HEALTHY destination must still queue, or the
+// drop would have broken typing everywhere rather than fixing anything.
+func TestEnqueueInput_HealthyDestStillQueues(t *testing.T) {
+	m := escapeModel(t)
+	m.inputCh = make(chan paneInput, inputForwardBuffer)
+
+	m.enqueueInput("pane-gpu", []byte("echo hi\r"))
+
+	if len(m.inputCh) != 1 {
+		t.Fatal("a healthy destination must still queue PTY input")
+	}
+}
+
+// A background destination dropping must not stop typing into a pane on a
+// DIFFERENT daemon. The drop is scoped by the PANE's destination, not by the
+// active project, which is the same scoping freezeInput's paste arm uses.
+func TestEnqueueInput_BackgroundOutageDoesNotBlockAnotherDaemonsPane(t *testing.T) {
+	m := escapeModel(t)
+	m.inputCh = make(chan paneInput, inputForwardBuffer)
+	m.handleLinkLost("gpu01", errors.New("connection timed out"))
+
+	// pane-local lives on the local daemon, which never dropped.
+	m.enqueueInput("pane-local", []byte("echo hi\r"))
+
+	if len(m.inputCh) != 1 {
+		t.Fatal("one daemon's outage must not drop input bound for another daemon's pane")
+	}
+}
+
+// A PARKED link drops PTY bytes too. freezesInput exempts parked so the client
+// stays usable, but parked means the ladder has STOPPED with the link still
+// down — there is no conn to carry these bytes and, if the operator resumes,
+// the entry would cross the reconnect exactly as an unparked one would.
+func TestEnqueueInput_ParkedDestAlsoDropsPTYBytes(t *testing.T) {
+	m := escapeModel(t)
+	m.inputCh = make(chan paneInput, inputForwardBuffer)
+	m.handleLinkLost("gpu01", errors.New("Permission denied (publickey)"))
+	m.linkFor("gpu01").parked = true
+
+	if _, frozen := m.freezeInput(tea.KeyPressMsg{Code: 'a', Text: "a"}); frozen {
+		t.Fatal("precondition: a parked link must not freeze the client")
+	}
+	m.enqueueInput("pane-gpu", []byte("a"))
+
+	if len(m.inputCh) != 0 {
+		t.Error("a parked destination must still drop PTY bytes — the link is down either way")
+	}
+}
