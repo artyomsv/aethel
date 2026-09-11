@@ -4987,11 +4987,12 @@ func appendResumeTemplate(args, template []string, pane *Pane) []string {
 // one another pane already holds. It is never nil: callers with no occupancy
 // information pass claimAny, so a forgotten wiring fails in a test rather than
 // silently dropping the guard in production.
-// ranBefore reports whether a child of this pane has already run in this
-// daemon (pane.ptyGen > 0), captured by the caller under PluginMu. It is what
-// separates a RESTART from a CREATE — both arrive with restoring=false — and
+// ownsRecord reports whether a hook record under this pane's id can only have
+// been written by this pane — `ptyGen > 0 || !freshID`, captured by the caller
+// under PluginMu. It is what separates a RESTART (and a restored pane retrying
+// its first spawn) from a CREATE, all of which arrive with restoring=false, and
 // the session_scrape branch below is gated on it.
-func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ranBefore bool, resumeID string, claim sessionClaimFn) []string {
+func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bool, resumeID string, claim sessionClaimFn) []string {
 	args := append([]string{}, p.Command.Args...)
 
 	// Instance-specific args override base args.
@@ -5038,7 +5039,7 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ranBefore boo
 	// when a child wedges — the moment a conversation is worth the MOST, not the
 	// least.
 	//
-	// GATED ON ranBefore, and the gate is the whole safety argument. EIGHT call
+	// GATED ON ownsRecord, and the gate is the whole safety argument. EIGHT call
 	// sites reach spawnPane with restoring=false: pane creation, the two replace
 	// paths, the tab-bootstrap spawns, the sandbox sign-in respawn and the
 	// restart. Ungated, a BRAND-NEW pane would read a hook record under its own
@@ -5052,25 +5053,28 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ranBefore boo
 	// refreshPluginStateFromHooks is the only writer of that field for a
 	// session_scrape pane and it runs at SHUTDOWN, so a codex pane created and
 	// conversed with in this daemon's lifetime still has it empty — the guard
-	// would skip the resume in precisely the reported case. ptyGen is the honest
-	// signal: it counts PTY installs on this pane OBJECT, so >0 means a child of
-	// this pane has already run and the record under its id was written by that
-	// child rather than by whoever held the id before.
+	// would skip the resume in precisely the reported case.
 	//
-	// ranBefore alone would still leave a gap, and spawnPane closes it rather
-	// than this branch narrowing further: a fresh spawn ignores a leftover
-	// record but still increments ptyGen, so a child that dies before its
-	// SessionStart hook fires would leave the NEXT restart reading a record the
-	// pane never wrote. The fresh spawn therefore RETIRES any record under the
-	// pane's id (see retireSessionRecord's call site), which turns ranBefore
-	// from a statement about order into one about ownership: after it, a record
-	// under this id was written by this pane's own child.
+	// ownsRecord is `ptyGen > 0 || !freshID`, and BOTH halves are load-bearing.
+	// ptyGen alone missed a restored pane whose lazy spawn was refused for a
+	// missing worktree: it sits at ptyGen 0 holding a record that is entirely
+	// its own, so Alt+R after the directory comes back both skipped the resume
+	// AND retired the record — deleting the conversation rather than merely
+	// failing to reopen it. freshID answers the other half: an id read off a
+	// snapshot names the pane that wrote the record, an id minted here cannot.
+	//
+	// Ownership also has to be established rather than inferred from order,
+	// which spawnPane does: a pane that owns nothing RETIRES any record under
+	// its id at its fresh spawn (see retireSessionRecord's call site). Without
+	// that, a fresh child dying before its SessionStart hook fires would leave
+	// the next restart reading a record the pane never wrote, because the failed
+	// spawn still moved ptyGen.
 	//
 	// The fallback is unchanged and still the safe one: a pane with no recorded
 	// session expands to the plugin's own ResumeArgs, which codex.toml
 	// deliberately leaves empty, so it starts fresh rather than guessing with
 	// `resume --last`.
-	if !restoring && ranBefore && p.Persistence.Strategy == "session_scrape" {
+	if !restoring && ownsRecord && p.Persistence.Strategy == "session_scrape" {
 		args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
 	}
 
@@ -5249,45 +5253,57 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 	}
 
-	// ranBefore separates a RESTART from a CREATE, both of which reach here with
-	// restoring=false. Read under PluginMu for the same reason resumeID is:
-	// every other access to the pane's spawn state is lock-guarded, and the PTY
-	// output goroutine writes ptyGen.
+	// ownsRecord answers the only question the session_scrape paths care about:
+	// can a hook record under this pane's id have been written by anything but
+	// this pane? Read under PluginMu for the same reason resumeID is — every
+	// other access to the pane's spawn state is lock-guarded, and both fields
+	// have concurrent writers.
 	//
-	// ptyGen counts PTY installs on THIS pane object and is incremented below,
-	// after the args are built — so zero here means no child of this pane has
-	// ever run, which is exactly what makes a hook record under its id somebody
-	// else's. See the session_scrape branch in resolveSpawnArgs.
+	// TWO signals, because neither is sufficient alone:
+	//
+	//   - ptyGen > 0: a child of THIS pane object has already run, so it wrote
+	//     whatever is under the id. Incremented below, after the args are built,
+	//     so the value here describes previous spawns only.
+	//   - !freshID: the id came off a snapshot rather than being minted here, so
+	//     the record was written by this same pane in an earlier daemon.
+	//
+	// ptyGen alone was wrong, and the failure is data loss rather than a missed
+	// resume: a RESTORED pane whose lazy spawn was refused (`spawnRestoredPane`
+	// returns early on a missing worktree, and `ensurePaneSpawned` clears
+	// Pending anyway) sits at ptyGen 0 holding a record that is entirely its
+	// own. Alt+R once the directory is back then arrives with restoring=false
+	// and ptyGen 0 — so the retire below would DELETE the conversation the pane
+	// was still carrying, and the resume would be skipped on top of it.
 	pane.PluginMu.Lock()
-	ranBefore := pane.ptyGen > 0
+	ownsRecord := pane.ptyGen > 0 || !pane.freshID
 	pane.PluginMu.Unlock()
 
-	// A session_scrape pane starting FRESH retires any record left under its id
-	// before its child can write one, which is what makes ranBefore a statement
-	// about OWNERSHIP rather than only about order.
+	// A session_scrape pane that owns NOTHING retires any record left under its
+	// id before its child can write one, which is what turns ownsRecord from a
+	// claim about order into one about ownership.
 	//
 	// Without it the gate is merely narrow: a fresh spawn correctly ignores a
 	// leftover record, but it also increments ptyGen — so if that child dies
 	// before its SessionStart hook fires (a crash, a missing binary, a login
-	// prompt the user closes), the NEXT restart sees ranBefore and reads a
+	// prompt the user closes), the NEXT restart would see ptyGen > 0 and read a
 	// record the pane never wrote. Retiring it here removes the file that path
 	// depends on, and the restore path benefits identically: a snapshot restored
 	// under a recycled id can no longer find a stranger's session either.
 	//
-	// Fresh-spawn only. A RESTORE (restoring) and a RESTART (ranBefore) both
-	// reach a pane whose record is its own, and deleting there would throw away
-	// the conversation this whole branch exists to keep.
+	// Never on a RESTORE, a RESTART, or a restored pane retrying its first
+	// spawn — all three reach a pane whose record is its own, and deleting there
+	// would throw away the conversation this whole branch exists to keep.
 	//
 	// Best-effort: a record that cannot be removed is logged and the spawn
 	// proceeds. Refusing to start a pane because a stale file is read-only would
 	// trade a narrow wrong-session risk for a certain no-pane-at-all.
-	if !restoring && !ranBefore && p.Persistence.Strategy == "session_scrape" {
+	if !restoring && !ownsRecord && p.Persistence.Strategy == "session_scrape" {
 		if err := retireSessionRecord(p, pane.ID); err != nil {
 			log.Printf("warning: pane %s: could not retire a stale %s session record: %v", pane.ID, p.Name, err)
 		}
 	}
 
-	args := resolveSpawnArgs(p, pane, restoring, ranBefore, resumeID, d.claimResumeSession)
+	args := resolveSpawnArgs(p, pane, restoring, ownsRecord, resumeID, d.claimResumeSession)
 
 	// Shell integration (only for terminal-type panes)
 	if p.Command.ShellIntegration {

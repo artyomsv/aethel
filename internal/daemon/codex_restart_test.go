@@ -295,7 +295,10 @@ func TestSpawnPane_FreshCodexPaneDoesNotAdoptALeftoverRecord(t *testing.T) {
 	registerCodexPlugin(t, d)
 
 	fake := &fakeSession{}
-	pane := &Pane{ID: "pane-c0dec0de", Type: "codex", CWD: t.TempDir()}
+	// freshID: this models a pane whose id was MINTED here. The restore path's
+	// literal leaves it false, which is a different pane with different rights
+	// over the record under its id — see the restored-pane test below.
+	pane := &Pane{ID: "pane-c0dec0de", Type: "codex", CWD: t.TempDir(), freshID: true}
 	if err := d.spawnPane(pane, fake, false); err != nil {
 		t.Fatalf("spawnPane: %v", err)
 	}
@@ -356,7 +359,10 @@ func TestSpawnPane_FreshPaneRetiresAStaleRecordSoALaterRestartCannotFindIt(t *te
 	d := newTestDaemon(t)
 	registerCodexPlugin(t, d)
 
-	pane := &Pane{ID: "pane-c0dec0de", Type: "codex", CWD: t.TempDir()}
+	// freshID: this models a pane whose id was MINTED here. The restore path's
+	// literal leaves it false, which is a different pane with different rights
+	// over the record under its id — see the restored-pane test below.
+	pane := &Pane{ID: "pane-c0dec0de", Type: "codex", CWD: t.TempDir(), freshID: true}
 	if err := d.spawnPane(pane, &fakeSession{}, false); err != nil {
 		t.Fatalf("fresh spawn: %v", err)
 	}
@@ -415,5 +421,129 @@ func TestSpawnPane_RestoreDoesNotRetireTheRecordItIsAboutToResume(t *testing.T) 
 	}
 	if !containsPair(fake.startArgs, "resume", restartTestSessionID) {
 		t.Errorf("restore did not resume: %q", fake.startArgs)
+	}
+}
+
+// TestSpawnPane_RestoredPaneRetryingItsFirstSpawnKeepsItsRecord is the
+// regression test for the review finding that ptyGen alone is the wrong signal.
+//
+// A restored codex pane whose worktree is temporarily gone never spawns:
+// spawnRestoredPane returns early on refuseMissingWorktree, and
+// ensurePaneSpawned clears Pending anyway. That leaves a pane with ptyGen 0
+// holding a session record that is entirely its own — the id came off the
+// snapshot, so the record was written by this same pane in an earlier daemon.
+//
+// Alt+R once the directory is back arrives with restoring=false and ptyGen 0.
+// Under a ptyGen-only gate that read as "brand new": the resume was skipped AND
+// the retire deleted the record, so the conversation was destroyed rather than
+// merely not reopened. freshID is what tells the two apart — a restored pane's
+// id was never minted here.
+func TestSpawnPane_RestoredPaneRetryingItsFirstSpawnKeepsItsRecord(t *testing.T) {
+	origExe, origRead, origRemove := quildExeFn, readCodexSessionFn, removeCodexSessionFn
+	quildExeFn = func() (string, error) { return "/opt/quil/quild", nil }
+
+	store := map[string]string{"pane-c0dec0de": restartTestSessionID}
+	readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
+		id, ok := store[paneID]
+		if !ok {
+			return codexhook.SessionRecord{}, os.ErrNotExist
+		}
+		return codexhook.SessionRecord{ID: id}, nil
+	}
+	removeCodexSessionFn = func(paneID string) error {
+		delete(store, paneID)
+		return nil
+	}
+	t.Cleanup(func() {
+		quildExeFn, readCodexSessionFn, removeCodexSessionFn = origExe, origRead, origRemove
+	})
+
+	d := newTestDaemon(t)
+	registerCodexPlugin(t, d)
+
+	// A pane as restoreWorkspace builds one: the id comes from the snapshot, so
+	// freshID is false. ptyGen is 0 because its lazy spawn was refused.
+	pane := &Pane{ID: "pane-c0dec0de", Type: "codex", CWD: t.TempDir()}
+
+	fake := &fakeSession{}
+	if err := d.spawnPane(pane, fake, false); err != nil {
+		t.Fatalf("retry spawn: %v", err)
+	}
+	if _, still := store["pane-c0dec0de"]; !still {
+		t.Error("a restored pane retrying its first spawn had its own session record DELETED")
+	}
+	if !containsPair(fake.startArgs, "resume", restartTestSessionID) {
+		t.Errorf("a restored pane retrying its first spawn must resume its own session, got %q", fake.startArgs)
+	}
+}
+
+// The control for the test above, and the reason freshID cannot simply be
+// assumed: a pane whose id was MINTED here, with a record under it, must still
+// ignore and retire that record. Without this a "always treat ptyGen 0 as
+// owning" fix would pass the restored-pane test and reopen the original P1.
+func TestSpawnPane_MintedPaneStillRetiresALeftoverRecord(t *testing.T) {
+	origExe, origRead, origRemove := quildExeFn, readCodexSessionFn, removeCodexSessionFn
+	quildExeFn = func() (string, error) { return "/opt/quil/quild", nil }
+
+	d := newTestDaemon(t)
+	registerCodexPlugin(t, d)
+
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	pane.Type = "codex"
+
+	store := map[string]string{pane.ID: restartTestSessionID}
+	readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
+		id, ok := store[paneID]
+		if !ok {
+			return codexhook.SessionRecord{}, os.ErrNotExist
+		}
+		return codexhook.SessionRecord{ID: id}, nil
+	}
+	removeCodexSessionFn = func(paneID string) error {
+		delete(store, paneID)
+		return nil
+	}
+	t.Cleanup(func() {
+		quildExeFn, readCodexSessionFn, removeCodexSessionFn = origExe, origRead, origRemove
+	})
+
+	fake := &fakeSession{}
+	if err := d.spawnPane(pane, fake, false); err != nil {
+		t.Fatalf("fresh spawn: %v", err)
+	}
+	if containsPair(fake.startArgs, "resume", restartTestSessionID) {
+		t.Errorf("a minted pane resumed a record it did not write: %q", fake.startArgs)
+	}
+	if _, still := store[pane.ID]; still {
+		t.Error("a minted pane left a stranger's record in place for a later restart to read")
+	}
+}
+
+// CreatePane and NewPane are the only two sites that invent a pane id, and
+// freshID has to be set at BOTH — NewPane feeds ReplacePane, which is one of
+// the eight restoring=false spawn paths. A pane built by the restore path must
+// NOT be marked fresh, which is the half that carries the data-loss risk.
+func TestPaneFreshID_SetByBothMintersAndNotByTheRestoreLiteral(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+
+	created, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	if !created.freshID {
+		t.Error("CreatePane must mark the pane fresh — its id has just been invented")
+	}
+	if replacement := d.session.NewPane(t.TempDir()); !replacement.freshID {
+		t.Error("NewPane must mark the pane fresh — ReplacePane is a restoring=false spawn path")
+	}
+	// The restore path builds its Pane literal directly; this is the shape it
+	// produces, and it must never look minted.
+	if restored := (&Pane{ID: "pane-fromdisk"}); restored.freshID {
+		t.Error("a pane built from a snapshot must not be marked fresh")
 	}
 }
