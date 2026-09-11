@@ -5290,8 +5290,17 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// model edited in F1 applies on the pane's next restart. An unloadable
 		// config keeps the agent's default rather than refusing the pane: the
 		// flow itself already refused to START on that config.
+		//
+		// The configured AGENT must match this pane's own type before its
+		// model is applied. A role's agent can be changed after its panes
+		// exist, and those panes keep their original Type — so keying on the
+		// role name alone handed a live claude pane `--model gpt-5-codex` the
+		// moment the analyst role was switched to codex, and every restart of
+		// that pane then failed on a model its agent has never heard of.
 		if cfg, cfgErr := d.flowsConfig(); cfgErr == nil {
-			args = flowModelArgs(typ, cfg.Roles[flow.Role(flowRole)].Model, args)
+			if role := cfg.Roles[flow.Role(flowRole)]; role.Agent == typ {
+				args = flowModelArgs(typ, role.Model, args)
+			}
 		}
 		if typ == "codex" {
 			codexServers, err = flowCodexServersFn(cmd, pane.CWD, args, envVars)

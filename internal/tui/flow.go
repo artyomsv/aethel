@@ -232,7 +232,7 @@ func (m Model) openNewFlow() (tea.Model, tea.Cmd) {
 	// project root: the daemon holds the disk the flow will run on.
 	var scan tea.Cmd
 	if m.client != nil && f.cwd != "" {
-		scan = m.requestGitRepos(f.cwd, "", repoScanFlow, "")
+		scan = m.requestGitRepos(f.dest, f.cwd, "", repoScanFlow, "")
 	}
 	return m, tea.Batch(tea.ClearScreen, scan)
 }
@@ -246,6 +246,99 @@ func (m *Model) applyGitReposFlow(repos []string) tea.Cmd {
 	}
 	m.flowUI.repos = repos
 	return nil
+}
+
+// flowTextTarget names the single-line field the flow dialog is focused on:
+// "branch", "repo", "model" (with its role), or "" for the multi-line editor
+// and every row that takes no text. It is the ONE answer to "where does typed
+// or pasted text go", so the key handler and the paste handler cannot disagree
+// about it — they did, and a paste that found no field fell through to the
+// pane behind the dialog and typed the clipboard into a live shell.
+func (m Model) flowTextTarget() (kind string, role flow.Role) {
+	f := m.flowUI
+	if m.dialog == dialogNewFlow {
+		switch f.row {
+		case 1:
+			return "branch", ""
+		case 2:
+			return "repo", ""
+		}
+		return "", ""
+	}
+	if m.dialog == dialogFlowSettings && f.editor == nil {
+		rows := m.flowSettingRows()
+		if f.row >= 0 && f.row < len(rows) && rows[f.row].kind == "model" {
+			return "model", rows[f.row].role
+		}
+	}
+	return "", ""
+}
+
+// flowInsertText appends text to the focused single-line field, reporting
+// whether a field took it. Control bytes and newlines are dropped and a space
+// is kept, because a repository path may hold one (`C:/Program Files/repo`) —
+// the old single-rune key check spelled a space as "space" and silently
+// dropped it. A model id may not, so spaces are dropped on that row alone
+// rather than saved into a value the charset check would refuse later.
+func (m *Model) flowInsertText(text string) bool {
+	kind, role := m.flowTextTarget()
+	text = sanitizeDialogInput(text)
+	switch kind {
+	case "branch":
+		m.flowUI.branch += text
+	case "repo":
+		m.flowUI.cwd += text
+	case "model":
+		r := m.flowUI.cfg.Roles[role]
+		r.Model += strings.ReplaceAll(text, " ", "")
+		m.flowUI.cfg.Roles[role] = r
+	default:
+		return false
+	}
+	return true
+}
+
+// flowBackspace drops the last rune of the focused single-line field.
+func (m *Model) flowBackspace() bool {
+	kind, role := m.flowTextTarget()
+	cut := func(s string) string {
+		if r := []rune(s); len(r) > 0 {
+			return string(r[:len(r)-1])
+		}
+		return s
+	}
+	switch kind {
+	case "branch":
+		m.flowUI.branch = cut(m.flowUI.branch)
+	case "repo":
+		m.flowUI.cwd = cut(m.flowUI.cwd)
+	case "model":
+		r := m.flowUI.cfg.Roles[role]
+		r.Model = cut(r.Model)
+		m.flowUI.cfg.Roles[role] = r
+	default:
+		return false
+	}
+	return true
+}
+
+// flowPaste routes clipboard text to the flow dialog's own input, reporting
+// whether the dialog consumed it. The multi-line editor takes it when it is
+// focused; otherwise the focused single-line field does. A flow dialog with
+// neither still returns true: swallowing a paste on a list row is right, and
+// falling through would send the clipboard to the pane behind the dialog.
+func (m *Model) flowPaste(text string) bool {
+	if m.dialog != dialogNewFlow && m.dialog != dialogFlowSettings {
+		return false
+	}
+	if kind, _ := m.flowTextTarget(); kind != "" {
+		m.flowInsertText(text)
+		return true
+	}
+	if m.flowUI.editor != nil {
+		m.flowUI.editor.InsertMultiLine(strings.ReplaceAll(text, "\r", ""))
+	}
+	return true
 }
 
 // flowCycleRepo moves the repository row through the discovered list. A typed
@@ -471,17 +564,13 @@ func (m Model) handleFlowDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if f.row == 1 || f.row == 2 {
-			field := &f.branch
-			if f.row == 2 {
-				field = &f.cwd
-			}
 			if key == "backspace" {
-				r := []rune(*field)
-				if len(r) > 0 {
-					*field = string(r[:len(r)-1])
-				}
-			} else if len([]rune(key)) == 1 {
-				*field += key
+				m.flowBackspace()
+			} else {
+				// msg.Text, never msg.String(): the latter spells a space as
+				// "space", so a single-rune test dropped it and no path with a
+				// space in it could be typed.
+				m.flowInsertText(msg.Text)
 			}
 			return m, nil
 		}
@@ -514,20 +603,15 @@ func (m Model) handleFlowDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// The model row is typed, not cycled: Quil does not know which ids an
 	// agent accepts, so there is nothing to cycle through. Letters go into
 	// the id here, so the j/k navigation aliases apply on every other row.
+	// Ctrl+S and Esc are answered ABOVE this branch, so the row still saves
+	// and still closes; only text keys are claimed here.
 	onModel := rows[f.row].kind == "model"
 	if onModel && key != "up" && key != "down" {
-		row := rows[f.row]
-		r := f.cfg.Roles[row.role]
 		if key == "backspace" {
-			if runes := []rune(r.Model); len(runes) > 0 {
-				r.Model = string(runes[:len(runes)-1])
-			}
-		} else if len([]rune(key)) == 1 && key != " " {
-			r.Model += key
+			m.flowBackspace()
 		} else {
-			return m, nil
+			m.flowInsertText(msg.Text)
 		}
-		f.cfg.Roles[row.role] = r
 		return m, nil
 	}
 	if key == "up" || (key == "k" && !onModel) {
@@ -565,7 +649,10 @@ func (m Model) handleFlowDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if len(names) > 0 {
 			idx = (idx + delta + len(names)) % len(names)
-			r.Agent, r.Toggles = names[idx], nil
+			// The model goes with the toggles: an id belongs to ONE agent, and
+			// carrying `sonnet` onto codex produces a configuration the charset
+			// check accepts and the agent rejects at spawn.
+			r.Agent, r.Toggles, r.Model = names[idx], nil, ""
 			for _, p := range f.plugins {
 				if p.Name == r.Agent {
 					for _, toggle := range p.Toggles {

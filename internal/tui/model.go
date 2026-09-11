@@ -2157,6 +2157,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text := strings.ReplaceAll(msg.Content, "\r", "")
 			m.notesEditor.HandlePaste(text)
 			return m, nil
+		} else if m.flowPaste(msg.Content) {
+			// Same isolation rule as the palette below, and the flow dialog had
+			// neither half of it: with New flow open a bracketed paste reached
+			// sendClipboardToPane, so the clipboard was typed into whatever
+			// pane sat behind the dialog — a live shell would run a pasted line
+			// ending in a newline.
+			return m, nil
 		} else if m.dialog == dialogCommandPalette {
 			// Fold pasted text into the fuzzy query, keeping only printable runes
 			// (same guard as typed input — drops newlines, tabs, control bytes).
@@ -2198,8 +2205,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case editorPasteMsg:
-		if (m.dialog == dialogNewFlow || m.dialog == dialogFlowSettings) && m.flowUI.editor != nil {
-			m.flowUI.editor.InsertMultiLine(strings.ReplaceAll(string(msg), "\r", ""))
+		// Routed by FOCUS, not by "an editor exists": a New flow dialog always
+		// holds a feature editor, so an unconditional editor branch put a paste
+		// meant for the branch or repository row into the feature text instead.
+		if m.flowPaste(string(msg)) {
+			return m, nil
 		} else if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
 			text := strings.ReplaceAll(string(msg), "\r", "")
 			m.migrationLeft.InsertMultiLine(text)

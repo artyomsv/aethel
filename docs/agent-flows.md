@@ -4,7 +4,9 @@ Open the command palette and choose **New flow**. Enter the feature request,
 press Tab to edit the suggested `feat/<slug>` branch, press Tab again to pick
 the **repository**, and press Ctrl+S to start. The repository row starts at the
 active project's root; ←/→ cycle through the git repositories the daemon
-found near it, or type any path. A path that does not exist is refused before
+found near it, or type any path, spaces included. The discovery is asked of
+the destination the dialog pinned when it opened, so switching projects while
+it is in flight cannot answer with another host's repositories. A path that does not exist is refused before
 anything is created, because a flow in the wrong repository is a branch and a
 PR in the wrong place. Quil then creates a worktree tab in the active project
 with analyst, developer, and reviewer panes, laid out analyst on the left and
@@ -43,7 +45,10 @@ charset only, so an id the agent does not know fails in that pane. Ctrl+S saves 
 prompt back to the settings page, and Ctrl+S there saves the file atomically
 and reloads the daemon.
 Unknown `{{placeholders}}` are retained and flagged in the prompt editor.
-Prompts cannot be empty. Changing an agent seeds its plugin's default-on toggles.
+Prompts cannot be empty. Changing an agent seeds its plugin's default-on toggles
+and clears the model, because an id belongs to one agent. An existing role pane
+keeps its own agent, so a model is passed to it only while the configured agent
+still matches that pane's type.
 If a permission mode still needs selecting, focus moves to that group and a
 hint asks you to choose before saving.
 

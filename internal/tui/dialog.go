@@ -3773,7 +3773,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 			// be any candidates isn't known until the answer lands, so the
 			// recent-locations/browser fallback that used to run right below
 			// this branch now runs in applyGitReposPickList instead.
-			browseCmd = m.requestGitRepos(base, "", repoScanPickList, "")
+			browseCmd = m.requestGitRepos(m.createPaneDialogDest(), base, "", repoScanPickList, "")
 		} else {
 			browseCmd = m.fallbackToRecentOrBrowser()
 		}
