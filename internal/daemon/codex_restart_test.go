@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
@@ -311,5 +312,108 @@ func TestSpawnPane_FreshCodexPaneDoesNotAdoptALeftoverRecord(t *testing.T) {
 	}
 	if !containsPair(second.startArgs, "resume", restartTestSessionID) {
 		t.Errorf("the second spawn of the same pane is a restart and must resume: %q", second.startArgs)
+	}
+}
+
+// TestSpawnPane_FreshPaneRetiresAStaleRecordSoALaterRestartCannotFindIt closes
+// the gap ranBefore alone leaves open.
+//
+// ranBefore says a child of this pane has RUN, which is not the same as saying
+// this pane OWNS the record under its id. The difference is reachable: a fresh
+// spawn correctly ignores a leftover record but still increments ptyGen, so a
+// child that dies before its SessionStart hook fires (a crash, a missing
+// binary, a login prompt the user closes) leaves the next restart looking at a
+// record the pane never wrote — a destroyed pane's conversation, opened in
+// somebody else's tab.
+//
+// The fresh spawn therefore DELETES the record first, which makes the invariant
+// true rather than merely unlikely: after it, any record under this id was
+// written by this pane's own child. Safe by the uniqueness that creates the
+// hazard — ids are unique among LIVE panes, so a record under a pane that has
+// never run can only belong to one that no longer exists.
+func TestSpawnPane_FreshPaneRetiresAStaleRecordSoALaterRestartCannotFindIt(t *testing.T) {
+	origExe, origRead, origRemove := quildExeFn, readCodexSessionFn, removeCodexSessionFn
+	quildExeFn = func() (string, error) { return "/opt/quil/quild", nil }
+
+	// A leftover record from a destroyed pane that once held this id. The fake
+	// store is what lets the test assert the DELETE rather than trust it.
+	store := map[string]string{"pane-c0dec0de": restartTestSessionID}
+	readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
+		id, ok := store[paneID]
+		if !ok {
+			return codexhook.SessionRecord{}, os.ErrNotExist
+		}
+		return codexhook.SessionRecord{ID: id}, nil
+	}
+	removeCodexSessionFn = func(paneID string) error {
+		delete(store, paneID)
+		return nil
+	}
+	t.Cleanup(func() {
+		quildExeFn, readCodexSessionFn, removeCodexSessionFn = origExe, origRead, origRemove
+	})
+
+	d := newTestDaemon(t)
+	registerCodexPlugin(t, d)
+
+	pane := &Pane{ID: "pane-c0dec0de", Type: "codex", CWD: t.TempDir()}
+	if err := d.spawnPane(pane, &fakeSession{}, false); err != nil {
+		t.Fatalf("fresh spawn: %v", err)
+	}
+	if _, still := store["pane-c0dec0de"]; still {
+		t.Fatal("the fresh spawn left the stale record in place — a later restart will read it")
+	}
+
+	// The child died without writing its own record. ranBefore is now true, so
+	// the OLD gate would resume here; with the record retired there is nothing
+	// to resume and the pane correctly starts clean.
+	restarted := &fakeSession{}
+	if err := d.spawnPane(pane, restarted, false); err != nil {
+		t.Fatalf("restart spawn: %v", err)
+	}
+	if containsPair(restarted.startArgs, "resume", restartTestSessionID) {
+		t.Errorf("restart resumed a record this pane never wrote: %q", restarted.startArgs)
+	}
+}
+
+// The control: a fresh spawn must NOT delete a record on the restore path, and
+// must not delete the one its own child goes on to write.
+//
+// Deleting on restore would throw away exactly the conversation this feature
+// exists to keep — a restored pane's record IS its own, since the id comes from
+// the snapshot rather than being newly minted.
+func TestSpawnPane_RestoreDoesNotRetireTheRecordItIsAboutToResume(t *testing.T) {
+	origExe, origRead, origRemove := quildExeFn, readCodexSessionFn, removeCodexSessionFn
+	quildExeFn = func() (string, error) { return "/opt/quil/quild", nil }
+
+	store := map[string]string{"pane-c0dec0de": restartTestSessionID}
+	readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
+		id, ok := store[paneID]
+		if !ok {
+			return codexhook.SessionRecord{}, os.ErrNotExist
+		}
+		return codexhook.SessionRecord{ID: id}, nil
+	}
+	removeCodexSessionFn = func(paneID string) error {
+		delete(store, paneID)
+		return nil
+	}
+	t.Cleanup(func() {
+		quildExeFn, readCodexSessionFn, removeCodexSessionFn = origExe, origRead, origRemove
+	})
+
+	d := newTestDaemon(t)
+	registerCodexPlugin(t, d)
+
+	fake := &fakeSession{}
+	pane := &Pane{ID: "pane-c0dec0de", Type: "codex", CWD: t.TempDir()}
+	if err := d.spawnPane(pane, fake, true); err != nil {
+		t.Fatalf("restore spawn: %v", err)
+	}
+	if _, still := store["pane-c0dec0de"]; !still {
+		t.Error("the restore path deleted the record it was restoring from")
+	}
+	if !containsPair(fake.startArgs, "resume", restartTestSessionID) {
+		t.Errorf("restore did not resume: %q", fake.startArgs)
 	}
 }

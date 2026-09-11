@@ -4358,6 +4358,35 @@ var readOpencodeSessionIDFn = func(paneID string) (string, error) {
 	return id, err
 }
 
+// removeCodexSessionFn / removeOpencodeSessionFn retire a pane's hook record.
+// Package vars for the same reason the readers are: tests must not touch
+// $QUIL_HOME/sessions/, and here the call DELETES.
+var removeCodexSessionFn = func(paneID string) error {
+	return codexhook.RemovePersistedSession(config.QuilDir(), paneID)
+}
+
+var removeOpencodeSessionFn = func(paneID string) error {
+	return opencodehook.RemovePersistedSession(config.QuilDir(), paneID)
+}
+
+// retireSessionRecord deletes the hook record for a session_scrape plugin's
+// pane, dispatching by plugin name the way resumeTemplateFor does.
+//
+// An unrecognised plugin is a no-op rather than an error: a third-party TOML may
+// declare strategy = "session_scrape" with no hook package behind it, and there
+// is nothing of ours to delete for it. Its resume template is whatever its own
+// ResumeArgs say, which no record of ours feeds.
+func retireSessionRecord(p *plugin.PanePlugin, paneID string) error {
+	switch p.Name {
+	case plugin.CodexPluginName:
+		return removeCodexSessionFn(paneID)
+	case "opencode":
+		return removeOpencodeSessionFn(paneID)
+	default:
+		return nil
+	}
+}
+
 // readCodexSessionFn mirrors readOpencodeSessionIDFn for the codex pane type.
 // Tests override it so the spawn-args matrix never touches $QUIL_HOME/sessions/.
 var readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
@@ -5028,11 +5057,14 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ranBefore boo
 	// this pane has already run and the record under its id was written by that
 	// child rather than by whoever held the id before.
 	//
-	// Residual, shared with the claude path and deliberately not closed here: a
-	// recycled id whose new child dies before its SessionStart hook fires leaves
-	// the stranger's file in place for a later restart to read. Closing it means
-	// deleting records on the create path, which is a separate change with its
-	// own blast radius.
+	// ranBefore alone would still leave a gap, and spawnPane closes it rather
+	// than this branch narrowing further: a fresh spawn ignores a leftover
+	// record but still increments ptyGen, so a child that dies before its
+	// SessionStart hook fires would leave the NEXT restart reading a record the
+	// pane never wrote. The fresh spawn therefore RETIRES any record under the
+	// pane's id (see retireSessionRecord's call site), which turns ranBefore
+	// from a statement about order into one about ownership: after it, a record
+	// under this id was written by this pane's own child.
 	//
 	// The fallback is unchanged and still the safe one: a pane with no recorded
 	// session expands to the plugin's own ResumeArgs, which codex.toml
@@ -5229,6 +5261,31 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	pane.PluginMu.Lock()
 	ranBefore := pane.ptyGen > 0
 	pane.PluginMu.Unlock()
+
+	// A session_scrape pane starting FRESH retires any record left under its id
+	// before its child can write one, which is what makes ranBefore a statement
+	// about OWNERSHIP rather than only about order.
+	//
+	// Without it the gate is merely narrow: a fresh spawn correctly ignores a
+	// leftover record, but it also increments ptyGen — so if that child dies
+	// before its SessionStart hook fires (a crash, a missing binary, a login
+	// prompt the user closes), the NEXT restart sees ranBefore and reads a
+	// record the pane never wrote. Retiring it here removes the file that path
+	// depends on, and the restore path benefits identically: a snapshot restored
+	// under a recycled id can no longer find a stranger's session either.
+	//
+	// Fresh-spawn only. A RESTORE (restoring) and a RESTART (ranBefore) both
+	// reach a pane whose record is its own, and deleting there would throw away
+	// the conversation this whole branch exists to keep.
+	//
+	// Best-effort: a record that cannot be removed is logged and the spawn
+	// proceeds. Refusing to start a pane because a stale file is read-only would
+	// trade a narrow wrong-session risk for a certain no-pane-at-all.
+	if !restoring && !ranBefore && p.Persistence.Strategy == "session_scrape" {
+		if err := retireSessionRecord(p, pane.ID); err != nil {
+			log.Printf("warning: pane %s: could not retire a stale %s session record: %v", pane.ID, p.Name, err)
+		}
+	}
 
 	args := resolveSpawnArgs(p, pane, restoring, ranBefore, resumeID, d.claimResumeSession)
 
