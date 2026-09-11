@@ -4358,6 +4358,35 @@ var readOpencodeSessionIDFn = func(paneID string) (string, error) {
 	return id, err
 }
 
+// removeCodexSessionFn / removeOpencodeSessionFn retire a pane's hook record.
+// Package vars for the same reason the readers are: tests must not touch
+// $QUIL_HOME/sessions/, and here the call DELETES.
+var removeCodexSessionFn = func(paneID string) error {
+	return codexhook.RemovePersistedSession(config.QuilDir(), paneID)
+}
+
+var removeOpencodeSessionFn = func(paneID string) error {
+	return opencodehook.RemovePersistedSession(config.QuilDir(), paneID)
+}
+
+// retireSessionRecord deletes the hook record for a session_scrape plugin's
+// pane, dispatching by plugin name the way resumeTemplateFor does.
+//
+// An unrecognised plugin is a no-op rather than an error: a third-party TOML may
+// declare strategy = "session_scrape" with no hook package behind it, and there
+// is nothing of ours to delete for it. Its resume template is whatever its own
+// ResumeArgs say, which no record of ours feeds.
+func retireSessionRecord(p *plugin.PanePlugin, paneID string) error {
+	switch p.Name {
+	case plugin.CodexPluginName:
+		return removeCodexSessionFn(paneID)
+	case "opencode":
+		return removeOpencodeSessionFn(paneID)
+	default:
+		return nil
+	}
+}
+
 // readCodexSessionFn mirrors readOpencodeSessionIDFn for the codex pane type.
 // Tests override it so the spawn-args matrix never touches $QUIL_HOME/sessions/.
 var readCodexSessionFn = func(paneID string) (codexhook.SessionRecord, error) {
@@ -4909,6 +4938,37 @@ func templateHasPlaceholder(template []string) bool {
 	return false
 }
 
+// appendResumeTemplate expands one resume template against the pane's plugin
+// state and appends it to args.
+//
+// Static templates (no {placeholder}) pass through directly, so a
+// session_scrape pane that never received a hook event still gets its
+// configured fallback. Templates with placeholders require PluginState, and an
+// unresolved one appends NOTHING rather than a literal "{session_id}" —
+// ExpandResumeArgs returns nil when state is missing or any placeholder is
+// unresolved, and passing the raw token to argv would have the agent look for a
+// session by that name.
+//
+// Extracted so the restore branch and the restart branch cannot drift: the two
+// differ in WHEN they resume, never in how a template becomes argv, and the
+// restart branch was added by making that sameness structural rather than
+// copying twenty lines.
+func appendResumeTemplate(args, template []string, pane *Pane) []string {
+	if len(template) == 0 {
+		return args
+	}
+	if !templateHasPlaceholder(template) {
+		return append(args, template...)
+	}
+	if len(pane.PluginState) == 0 {
+		return args
+	}
+	if resumeArgs := plugin.ExpandResumeArgs(template, pane.PluginState); resumeArgs != nil {
+		return append(args, resumeArgs...)
+	}
+	return args
+}
+
 // resolveSpawnArgs computes the argv (excluding cmd) that spawnPane should use
 // for the given pane and plugin, applying base args, the InstanceArgs override,
 // preassign_id start args, and the restore-branch resume-args append. It is a
@@ -4927,7 +4987,12 @@ func templateHasPlaceholder(template []string) bool {
 // one another pane already holds. It is never nil: callers with no occupancy
 // information pass claimAny, so a forgotten wiring fails in a test rather than
 // silently dropping the guard in production.
-func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID string, claim sessionClaimFn) []string {
+// ownsRecord reports whether a hook record under this pane's id can only have
+// been written by this pane — `ptyGen > 0 || !freshID`, captured by the caller
+// under PluginMu. It is what separates a RESTART (and a restored pane retrying
+// its first spawn) from a CREATE, all of which arrive with restoring=false, and
+// the session_scrape branch below is gated on it.
+func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring, ownsRecord bool, resumeID string, claim sessionClaimFn) []string {
 	args := append([]string{}, p.Command.Args...)
 
 	// Instance-specific args override base args.
@@ -4956,6 +5021,63 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID
 		}
 	}
 
+	// RESTART under session_scrape (Alt+R, and the MCP restart_pane tool):
+	// reattach to the session this pane's own hook recorded, exactly as the
+	// preassign_id branch above reattaches claude.
+	//
+	// Restart reaches spawnPane with restoring=false, and only preassign_id was
+	// handled there — so restarting a codex or opencode pane started a BRAND NEW
+	// conversation and abandoned the running one, with no warning and nothing to
+	// undo it. The record was on disk the whole time
+	// ($QUIL_HOME/sessions/codex-<paneID>.id): the restore path reads it and the
+	// restart path simply never asked. Observed 2026-09-11 — two codex panes
+	// restarted a minute apart, both spawned with no `resume` argument while
+	// their id files sat beside the panes that had just written them.
+	//
+	// Alt+R means "give this pane a working process", not "throw away my work".
+	// It is what the error screen itself advertises, and what a user reaches for
+	// when a child wedges — the moment a conversation is worth the MOST, not the
+	// least.
+	//
+	// GATED ON ownsRecord, and the gate is the whole safety argument. EIGHT call
+	// sites reach spawnPane with restoring=false: pane creation, the two replace
+	// paths, the tab-bootstrap spawns, the sandbox sign-in respawn and the
+	// restart. Ungated, a BRAND-NEW pane would read a hook record under its own
+	// id — and pane ids are 32 bits, nothing ever deletes those files, so a
+	// freshly minted id can collide with a destroyed pane's leftover and the new
+	// pane would silently open a stranger's conversation. That is a worse bug
+	// than the one being fixed, in the opposite direction.
+	//
+	// preassign_id guards the same hazard with `hadSession`
+	// (PluginState["session_id"] != ""), which CANNOT be reused here:
+	// refreshPluginStateFromHooks is the only writer of that field for a
+	// session_scrape pane and it runs at SHUTDOWN, so a codex pane created and
+	// conversed with in this daemon's lifetime still has it empty — the guard
+	// would skip the resume in precisely the reported case.
+	//
+	// ownsRecord is `ptyGen > 0 || !freshID`, and BOTH halves are load-bearing.
+	// ptyGen alone missed a restored pane whose lazy spawn was refused for a
+	// missing worktree: it sits at ptyGen 0 holding a record that is entirely
+	// its own, so Alt+R after the directory comes back both skipped the resume
+	// AND retired the record — deleting the conversation rather than merely
+	// failing to reopen it. freshID answers the other half: an id read off a
+	// snapshot names the pane that wrote the record, an id minted here cannot.
+	//
+	// Ownership also has to be established rather than inferred from order,
+	// which spawnPane does: a pane that owns nothing RETIRES any record under
+	// its id at its fresh spawn (see retireSessionRecord's call site). Without
+	// that, a fresh child dying before its SessionStart hook fires would leave
+	// the next restart reading a record the pane never wrote, because the failed
+	// spawn still moved ptyGen.
+	//
+	// The fallback is unchanged and still the safe one: a pane with no recorded
+	// session expands to the plugin's own ResumeArgs, which codex.toml
+	// deliberately leaves empty, so it starts fresh rather than guessing with
+	// `resume --last`.
+	if !restoring && ownsRecord && p.Persistence.Strategy == "session_scrape" {
+		args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
+	}
+
 	// Resume branch: append ResumeArgs to whatever args already exist so
 	// InstanceArgs (e.g., "--dangerously-skip-permissions" from a setup
 	// toggle) survives daemon restart. Before this fix, args were replaced
@@ -4963,23 +5085,7 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID
 	if restoring {
 		switch p.Persistence.Strategy {
 		case "preassign_id", "session_scrape":
-			template := resumeTemplateFor(p, pane, claim)
-			if len(template) > 0 {
-				// Static templates (no {placeholder}) pass through directly so
-				// a session_scrape pane that never received a hook event still
-				// gets its --continue fallback. Templates with placeholders
-				// require PluginState; ExpandResumeArgs returns nil if state
-				// is missing or any placeholder is unresolved.
-				if templateHasPlaceholder(template) {
-					if len(pane.PluginState) > 0 {
-						if resumeArgs := plugin.ExpandResumeArgs(template, pane.PluginState); resumeArgs != nil {
-							args = append(args, resumeArgs...)
-						}
-					}
-				} else {
-					args = append(args, template...)
-				}
-			}
+			args = appendResumeTemplate(args, resumeTemplateFor(p, pane, claim), pane)
 		case "rerun":
 			// args already set from InstanceArgs above
 		case "none":
@@ -5147,7 +5253,57 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 	}
 
-	args := resolveSpawnArgs(p, pane, restoring, resumeID, d.claimResumeSession)
+	// ownsRecord answers the only question the session_scrape paths care about:
+	// can a hook record under this pane's id have been written by anything but
+	// this pane? Read under PluginMu for the same reason resumeID is — every
+	// other access to the pane's spawn state is lock-guarded, and both fields
+	// have concurrent writers.
+	//
+	// TWO signals, because neither is sufficient alone:
+	//
+	//   - ptyGen > 0: a child of THIS pane object has already run, so it wrote
+	//     whatever is under the id. Incremented below, after the args are built,
+	//     so the value here describes previous spawns only.
+	//   - !freshID: the id came off a snapshot rather than being minted here, so
+	//     the record was written by this same pane in an earlier daemon.
+	//
+	// ptyGen alone was wrong, and the failure is data loss rather than a missed
+	// resume: a RESTORED pane whose lazy spawn was refused (`spawnRestoredPane`
+	// returns early on a missing worktree, and `ensurePaneSpawned` clears
+	// Pending anyway) sits at ptyGen 0 holding a record that is entirely its
+	// own. Alt+R once the directory is back then arrives with restoring=false
+	// and ptyGen 0 — so the retire below would DELETE the conversation the pane
+	// was still carrying, and the resume would be skipped on top of it.
+	pane.PluginMu.Lock()
+	ownsRecord := pane.ptyGen > 0 || !pane.freshID
+	pane.PluginMu.Unlock()
+
+	// A session_scrape pane that owns NOTHING retires any record left under its
+	// id before its child can write one, which is what turns ownsRecord from a
+	// claim about order into one about ownership.
+	//
+	// Without it the gate is merely narrow: a fresh spawn correctly ignores a
+	// leftover record, but it also increments ptyGen — so if that child dies
+	// before its SessionStart hook fires (a crash, a missing binary, a login
+	// prompt the user closes), the NEXT restart would see ptyGen > 0 and read a
+	// record the pane never wrote. Retiring it here removes the file that path
+	// depends on, and the restore path benefits identically: a snapshot restored
+	// under a recycled id can no longer find a stranger's session either.
+	//
+	// Never on a RESTORE, a RESTART, or a restored pane retrying its first
+	// spawn — all three reach a pane whose record is its own, and deleting there
+	// would throw away the conversation this whole branch exists to keep.
+	//
+	// Best-effort: a record that cannot be removed is logged and the spawn
+	// proceeds. Refusing to start a pane because a stale file is read-only would
+	// trade a narrow wrong-session risk for a certain no-pane-at-all.
+	if !restoring && !ownsRecord && p.Persistence.Strategy == "session_scrape" {
+		if err := retireSessionRecord(p, pane.ID); err != nil {
+			log.Printf("warning: pane %s: could not retire a stale %s session record: %v", pane.ID, p.Name, err)
+		}
+	}
+
+	args := resolveSpawnArgs(p, pane, restoring, ownsRecord, resumeID, d.claimResumeSession)
 
 	// Shell integration (only for terminal-type panes)
 	if p.Command.ShellIntegration {
